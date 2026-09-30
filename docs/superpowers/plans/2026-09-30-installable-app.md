@@ -88,11 +88,11 @@ interface DesktopBridge {
 }
 ```
 
-- [ ] Add workspace/build/test configuration. Root `pnpm test` runs Vitest;
+- [x] Add workspace/build/test configuration. Root `pnpm test` runs Vitest;
   `pnpm typecheck` recursively typechecks packages that have a typecheck script.
   Use `@mdc/contracts`, ESM and source exports for tests/bundlers; do not add
   framework or cloud dependencies to this package.
-- [ ] Write behavior tests first. Examples:
+- [x] Write behavior tests first. Examples:
 
 ```ts
 expect(ContentSchema.safeParse({kind:'text',text:'é'.repeat(131073)}).success).toBe(false);
@@ -104,10 +104,10 @@ expect(isTrustedAppUrl('http://localhost:5173/', 'http://localhost:5173')).toBe(
 expect(isTrustedAppUrl('http://localhost:5173/', 'http://localhost:5173', true)).toBe(true);
 ```
 
-- [ ] Run the tests and record the expected missing-feature failure.
-- [ ] Implement the schemas/types/path/trust functions with the exact contract
+- [x] Run the tests and record the expected missing-feature failure.
+- [x] Implement the schemas/types/path/trust functions with the exact contract
   above; use Zod and `TextEncoder`, not platform-dependent string length.
-- [ ] Run `pnpm test` and `pnpm typecheck`; verify the meaningful validation and
+- [x] Run `pnpm test` and `pnpm typecheck`; verify the meaningful validation and
   trust-boundary tests pass, and commit only the task's files.
 
 ## Task 2: Authenticated backend and data access rules
