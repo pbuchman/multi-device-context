@@ -82,13 +82,14 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     "script-src 'self'",
     "style-src 'self'",
     "img-src 'self' blob: data:",
+    "media-src 'self' blob:",
     `connect-src 'self' https://${publicConfig.auth0.domain} https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com`,
   ].join("; ");
 
   app.addHook("onSend", async (_request, reply, payload) => {
     reply.header("content-security-policy", csp);
     reply.header("x-content-type-options", "nosniff");
-    reply.header("referrer-policy", "no-referrer");
+    reply.header("referrer-policy", "strict-origin-when-cross-origin");
     reply.header("x-frame-options", "DENY");
     return payload;
   });
