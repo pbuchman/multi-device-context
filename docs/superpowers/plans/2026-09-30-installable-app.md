@@ -112,6 +112,8 @@ expect(isTrustedAppUrl('http://localhost:5173/', 'http://localhost:5173', true))
 
 ## Task 2: Authenticated backend and data access rules
 
+Detailed data, API and test contract: `docs/superpowers/specs/2026-09-30-server-contract.md`.
+
 **Files:** `apps/server/src/{config,auth,firebase,server,index}.ts`, API tests,
 `infra/{firestore.rules,storage.rules,firestore.indexes.json}`, rule tests and
 Firebase emulator test configuration.

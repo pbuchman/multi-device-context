@@ -30,7 +30,8 @@ Show new items without forcing a user away from the context they are viewing.
 
 - `packages/contracts`: shared Zod schemas, types, path/identity helpers, limits.
 - `apps/server`: validated public runtime configuration, Auth0 JWT verification,
-  Firebase custom-token exchange, privileged deletion, health, static web hosting.
+  Firebase custom-token exchange, upload completion, privileged deletion, health,
+  static web hosting.
 - `apps/web`: Auth0/Firebase session, Firestore subscriptions, persistent upload
   outbox, actual contexts UI and the narrow desktop bridge client.
 - `apps/desktop`: Electron main/preload, external-browser PKCE login, encrypted
@@ -73,9 +74,10 @@ users/{uid}/contexts/{contextId}/items/{itemId}/original
 ```
 
 Context and item IDs are UUIDs generated once per user action. Contexts contain
-title, createdAt, updatedAt and an optional deletion state. Items have kind
-(`text`, `code`, or `attachment`), deviceId, deviceName, createdAt and content.
-Attachment metadata includes original name, MIME type and byte size. File bytes
+`title`, `createdAt`, `updatedAt` and `deleting`. Items contain `content`,
+`device: {id, name}`, `createdAt`, `ready` and `deleting`. Content is the shared
+text/code/attachment union. Attachment metadata includes original name, MIME
+type and byte size. File bytes
 stay in Storage, not Firestore. Deny access outside the authenticated UID; validate
 allowed fields, sizes, parent ownership and deletion state. Never expose permanent
 Firebase download-token URLs: obtain bytes through authenticated Storage requests.
@@ -95,7 +97,9 @@ Persist attachment bytes and their intended context/item IDs in a per-user local
 outbox before uploading. Retry transient errors with bounded backoff; require an
 explicit retry for rejected/unsupported items. Keep unfinished transfers across
 window close and application restart. Publish an attachment as available only
-after upload succeeds. Never reuse one user's outbox or local history for another
+after the server verifies the uploaded object's size and MIME type and marks the
+item ready. Completion is idempotent, so an upload finished just before a crash
+can be recovered without overwriting its object. Never reuse one user's outbox or local history for another
 account. Logout clears local account content and sessions; queued work requires
 clear user feedback before disposal.
 
