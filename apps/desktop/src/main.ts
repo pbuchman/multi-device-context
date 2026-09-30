@@ -369,19 +369,8 @@ function wireBridge(): void {
     return auth.getAccessToken(interactive);
   });
   handle("signOut", 0, async () => {
-    if (store.pendingShares().length) {
-      const result = await dialog.showMessageBox(window!, {
-        type: "question",
-        buttons: ["Keep sharing", "Discard and sign out"],
-        defaultId: 0,
-        cancelId: 0,
-        message: "There are clipboard shares waiting on this computer.",
-        detail:
-          "Signing out discards these local shares. Items already shared remain in your account.",
-      });
-      if (result.response !== 1)
-        throw new Error("Sign-out cancelled. Pending shares were kept.");
-    }
+    // The trusted top-level UI confirms the combined web and native pending
+    // count before invoking this method. Clear the account atomically below.
     await auth?.signOut();
     await store.clearAccount();
     await copies.clear();

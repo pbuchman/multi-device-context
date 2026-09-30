@@ -30,7 +30,12 @@ try {
     windows: BrowserWindow.getAllWindows().length,
     platform: process.platform,
     architecture: process.arch,
-    login: app.getLoginItemSettings({ args: ["--background"] }),
+    login: app.getLoginItemSettings({
+      ...(process.platform === "win32"
+        ? { path: `"${process.execPath}"` }
+        : {}),
+      args: ["--background"],
+    }),
     preferences:
       BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences(),
   }));

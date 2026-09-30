@@ -1,5 +1,22 @@
 import type { App } from "electron";
 import type { NativeStore } from "./store.js";
+export function isLaunchAtLoginEnabled(
+  app: Pick<App, "getLoginItemSettings">,
+  platform: NodeJS.Platform = process.platform,
+  executable: string = process.execPath,
+): boolean {
+  // Electron 44 parses the Windows lookup path as a command line. Quote it
+  // explicitly so spaces do not truncate it. Its registration comparison
+  // strips surrounding quotes before formatting, so both checks stay exact.
+  const settings = app.getLoginItemSettings({
+    ...(platform === "win32" ? { path: `"${executable}"` } : {}),
+    args: ["--background"],
+  });
+  return (
+    settings.openAtLogin &&
+    (platform !== "win32" || settings.executableWillLaunchAtLogin)
+  );
+}
 export function shouldStartHidden(
   platform: NodeJS.Platform,
   args: readonly string[],
@@ -27,11 +44,7 @@ export class LaunchSettings {
     });
   }
   enabled(): boolean {
-    const settings = this.app.getLoginItemSettings({ args: ["--background"] });
-    return (
-      settings.openAtLogin &&
-      (process.platform !== "win32" || settings.executableWillLaunchAtLogin)
-    );
+    return isLaunchAtLoginEnabled(this.app);
   }
   async set(enabled: boolean): Promise<void> {
     const previous = this.store.launchAtLogin();
