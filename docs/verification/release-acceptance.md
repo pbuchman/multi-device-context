@@ -44,8 +44,11 @@ mocked browser flow does not establish Windows/macOS behavior.
 Hosted run [36714566553](https://github.com/pbuchman/multi-device-context/actions/runs/36714566553)
 passed on Windows, including native text/file/image clipboard, startup toggle and
 close/reopen checks. macOS installed and passed hosted bridge, startup, text and
-binary-file checks but failed the combined screenshot/file clipboard image
-representation. That failure is being fixed and must pass native CI before release.
+binary-file checks but failed the screenshot format assertion. Chromium deliberately
+omits image formats from its macOS enumeration when file references are present.
+The Mac copy path now supplies PNG data on the same native file item, and acceptance
+uses AppKit to decode the actual pasteboard image alongside a byte-exact file check.
+That check must pass native CI before release.
 
 
 [Native run 36711350538](https://github.com/pbuchman/multi-device-context/actions/runs/36711350538)

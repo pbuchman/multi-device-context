@@ -3,6 +3,7 @@
 import { _electron as electron } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 const executablePath = process.env.MDC_NATIVE_EXECUTABLE;
 assert.ok(
   executablePath,
@@ -174,15 +175,27 @@ try {
         }),
       png,
     );
-    const imageSize = await app.evaluate(async ({ clipboard, nativeImage }) => {
-      const items = await clipboard.read();
-      const image = items.find((item) => item.types.includes("image/png"));
-      if (!image) return null;
-      const blob = await image.getType("image/png");
-      return nativeImage
-        .createFromBuffer(Buffer.from(await blob.arrayBuffer()))
-        .getSize();
-    });
+    // Chromium intentionally omits image/png from macOS format enumeration
+    // when copied files are present. Inspect the actual native pasteboard there.
+    const imageSize = process.platform === "darwin"
+      ? JSON.parse(execFileSync("swift", ["-e", String.raw`
+import AppKit
+let pasteboard = NSPasteboard.general
+ guard let data = pasteboard.data(forType: .png),
+       let bitmap = NSBitmapImageRep(data: data) else {
+   fatalError("Copied screenshot lacks a decodable native PNG representation")
+ }
+ print("{\"width\":\(bitmap.pixelsWide),\"height\":\(bitmap.pixelsHigh)}")
+`], { encoding: "utf8", timeout: 60000 }))
+      : await app.evaluate(async ({ clipboard, nativeImage }) => {
+          const items = await clipboard.read();
+          const image = items.find((item) => item.types.includes("image/png"));
+          if (!image) return null;
+          const blob = await image.getType("image/png");
+          return nativeImage
+            .createFromBuffer(Buffer.from(await blob.arrayBuffer()))
+            .getSize();
+        });
     assert.deepEqual(imageSize, { width: 2, height: 2 });
     const copiedImageFile = await window.evaluate(async () => {
       const snapshot = await window.contextDesktop.readClipboard();
