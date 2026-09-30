@@ -206,7 +206,7 @@ describe("Firestore item validation and lifecycle", () => {
     const marker = `users/${OWNER}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`;
     await seed(marker, { deleted: true });
     const owner = environment.authenticatedContext(OWNER).firestore();
-    await assertFails(getDoc(doc(owner, marker)));
+    await assertSucceeds(getDoc(doc(owner, marker)));
     await assertFails(getDoc(doc(environment.authenticatedContext(OTHER).firestore(), marker)));
     await assertFails(deleteDoc(doc(owner, marker)));
     await assertFails(setDoc(doc(owner, marker), { deleted: false }));

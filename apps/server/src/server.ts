@@ -1,3 +1,5 @@
+import type { SettingsPort } from "./settings.js";
+import { WindowLimit, Readiness } from "./limits.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -27,6 +29,7 @@ export type BuildServerOptions = {
   backend: Backend;
   webDist?: string;
   agents?: AgentPort;
+  settings?: SettingsPort;
 };
 
 function hasNoBodyFields(body: unknown): boolean {
@@ -56,27 +59,33 @@ async function authenticate(
   }
 }
 
-function permitSessionAttempt(
-  attempts: Map<string, { count: number; resetAt: number }>,
-  ip: string,
-): boolean {
-  const now = Date.now();
-  const state = attempts.get(ip);
-  if (!state || state.resetAt <= now) {
-    attempts.set(ip, { count: 1, resetAt: now + 60_000 });
-    return true;
-  }
-  state.count += 1;
-  return state.count <= 30;
-}
-
 export function buildServer(options: BuildServerOptions): FastifyInstance {
   const app = Fastify({
     logger: false,
     trustProxy: ["127.0.0.1", "::1"],
   });
   const { publicConfig, verifier, backend } = options;
-  const sessionAttempts = new Map<string, { count: number; resetAt: number }>();
+  const sessionAttempts = new WindowLimit(30);
+  const preAuth = new WindowLimit(60), global = new WindowLimit(600, 60_000, 1);
+  const owners = new WindowLimit(120);
+  const allowOwner = (request: FastifyRequest, uid: string) => {
+    const retry = owners.take(uid);
+    if (retry) { const error = new Error("Too Many Requests") as Error & { statusCode: number }; error.statusCode = 429; throw error; }
+  };
+  const authenticated = async (request: FastifyRequest, verifier: AuthVerifier) => {
+    const identity = await authenticate(request, verifier);
+    if (identity) allowOwner(request, identity.uid);
+    return identity;
+  };
+  const readiness = new Readiness(() => backend.checkReady());
+  app.addHook("onReady", () => readiness.start());
+  app.addHook("onRequest", async (request, reply) => {
+    const path = request.url.split("?", 1)[0]!;
+    if (/\.map$/i.test(path)) return reply.code(404).send({ error: "Not Found" });
+    if (!path.startsWith("/api/") || path === "/api/config") return;
+    const retry = preAuth.take(request.ip) || global.take("all");
+    if (retry) return reply.header("retry-after", retry).code(429).send({ error: "Too Many Requests" });
+  });
   const csp = [
     "default-src 'self'",
     "base-uri 'none'",
@@ -96,6 +105,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     reply.header("x-content-type-options", "nosniff");
     reply.header("referrer-policy", "strict-origin-when-cross-origin");
     reply.header("x-frame-options", "DENY");
+    if (reply.statusCode === 429 && !reply.hasHeader("retry-after")) reply.header("retry-after", 60);
     return payload;
   });
 
@@ -119,12 +129,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
   app.get("/health/live", async () => ({ status: "ok" }));
   app.get("/health/ready", async (_request, reply) => {
-    try {
-      await backend.checkReady();
-      return { status: "ok" };
-    } catch {
-      return reply.code(503).send({ status: "unavailable" });
-    }
+    reply.header("cache-control", "no-store");
+    return readiness.ok() ? { status: "ok" } : reply.code(503).send({ status: "unavailable" });
   });
   app.get("/api/config", async (_request, reply) => {
     reply.header("cache-control", "no-store");
@@ -133,10 +139,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
   app.post("/api/session", async (request, reply) => {
     reply.header("cache-control", "no-store");
-    if (!permitSessionAttempt(sessionAttempts, request.ip)) {
+    if (sessionAttempts.take(request.ip)) {
       return reply.code(429).send({ error: "Too Many Requests" });
     }
-    const identity = await authenticate(request, verifier);
+    const identity = await authenticated(request, verifier);
     if (!identity) return reply.code(401).send({ error: "Unauthorized" });
     if (!hasNoBodyFields(request.body)) return reply.code(400).send({ error: "Bad Request" });
     try {
@@ -147,10 +153,27 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     }
   });
 
+  if (options.settings) {
+    app.get("/api/settings", async (request, reply) => {
+      const identity = await authenticated(request, verifier);
+      if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+      reply.header("cache-control", "no-store");
+      return options.settings!.get(identity.uid);
+    });
+    app.patch("/api/settings", async (request, reply) => {
+      const identity = await authenticated(request, verifier);
+      if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+      const body = request.body as { aiTitlesEnabled?: unknown } | undefined;
+      if (!body || typeof body !== "object" || Object.keys(body).length !== 1 || typeof body.aiTitlesEnabled !== "boolean") return reply.code(400).send({ error: "Bad Request" });
+      reply.header("cache-control", "no-store");
+      return options.settings!.set(identity.uid, { aiTitlesEnabled: body.aiTitlesEnabled });
+    });
+  }
+
   app.post<{ Params: { contextId: string; itemId: string } }>(
     "/api/contexts/:contextId/items/:itemId/complete",
     async (request, reply) => {
-      const identity = await authenticate(request, verifier);
+      const identity = await authenticated(request, verifier);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       if (!hasNoBodyFields(request.body)) return reply.code(400).send({ error: "Bad Request" });
       const contextId = parseId(request.params.contextId);
@@ -170,7 +193,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.delete<{ Params: { contextId: string } }>(
     "/api/contexts/:contextId",
     async (request, reply) => {
-      const identity = await authenticate(request, verifier);
+      const identity = await authenticated(request, verifier);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       const contextId = parseId(request.params.contextId);
       if (!contextId) return reply.code(400).send({ error: "Bad Request" });
@@ -186,7 +209,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.delete<{ Params: { contextId: string; itemId: string } }>(
     "/api/contexts/:contextId/items/:itemId",
     async (request, reply) => {
-      const identity = await authenticate(request, verifier);
+      const identity = await authenticated(request, verifier);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       const contextId = parseId(request.params.contextId);
       const itemId = parseId(request.params.itemId);
@@ -200,7 +223,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     },
   );
 
-  if (options.agents) registerAgentRoutes(app, options.agents, verifier, backend);
+  if (options.agents) registerAgentRoutes(app, options.agents, verifier, backend, allowOwner);
 
   const webDist = options.webDist;
   const hasStaticUi = typeof webDist === "string" && existsSync(join(webDist, "index.html"));
@@ -226,7 +249,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
-    sessionAttempts.clear();
+    readiness.close();
     await backend.close();
   });
   return app;

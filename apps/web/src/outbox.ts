@@ -1,3 +1,4 @@
+import { openLocalDatabase, changed } from "./local-db.js";
 import type { Id } from "@mdc/contracts";
 
 import type { ShareDraft } from "./model.js";
@@ -23,9 +24,10 @@ type NativeMarker = {
 
 type StoredAction = QueuedShare & { kind: "action" };
 type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
-type StoredRecord = StoredAction | NativeMarker | DeletedMarker;
+export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; nextAttemptAt: number; attempts: number; paused: boolean };
+type ItemMarker = { key: string; kind: "deleted-item"; namespace: string; contextId: Id; itemId: Id };
+type StoredRecord = StoredAction | NativeMarker | DeletedMarker | ItemMarker | Deletion;
 
-const DATABASE_NAME = "mdc-outbox-v1";
 const STORE_NAME = "records";
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -43,17 +45,7 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE_NAME, 1);
-    request.onupgradeneeded = () => {
-      const store = request.result.createObjectStore(STORE_NAME, { keyPath: "key" });
-      store.createIndex("namespace", "namespace", { unique: false });
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Unable to open the local outbox"));
-  });
-}
+const openDatabase = openLocalDatabase;
 
 function cleanMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message.slice(0, 240) : "Sharing failed";
@@ -86,7 +78,7 @@ export class DurableOutbox {
       status: "pending",
     };
     const marker = await requestResult(transaction.objectStore(STORE_NAME).get(`deleted:${this.namespace}:${draft.contextId}`));
-    if (marker) throw new PublishFailure("This context was deleted", false);
+    if (marker || await requestResult(transaction.objectStore(STORE_NAME).get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) throw new PublishFailure("This context was deleted", false);
     transaction.objectStore(STORE_NAME).put(record);
     await transactionDone(transaction);
   }
@@ -104,7 +96,7 @@ export class DurableOutbox {
     }
     store.add({ key: markerKey, kind: "native", namespace: this.namespace, requestId } satisfies NativeMarker);
     for (const draft of drafts) {
-      if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`))) continue;
+      if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) continue;
       store.add({
         ...draft,
         key: `action:${this.namespace}:${draft.itemId}`,
@@ -146,7 +138,7 @@ export class DurableOutbox {
     await transactionDone(transaction);
     const groups = new Map<string, StoredAction[]>();
     for (const record of records) {
-      if (record.kind !== "action") continue;
+      if (record.kind !== "action" || records.some(r => r.kind === "deletion" && r.contextId === record.contextId)) continue;
       const group = groups.get(record.contextId) ?? [];
       group.push(record);
       groups.set(record.contextId, group);
@@ -165,14 +157,50 @@ export class DurableOutbox {
       }));
   }
 
-  async removeContext(id: Id): Promise<void> {
-    const database = await this.#db();
-    const transaction = database.transaction(STORE_NAME, "readwrite");
-    const store = transaction.objectStore(STORE_NAME);
+  async removeContext(id: Id): Promise<void> { await this.cancel(id); }
+  async removeItem(contextId: Id, itemId: Id): Promise<void> { await this.cancel(contextId, itemId); }
+  async requestDeletion(contextId: Id, itemId?: Id): Promise<void> { await this.cancel(contextId, itemId, true); }
+  private async cancel(contextId: Id, itemId?: Id, request = false): Promise<void> {
+    const db = await this.#db();
+    const tx = db.transaction([STORE_NAME, "drafts"], "readwrite"); const complete = transactionDone(tx);
+    const store = tx.objectStore(STORE_NAME);
     const records = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
-    for (const record of records) if (record.kind === "action" && record.contextId === id) store.delete(record.key);
-    store.put({ key: `deleted:${this.namespace}:${id}`, kind: "deleted", namespace: this.namespace, contextId: id } satisfies DeletedMarker);
-    await transactionDone(transaction);
+    const actions = records.filter((r): r is StoredAction => r.kind === "action" && r.contextId === contextId);
+    const removed = actions.filter(r => !itemId || r.itemId === itemId);
+    for (const record of removed) store.delete(record.key);
+    if (itemId) {
+      store.put({ key: `deleted-item:${this.namespace}:${contextId}:${itemId}`, kind: "deleted-item", namespace: this.namespace, contextId, itemId } satisfies ItemMarker);
+      if (removed.some(r => r.createsContext)) {
+        const next = actions.filter(r => r.itemId !== itemId).sort((a,b) => a.queuedAt - b.queuedAt || a.itemId.localeCompare(b.itemId))[0];
+        if (next) store.put({ ...next, createsContext: true });
+      }
+    } else {
+      tx.objectStore("drafts").delete(`draft:${this.namespace}:${contextId}`);
+      store.put({ key: `deleted:${this.namespace}:${contextId}`, kind: "deleted", namespace: this.namespace, contextId } satisfies DeletedMarker);
+      for (const record of records) if (record.kind === "deletion" && record.contextId === contextId && record.itemId) store.delete(record.key);
+    }
+    if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId } : {}), attempts: 0, nextAttemptAt: 0, paused: false } satisfies Deletion);
+    await complete; changed();
+  }
+  async cancelled(): Promise<{ contexts: Id[]; items: Id[] }> {
+    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
+    const records = await requestResult(tx.objectStore(STORE_NAME).index("namespace").getAll(this.namespace)) as StoredRecord[];
+    return { contexts: records.filter((r): r is DeletedMarker => r.kind === "deleted").map(r => r.contextId), items: records.filter((r): r is ItemMarker => r.kind === "deleted-item").map(r => r.itemId) };
+  }
+  async deletions(): Promise<Deletion[]> {
+    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
+    const records = await requestResult(tx.objectStore(STORE_NAME).index("namespace").getAll(this.namespace)) as StoredRecord[];
+    return records.filter((r): r is Deletion => r.kind === "deletion");
+  }
+  async failDeletion(record: Deletion, paused: boolean, retryAfterMs = 0) {
+    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    if (await requestResult(store.get(record.key))) store.put({ ...record, paused, attempts: record.attempts + 1, nextAttemptAt: Date.now() + Math.max(retryAfterMs, Math.min(60_000, 1000 * 2 ** Math.min(record.attempts, 6))) });
+    await transactionDone(tx); changed();
+  }
+  async isCancelled(record: QueuedShare): Promise<boolean> {
+    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
+    return !await requestResult(tx.objectStore(STORE_NAME).get(record.key));
   }
 
   async count(): Promise<number> {
@@ -183,20 +211,21 @@ export class DurableOutbox {
     const database = await this.#db();
     const transaction = database.transaction(STORE_NAME, "readwrite");
     transaction.objectStore(STORE_NAME).delete(key);
-    await transactionDone(transaction);
+    await transactionDone(transaction); changed();
   }
 
-  async markAttempting(record: QueuedShare): Promise<void> {
+  async markAttempting(record: QueuedShare): Promise<boolean> {
     const database = await this.#db();
     const transaction = database.transaction(STORE_NAME, "readwrite");
-    if (!await requestResult(transaction.objectStore(STORE_NAME).get(record.key))) { await transactionDone(transaction); return; }
+    const current = await requestResult(transaction.objectStore(STORE_NAME).get(record.key));
+    if (!current) { await transactionDone(transaction); return false; }
     transaction.objectStore(STORE_NAME).put({
-      ...record,
+      ...current,
       kind: "action",
-      attempts: record.attempts + 1,
+      attempts: current.attempts + 1,
       status: "pending",
     } satisfies StoredAction);
-    await transactionDone(transaction);
+    await transactionDone(transaction); return true;
   }
 
   async markFailed(record: QueuedShare, error: unknown, delayMs: number, paused: boolean): Promise<void> {
@@ -215,13 +244,13 @@ export class DurableOutbox {
   }
 
   async retry(key?: string): Promise<void> {
-    const records = await this.list();
     const database = await this.#db();
+    const records = (await requestResult(database.transaction(STORE_NAME).objectStore(STORE_NAME).index("namespace").getAll(this.namespace)) as StoredRecord[]).filter((r): r is StoredAction | Deletion => r.kind === "action" || r.kind === "deletion");
     const transaction = database.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     for (const record of records) {
       if ((!key || record.key === key) && await requestResult(store.get(record.key))) {
-        store.put({ ...record, status: "pending", nextAttemptAt: 0, lastError: undefined });
+        store.put({ ...record, status: "pending", paused: false, nextAttemptAt: 0, lastError: undefined });
       }
     }
     await transactionDone(transaction);
@@ -243,14 +272,15 @@ export class DurableOutbox {
 }
 
 export class PublishFailure extends Error {
-  constructor(message: string, readonly retryable: boolean) {
+  constructor(message: string, readonly retryable: boolean, readonly retryAfterMs = 0) {
     super(message);
   }
 }
 
-export type PublishPort = { publish(record: QueuedShare): Promise<void> };
+export type PublishPort = { publish(record: QueuedShare): Promise<void>; prepare?(): Promise<void> };
 
 export class OutboxRunner {
+  #retryAfter = 0;
   #running = false;
   #stopped = false;
   #drainRequested = false;
@@ -262,6 +292,10 @@ export class OutboxRunner {
   ) {}
 
   async drain(): Promise<void> {
+    if (typeof navigator !== "undefined" && navigator.locks) return navigator.locks.request(`mdc-publish:${this.outbox.namespace}`, () => this.#drain());
+    return this.#drain();
+  }
+  async #drain(): Promise<void> {
     if (this.#stopped) return;
     if (this.#running) {
       this.#drainRequested = true;
@@ -273,13 +307,14 @@ export class OutboxRunner {
     try {
       do {
         this.#drainRequested = false;
+        await this.port.prepare?.();
         const records = await this.outbox.list();
         const pendingCreators = new Set(records.filter((record) => record.createsContext).map((record) => record.contextId));
         for (const record of records) {
           if (this.#stopped) return;
           if (!record.createsContext && pendingCreators.has(record.contextId)) continue;
           if (record.status === "paused" || record.nextAttemptAt > Date.now()) continue;
-          await this.outbox.markAttempting(record);
+          if (!await this.outbox.markAttempting(record)) continue;
           if (this.#stopped) return;
           try {
             await this.port.publish(record);
@@ -291,20 +326,20 @@ export class OutboxRunner {
             const retryable = !(error instanceof PublishFailure) || error.retryable;
             const base = this.options.baseDelayMs ?? 1_000;
             const maximum = this.options.maxDelayMs ?? 60_000;
-            const delay = Math.min(maximum, base * 2 ** Math.min(record.attempts, 6));
+            const delay = Math.max(error instanceof PublishFailure ? error.retryAfterMs : 0, Math.min(maximum, base * 2 ** Math.min(record.attempts, 6)));
             await this.outbox.markFailed(record, error, delay, !retryable);
             break;
           }
         }
       } while (!this.#stopped && this.#drainRequested);
-    } finally {
+    } catch (error) { this.#retryAfter = Date.now() + 1000; throw error; } finally {
       try {
         if (!this.#stopped) await this.#scheduleRemaining();
       } finally {
         this.#running = false;
         if (!this.#stopped && this.#drainRequested) {
           this.#drainRequested = false;
-          void this.drain();
+          void this.drain().catch(() => {});
         }
       }
     }
@@ -317,13 +352,14 @@ export class OutboxRunner {
     const eligible = records.filter((record) =>
       record.status !== "paused"
       && (record.createsContext || !pendingCreators.has(record.contextId)));
-    if (eligible.length === 0) return;
-    const nextAttemptAt = Math.min(...eligible.map((record) => record.nextAttemptAt));
+    const deletions = (await this.outbox.deletions()).filter(d => !d.paused);
+    if (eligible.length + deletions.length === 0) return;
+    const nextAttemptAt = Math.min(...[...eligible, ...deletions].map((record) => record.nextAttemptAt));
     const maximum = this.options.maxDelayMs ?? 60_000;
-    const delay = Math.min(maximum, Math.max(0, nextAttemptAt - Date.now()) + 1);
+    const delay = Math.min(maximum, Math.max(0, Math.max(this.#retryAfter, nextAttemptAt) - Date.now()) + 1);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
-      void this.drain();
+      void this.drain().catch(() => {});
     }, delay);
   }
 
@@ -336,6 +372,6 @@ export class OutboxRunner {
 
   resume(): void {
     this.#stopped = false;
-    void this.drain();
+    void this.drain().catch(() => {});
   }
 }
