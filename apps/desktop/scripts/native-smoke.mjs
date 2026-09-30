@@ -12,11 +12,14 @@ try {
  app=await electron.launch({executablePath,timeout:60000});
  const window=await app.firstWindow({timeout:60000});
  await window.waitForLoadState('domcontentloaded');
- const runtime=await app.evaluate(({app,BrowserWindow,safeStorage})=>({packaged:app.isPackaged,encryption:safeStorage.isEncryptionAvailable(),windows:BrowserWindow.getAllWindows().length,platform:process.platform,architecture:process.arch,preferences:BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences()}));
+ const runtime=await app.evaluate(({app,BrowserWindow,safeStorage})=>({packaged:app.isPackaged,encryption:safeStorage.isEncryptionAvailable(),windows:BrowserWindow.getAllWindows().length,platform:process.platform,architecture:process.arch,login:app.getLoginItemSettings({args:['--background']}),preferences:BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences()}));
  assert.equal(runtime.packaged,true);assert.equal(runtime.encryption,true);assert.equal(runtime.windows,1);
  assert.equal(runtime.architecture,process.platform==='darwin'?'arm64':'x64');
  assert.equal(runtime.preferences.sandbox,true);assert.equal(runtime.preferences.contextIsolation,true);assert.equal(runtime.preferences.nodeIntegration,false);assert.equal(runtime.preferences.webSecurity,true);
  report.checks.push('Installed packaged executable, expected architecture, secure preferences and OS encryption');
+ assert.equal(runtime.login.openAtLogin,true,'OS startup registration must be enabled');
+ if(process.platform==='win32') assert.equal(runtime.login.executableWillLaunchAtLogin,true,'Windows StartupApproved must allow launch');
+ report.checks.push('OS reports the installed app registered and enabled for login launch');
  if(report.hostedUiRequired) {
   await window.waitForURL(url=>url.origin===process.env.MDC_APP_ORIGIN,{timeout:60000});
   await window.waitForFunction(()=>window.contextDesktop?.version===1);

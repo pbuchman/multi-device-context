@@ -10,21 +10,28 @@ async function blob(entry:ClipboardEntry,type:string):Promise<Blob> {
  if(!(value instanceof Blob) || value.size>MAX_ATTACHMENT_BYTES) throw new Error('This clipboard item is too large or unsupported.');
  return value;
 }
+type FileIdentity={dev:bigint;ino:bigint;size:bigint};
+export function sameFileIdentity(before:FileIdentity,after:FileIdentity,platform:NodeJS.Platform):boolean {
+ // Windows path metadata can omit VolumeSerialNumber (0), while handle metadata
+ // supplies it. Keep exact 64-bit file IDs and compare known volume IDs.
+ const sameVolume=before.dev===after.dev || platform==='win32' && (before.dev===0n || after.dev===0n);
+ return sameVolume && before.ino===after.ino && before.size===after.size;
+}
 async function readFile(path:string,remaining:number):Promise<NativeFile> {
- const before=await lstat(path);
+ const before=await lstat(path,{bigint:true});
  if(!before.isFile() || before.isSymbolicLink()) throw new Error('Only regular files can be shared. Folders and links are unsupported.');
- if(before.size<1 || before.size>remaining) throw new Error('Empty files and file selections over 100 MiB are unsupported.');
+ if(before.size<1n || before.size>BigInt(remaining)) throw new Error('Empty files and file selections over 100 MiB are unsupported.');
  const file=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
  try {
-  const info=await file.stat();
-  if(!info.isFile() || info.ino!==before.ino || info.dev!==before.dev || info.size!==before.size) throw new Error('The file changed while being shared. Try again.');
-  const bytes=Buffer.alloc(info.size+1);let offset=0;
+  const info=await file.stat({bigint:true});
+  if(!info.isFile() || !sameFileIdentity(before,info,process.platform)) throw new Error('The file changed while being shared. Try again.');
+  const bytes=Buffer.alloc(Number(info.size)+1);let offset=0;
   while(offset<bytes.length) {
    const result=await file.read(bytes,offset,bytes.length-offset,null);
    if(result.bytesRead===0) break;offset+=result.bytesRead;
   }
-  const after=await file.stat();
-  if(offset!==info.size || after.size!==info.size || after.mtimeMs!==info.mtimeMs) throw new Error('The file changed while being shared. Try again.');
+  const after=await file.stat({bigint:true});
+  if(BigInt(offset)!==info.size || after.size!==info.size || after.mtimeNs!==info.mtimeNs) throw new Error('The file changed while being shared. Try again.');
   return {name:basename(path),contentType:types[extname(path).toLowerCase()]??'application/octet-stream',bytes:Uint8Array.from(bytes.subarray(0,offset))};
  } finally {await file.close();}
 }
