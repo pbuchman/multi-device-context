@@ -14,11 +14,11 @@ describe('clipboard normalization',()=>{
  it('captures file bytes and omits the alternate local path text',async()=>{
   const folder=await mkdtemp(join(tmpdir(),'mdc-clipboard-'));folders.push(folder);
   const file=join(folder,'original.bin');await writeFile(file,new Uint8Array([0,1,255]));
-  const result=await captureClipboard([item({'text/uri-list':pathToFileURL(file).href,'text/plain':file})],'darwin');
+  const result=await captureClipboard([item({'text/uri-list':pathToFileURL(file).href,'text/plain':file})],process.platform);
   expect(result.text).toBeUndefined();expect(result.files).toEqual([{name:'original.bin',contentType:'application/octet-stream',bytes:new Uint8Array([0,1,255])}]);
   await symlink(file,join(folder,'linked.bin'));
-  await expect(captureClipboard([item({'text/uri-list':pathToFileURL(join(folder,'linked.bin')).href})],'darwin')).rejects.toThrow(/regular/);
-  await expect(captureClipboard([item({'text/uri-list':pathToFileURL(folder).href})],'darwin')).rejects.toThrow(/regular/);
+  await expect(captureClipboard([item({'text/uri-list':pathToFileURL(join(folder,'linked.bin')).href})],process.platform)).rejects.toThrow(/regular/);
+  await expect(captureClipboard([item({'text/uri-list':pathToFileURL(folder).href})],process.platform)).rejects.toThrow(/regular/);
  });
  it('supports screenshot PNG and ordinary URL clipboard lists',async()=>{
   const bytes=new Uint8Array([137,80,78,71]);
