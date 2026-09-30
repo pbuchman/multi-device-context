@@ -1,7 +1,8 @@
 # Home Dev deployment
 
-Status: infrastructure is provisioned; application deployment and native
-acceptance are still pending. A successful unit test is not live deployment evidence.
+Status: the first home-dev deployment is live and its host checks pass. Final
+installer and Google login acceptance remain in progress; consult the
+[acceptance record](../verification/release-acceptance.md) for dated evidence.
 
 The server hosts the shared interface on loopback. Its dedicated PM2 instance is
 owned by `multi-device-context.service`; it does not use another app's PM2 home.

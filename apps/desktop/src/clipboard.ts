@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { basename, extname } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   MAX_ATTACHMENT_BYTES,
   type ClipboardSnapshot,
@@ -147,4 +148,25 @@ export async function captureClipboard(
   return validateSnapshot(
     text.length ? { text: text.join("\n"), files } : { files },
   );
+}
+
+
+export function fileClipboardRepresentations(
+  file: NativeFile,
+  exportedPath: string,
+  platform: NodeJS.Platform,
+): Record<string, string | Blob> {
+  const formats: Record<string, string | Blob> = {
+    "text/uri-list": pathToFileURL(exportedPath).href,
+  };
+  if (file.contentType === "image/png") {
+    // Chromium's macOS file and bitmap writers create separate pasteboard
+    // items. Add PNG bytes to the file item using the fixed native PNG type;
+    // raw representations are applied after the copied-file representation.
+    const imageType = platform === "darwin"
+      ? 'electron application/osclipboard;format="public.png"'
+      : "image/png";
+    formats[imageType] = new Blob([Uint8Array.from(file.bytes).buffer], { type: "image/png" });
+  }
+  return formats;
 }

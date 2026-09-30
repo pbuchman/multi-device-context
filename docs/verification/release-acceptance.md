@@ -10,7 +10,7 @@ mocked browser flow does not establish Windows/macOS behavior.
 
 - Backend/rules independently reviewed, including exact user ownership,
   Google-only token verification, deletion tombstones and resumable cleanup.
-- Final source check: 131 Vitest tests, 7 runtime helper tests and 13 real
+- Final source check: 132 Vitest tests, 7 runtime helper tests and 13 real
   Firestore/Storage emulator tests passed; all workspace typechecks and production
   server/web builds passed. The UI was also checked in Chromium at desktop light,
   desktop dark and narrow widths with no browser console errors.
@@ -41,6 +41,13 @@ mocked browser flow does not establish Windows/macOS behavior.
 
 ## Native CI evidence
 
+Hosted run [36714566553](https://github.com/pbuchman/multi-device-context/actions/runs/36714566553)
+passed on Windows, including native text/file/image clipboard, startup toggle and
+close/reopen checks. macOS installed and passed hosted bridge, startup, text and
+binary-file checks but failed the combined screenshot/file clipboard image
+representation. That failure is being fixed and must pass native CI before release.
+
+
 [Native run 36711350538](https://github.com/pbuchman/multi-device-context/actions/runs/36711350538)
 passed on both platforms at `26b77e7`, with the hosted UI gate disabled because
 deployment was not ready. Earlier Windows failures exposed a filesystem identity
@@ -69,19 +76,34 @@ The workflow must pass again with `require_hosted_ui=true` (or the corresponding
 private repository build variable) after deployment. The initial artifacts must
 not be promoted as accepted releases based solely on recovery-mode checks.
 
+## Hosted deployment evidence
+
+- Home-dev deployment `6a957196536fae3c21f0574dba0ac4908ae1f494` installed through
+  the canonical systemd/PM2/Caddy procedure. App unit active/enabled, listener
+  limited to `127.0.0.1:8788`, clean pinned checkout and correct cgroup ownership.
+- Scoped Cloudflare route/DNS addition verified against saved live inventories;
+  unrelated tunnel config/order preserved. Global Terraform reconciliation is
+  still separately pending.
+- Companion host verifier passed local/public live/ready health, exact public
+  config match, UI HTML and unauthenticated session denial before and after an
+  app-only restart. Caddy/Cloudflare remained active; Health Connect health was
+  HTTP200 and existing listeners stayed present.
+- Chromium loaded the actual hosted login screen without JavaScript errors and
+  reached Google's authorization page. The user then confirmed successful Google sign-in, the contexts screen and a saved test message.
+- Cloudflare returns HTTP403 to Python urllib's default user agent; Node/curl and
+  Chromium checks passed. No Cloudflare protection was changed for verification.
+
 ## Hosted acceptance outstanding
 
-- Actual Auth0 browser login and Firebase session exchange through the hosted UI.
-- App-only systemd/PM2/Caddy installation, loopback-only binding, public route,
-  restart/recovery and unchanged representative existing services.
-- Companion `pbuchman-dev` setup and read-only host verifier executed successfully.
-- Cloudflare app-route evidence and future Terraform preservation guard; global
-  shared Terraform reconciliation remains separately pending.
+- Native Google login and cross-device acceptance with the release installers.
+- Commit sanitized Cloudflare route evidence and the future Terraform preservation guard.
 
 ## Target-machine checks outstanding
 
 Run with the release installers on the Dell Pro 14 Plus PB14250 and M2 MacBook Pro,
-recording the installed OS versions and release checksum:
+recording the release checksum. The user reports macOS 27.0.1 (26A434) and
+Windows 11 Enterprise 25H2; CI uses macOS 15 arm64 and Windows Server 2025 x64,
+so those CI results do not establish behavior on the exact target OS versions:
 
 - First installation and any unsigned-app first-launch approval.
 - Real Google browser callback, session persistence after Quit/reopen, sign-out,

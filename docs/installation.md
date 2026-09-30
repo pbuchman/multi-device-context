@@ -8,8 +8,8 @@ for the actual platform and deployment evidence.
 
 | Computer | Artifact | Compatibility target |
 | --- | --- | --- |
-| Dell Pro 14 Plus PB14250 | `Multi-Device-Context-VERSION-win-x64.exe` | Windows x64; actual installed OS acceptance pending |
-| MacBook Pro M2 | `Multi-Device-Context-VERSION-mac-arm64.dmg` | Apple Silicon, macOS 13 or later |
+| Dell Pro 14 Plus PB14250 | `Multi-Device-Context-VERSION-win-x64.exe` | Windows 11 Enterprise 25H2, x64 (user reported) |
+| MacBook Pro M2 | `Multi-Device-Context-VERSION-mac-arm64.dmg` | Apple Silicon; user reports macOS 27.0.1 (26A434), minimum 13 |
 
 Download the installer from the versioned release in the private
 [pbuchman/multi-device-context repository](https://github.com/pbuchman/multi-device-context/releases).

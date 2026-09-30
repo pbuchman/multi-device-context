@@ -184,6 +184,11 @@ try {
         .getSize();
     });
     assert.deepEqual(imageSize, { width: 2, height: 2 });
+    const copiedImageFile = await window.evaluate(async () => {
+      const snapshot = await window.contextDesktop.readClipboard();
+      return snapshot.files.map((file) => ({ name: file.name, bytes: Array.from(file.bytes) }));
+    });
+    assert.deepEqual(copiedImageFile, [{ name: "native-screenshot.png", bytes: png }]);
     report.checks.push(
       "Screenshot capture and Copy expose an actual native clipboard image",
     );

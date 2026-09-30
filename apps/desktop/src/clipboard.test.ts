@@ -3,7 +3,7 @@ import { mkdtemp, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { captureClipboard, sameFileIdentity } from "./clipboard.js";
+import { captureClipboard, sameFileIdentity, fileClipboardRepresentations } from "./clipboard.js";
 const folders: string[] = [];
 afterEach(async () => {
   await Promise.all(
@@ -98,5 +98,19 @@ describe("clipboard normalization", () => {
         "win32",
       ),
     ).rejects.toThrow(/supported/);
+  });
+});
+
+
+describe("native copied-file representations", () => {
+  it("keeps the macOS PNG representation on the same copied-file pasteboard item", async () => {
+    const file = { name: "shot.png", contentType: "image/png", bytes: new Uint8Array([137, 80, 78, 71]) };
+    const path = "/private/export/shot.png";
+    const formats = fileClipboardRepresentations(file, path, "darwin");
+    expect(Object.keys(formats)).toEqual(["text/uri-list", 'electron application/osclipboard;format="public.png"']);
+    expect(formats["text/uri-list"]).toBe(pathToFileURL(path).href);
+    expect(new Uint8Array(await (formats['electron application/osclipboard;format="public.png"'] as Blob).arrayBuffer())).toEqual(file.bytes);
+    expect(Object.keys(fileClipboardRepresentations(file, path, "win32"))).toEqual(["text/uri-list", "image/png"]);
+    expect(Object.keys(fileClipboardRepresentations({ ...file, contentType: "application/octet-stream" }, path, "darwin"))).toEqual(["text/uri-list"]);
   });
 });

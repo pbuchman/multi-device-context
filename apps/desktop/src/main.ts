@@ -27,7 +27,7 @@ import { AuthManager } from "./auth.js";
 import { NativeStore } from "./store.js";
 import { LaunchSettings, shouldStartHidden } from "./settings.js";
 import { CopiedFiles } from "./copied-files.js";
-import { captureClipboard } from "./clipboard.js";
+import { captureClipboard, fileClipboardRepresentations } from "./clipboard.js";
 import {
   assertTrustedSender,
   safeExternalUrl,
@@ -331,14 +331,9 @@ async function pruneCopiedFiles(): Promise<void> {
 async function copyFile(file: NativeFile): Promise<void> {
   await pruneCopiedFiles();
   const path = await copies.write(file);
-  const formats: Record<string, string | Blob> = {
-    "text/uri-list": pathToFileURL(path).href,
-  };
-  if (file.contentType === "image/png")
-    formats["image/png"] = new Blob([Uint8Array.from(file.bytes).buffer], {
-      type: "image/png",
-    });
-  await clipboard.write([new ClipboardItem(formats)]);
+  await clipboard.write([
+    new ClipboardItem(fileClipboardRepresentations(file, path, process.platform)),
+  ]);
 }
 function wireBridge(): void {
   const handle = (
