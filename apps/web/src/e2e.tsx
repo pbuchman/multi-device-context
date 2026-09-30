@@ -50,7 +50,7 @@ const services: WorkspaceServices = {
     async deleteItem(contextId, itemId) { items.set(contextId, (items.get(contextId) ?? []).filter((entry) => entry.id !== itemId)); emitItems(contextId); },
     async attachmentBytes() { return png; },
   },
-  outbox: { async enqueue() {}, async count() { return 0; }, async clear() {}, async retry() {}, async list() { return []; } },
+  outbox: { namespace: "browser-test:browser-test", async enqueue() {}, async count() { return 0; }, async clear() {}, async retry() {}, async list() { return []; } },
   async drain() {},
   async copyText() {},
   async copyFile() {},

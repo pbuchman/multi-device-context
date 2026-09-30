@@ -21,6 +21,7 @@ export type WorkspaceCloud = {
 };
 
 export type WorkspaceOutbox = {
+  readonly namespace: string;
   enqueue(draft: ShareDraft): Promise<void>;
   count(): Promise<number>;
   clear(): Promise<void>;
@@ -50,6 +51,14 @@ type SharePart = { content: Content; bytes?: Uint8Array };
 type Theme = "system" | "light" | "dark";
 
 function newId(): Id { return IdSchema.parse(crypto.randomUUID()); }
+
+function readConfirmedContexts(key: string): ReadonlySet<Id> {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+    if (Array.isArray(stored)) return new Set(stored.filter((id): id is Id => IdSchema.safeParse(id).success));
+  } catch { /* A missing or unavailable cache must not prevent sharing. */ }
+  return new Set();
+}
 
 function bytesBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
@@ -135,6 +144,8 @@ function ItemCard({
 
 export function ContextWorkspace({ services }: { services: WorkspaceServices }) {
   const [contexts, setContexts] = useState<ContextRecord[]>([]);
+  const confirmedKey = `mdc-confirmed:${services.outbox.namespace}`;
+  const [confirmedContextIds, setConfirmedContextIds] = useState(() => readConfirmedContexts(confirmedKey));
   const [selectedId, setSelectedId] = useState<Id>();
   const [draftContext, setDraftContext] = useState<ContextRecord>();
   const [items, setItems] = useState<ItemRecord[]>([]);
@@ -169,6 +180,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
   useEffect(() => {
+    try { localStorage.setItem(confirmedKey, JSON.stringify([...confirmedContextIds])); }
+    catch { /* Firestore still verifies ownership when the listener connects. */ }
+  }, [confirmedContextIds, confirmedKey]);
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("mdc-theme", theme);
   }, [theme]);
@@ -178,6 +193,14 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [services]);
 
   useEffect(() => services.cloud.subscribeContexts((snapshot) => {
+    // Item reads require an existing parent. A local snapshot may include a
+    // context whose first write has not reached Firestore yet. Remember prior
+    // acknowledgements so later pending edits do not interrupt its listener.
+    setConfirmedContextIds((current) => {
+      const confirmed = snapshot.records.filter((context) =>
+        (context.syncState === "synced" || context.syncState === "cached") && !current.has(context.id));
+      return confirmed.length ? new Set([...current, ...confirmed.map((context) => context.id)]) : current;
+    });
     for (const context of snapshot.records) localQueuedContexts.current.delete(context.id);
     setContexts(snapshot.records.map((context) => ({
       ...context,
@@ -200,8 +223,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (selected.unread) setContexts((current) => current.map((context) => context.id === selectedId ? { ...context, unread: false } : context));
   }, [contexts, readKey, selectedId]);
 
+  const selectedContextConfirmed = selectedId !== undefined && confirmedContextIds.has(selectedId);
   useEffect(() => {
-    if (!selectedId || selectedId === draftContext?.id) { setItems([]); return; }
+    if (!selectedId || !selectedContextConfirmed) { setItems([]); return; }
     return services.cloud.subscribeItems(selectedId, (snapshot) => {
       setItems(snapshot.records);
       setFromCache(snapshot.fromCache);
@@ -209,7 +233,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       const cloudIds = new Set(snapshot.records.map((item) => item.id));
       setOptimisticItems((current) => current.filter((item) => item.contextId !== selectedId || !cloudIds.has(item.id)));
     }, (cause) => setError(cause.message || "Could not load shared items"));
-  }, [draftContext?.id, selectedId, services.cloud]);
+  }, [selectedContextConfirmed, selectedId, services.cloud]);
 
   useEffect(() => {
     const close = (event: KeyboardEvent) => {

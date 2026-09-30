@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -14,10 +14,15 @@ const contexts: ContextRecord[] = [
   { id: beta, title: "Beta", createdAt: 2, updatedAt: 10, syncState: "synced" },
 ];
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); localStorage.clear(); });
 
-function services() {
+function services(initialContexts = contexts) {
   let contextListener: ((snapshot: CloudSnapshot<ContextRecord>) => void) | undefined;
+  let contextSnapshot: CloudSnapshot<ContextRecord> = {
+    records: initialContexts,
+    fromCache: initialContexts.some((context) => context.syncState === "cached"),
+    hasPendingWrites: initialContexts.some((context) => context.syncState === "pending"),
+  };
   const items = new Map<string, (snapshot: CloudSnapshot<ItemRecord>) => void>();
   const value: WorkspaceServices = {
     viewer: { uid: "user", name: "Alex", email: "alex@example.com" },
@@ -25,7 +30,7 @@ function services() {
     cloud: {
       subscribeContexts: vi.fn((emit) => {
         contextListener = emit;
-        emit({ records: contexts, fromCache: false, hasPendingWrites: false });
+        emit(contextSnapshot);
         return () => undefined;
       }),
       subscribeItems: vi.fn((contextId, emit) => {
@@ -39,6 +44,7 @@ function services() {
       attachmentBytes: vi.fn(async () => new Uint8Array()),
     },
     outbox: {
+      namespace: "project:user",
       enqueue: vi.fn(async () => undefined),
       count: vi.fn(async () => 0),
       clear: vi.fn(async () => undefined),
@@ -51,10 +57,66 @@ function services() {
     saveFile: vi.fn(async () => true),
     signOut: vi.fn(async () => undefined),
   };
-  return { value, emitContexts: (records: ContextRecord[]) => contextListener?.({ records, fromCache: false, hasPendingWrites: false }) };
+  return { value, items, emitContexts: (records: ContextRecord[], metadata = { fromCache: false, hasPendingWrites: false }) => {
+    contextSnapshot = { records, ...metadata };
+    contextListener?.(contextSnapshot);
+  } };
 }
 
 describe("ContextWorkspace", () => {
+  it("waits for a new context to be acknowledged before reading its items", async () => {
+    const test = services();
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "New context" }));
+    fireEvent.paste(screen.getByLabelText("Paste to share instantly, or type a note"), {
+      clipboardData: { files: [], getData: () => "first share" },
+    });
+    await waitFor(() => expect(test.value.drain).toHaveBeenCalled());
+    const draft = vi.mocked(test.value.outbox.enqueue).mock.calls[0]![0];
+    expect(draft.createsContext).toBe(true);
+    expect(screen.getByText("first share")).toBeTruthy();
+    expect(test.items.has(draft.contextId)).toBe(false);
+
+    const pending: ContextRecord = { id: draft.contextId, title: draft.title, createdAt: 30, updatedAt: 30, syncState: "pending" };
+    act(() => test.emitContexts([pending, ...contexts], { fromCache: true, hasPendingWrites: true }));
+    expect(test.items.has(draft.contextId)).toBe(false);
+
+    act(() => test.emitContexts([{ ...pending, syncState: "synced" }, ...contexts]));
+    await waitFor(() => expect(test.items.has(draft.contextId)).toBe(true));
+    act(() => test.items.get(draft.contextId)!({
+      records: [{ id: draft.itemId, contextId: draft.contextId, content: draft.content, device: draft.device, createdAt: 30, ready: true, syncState: "synced" }],
+      fromCache: false, hasPendingWrites: false,
+    }));
+    expect(within(screen.getByLabelText("Shared items")).getAllByText("first share")).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    const subscriptions = vi.mocked(test.value.cloud.subscribeItems).mock.calls.length;
+    act(() => test.emitContexts([pending, ...contexts], { fromCache: false, hasPendingWrites: true }));
+    expect(test.value.cloud.subscribeItems).toHaveBeenCalledTimes(subscriptions);
+  });
+
+  it("reads acknowledged offline history and still reports real permission errors", async () => {
+    const test = services([{ ...contexts[0]!, syncState: "cached" }]);
+    test.value.cloud.subscribeItems = vi.fn((_contextId, _emit, fail) => {
+      fail(new Error("Missing or insufficient permissions."));
+      return () => undefined;
+    });
+    render(<ContextWorkspace services={test.value} />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Missing or insufficient permissions.");
+    expect(test.value.cloud.subscribeItems).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps established cached history readable after restarting with an offline edit", async () => {
+    const test = services();
+    const first = render(<ContextWorkspace services={test.value} />);
+    await waitFor(() => expect(test.value.cloud.subscribeItems).toHaveBeenCalledTimes(1));
+    act(() => test.emitContexts([{ ...contexts[0]!, syncState: "pending" }], { fromCache: true, hasPendingWrites: true }));
+    first.unmount();
+    render(<ContextWorkspace services={test.value} />);
+    await waitFor(() => expect(test.value.cloud.subscribeItems).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(test.value.cloud.subscribeItems).mock.calls[1]![0]).toBe(alpha);
+  });
+
   it("shares typed content on Enter without trimming and supports explicit code mode", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
@@ -147,5 +209,6 @@ describe("ContextWorkspace", () => {
     notify?.();
     await screen.findByRole("heading", { name: "Tray clipboard" });
     expect(screen.getByText("from tray")).toBeTruthy();
+    expect(test.items.has(trayContext)).toBe(false);
   });
 });
