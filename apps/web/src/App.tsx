@@ -168,6 +168,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameText, setRenameText] = useState("");
+  const [renameTargetId, setRenameTargetId] = useState<Id>();
   const [queueCount, setQueueCount] = useState(0);
   const [fromCache, setFromCache] = useState(false);
   const [pendingWrites, setPendingWrites] = useState(false);
@@ -190,6 +191,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, []);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+  useEffect(() => { setMenuOpen(false); setRenaming(false); }, [selectedId]);
   useEffect(() => {
     try { localStorage.setItem(confirmedKey, JSON.stringify([...confirmedContextIds])); }
     catch { /* Firestore still verifies ownership when the listener connects. */ }
@@ -420,7 +422,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const submitRename = async () => {
     const title = renameText.trim().slice(0, 160);
-    if (!selected || !title) return;
+    if (!selected || selected.id !== renameTargetId || !title) return;
     try {
       if (selected.id === draftContext?.id) setDraftContext({ ...draftContext, title });
       else await services.cloud.renameContext(selected.id, title);
@@ -440,7 +442,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       setOptimisticItems(current => current.filter(item => item.contextId !== context.id));
       if (selectedId === context.id) setSelectedId(undefined);
       showToast("Context permanently deleted");
-    } catch { setError("Deletion has not finished. Retry to complete cleanup."); }
+    } catch { setError("Deletion has not finished. The server will retry cleanup automatically."); }
   };
 
   const signOut = async () => {
@@ -478,7 +480,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           </div>
           <div className="header-actions"><span className={`sync ${fromCache ? "offline" : ""}`}><Icon>✓</Icon>{syncLabel}</span><button type="button" aria-label="Context options" aria-expanded={menuOpen} disabled={!selected} onClick={() => setMenuOpen((open) => !open)}><Icon>•••</Icon></button></div>
           {menuOpen && selected ? <div className="context-menu" role="menu">
-            <button type="button" onClick={() => { setRenameText(selected.title); setRenaming(true); setMenuOpen(false); }}>Rename context</button>
+            <button type="button" onClick={() => { setRenameTargetId(selected.id); setRenameText(selected.title); setRenaming(true); setMenuOpen(false); }}>Rename context</button>
             {!draftContext ? <button type="button" onClick={() => { void services.copyText(`${location.origin}/contexts/${selected.id}`).then(() => showToast("Context link copied")); setMenuOpen(false); }}>Copy link</button> : null}
             {!services.isDesktop && !draftContext ? <a href={`multi-device-context://context/${selected.id}`}>Open in desktop app</a> : null}
             <button type="button" className="danger" onClick={() => void deleteContext(selected)}>Delete context</button>

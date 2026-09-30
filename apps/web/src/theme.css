@@ -21,3 +21,5 @@
 .agent-keys input { min-width: 0; flex: 1; width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
 .agent-keys button { padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
 .settings { max-height: 90vh; overflow-y: auto; }
+
+.context-row > button:first-child > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }

@@ -5,13 +5,14 @@ Each context contains text, code, links, screenshots, and file attachments.
 Signing in with the same Google account makes the same content available on
 every device.
 
-The application is deployed on home-dev. The first private installers target
+The application is deployed on home-dev. The v0.2 private installers target
 Windows x64 and Apple Silicon macOS 13+, with hosted native CI checks passed.
 Windows builds are unsigned; Mac builds are ad-hoc signed and not notarized.
-See the [acceptance record](docs/verification/release-acceptance.md) for completed
+See the [acceptance record](docs/verification/v0.2.0.md) for completed
 checks and the remaining first-launch and sign-in checks on the target machines.
 
-- [Download private preview v0.1.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.1.0)
+- [Download private preview v0.2.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.2.0)
+- [Agent API, CLI and portable skill](docs/agent-api.md)
 - [Installation and sharing](docs/installation.md)
 - [Home-dev deployment, updates and recovery](docs/operations/deployment.md)
 - [Requirements and initial design](docs/requirements.md)
@@ -19,7 +20,9 @@ checks and the remaining first-launch and sign-in checks on the target machines.
 
 Paste publishes into the selected context immediately. **Share clipboard** in
 the tray/menu bar captures the current clipboard into a new context. Incoming
-items leave the receiving clipboard unchanged until you choose **Copy**.
+contexts open automatically on your other running devices while preserving drafts.
+Incoming items leave the receiving clipboard unchanged until you choose **Copy**.
+Contexts get short AI titles, have direct links, and can be permanently deleted.
 
 The shared web interface and small API run on home-dev. Google-only Auth0 login
 identifies users; Firestore synchronizes their contexts and private GCP storage

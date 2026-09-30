@@ -265,4 +265,16 @@ describe("ContextWorkspace", () => {
     expect(test.value.outbox.removeContext).toHaveBeenCalledWith(alpha);
   });
 
+  it("does not apply an interrupted rename to an incoming context", async () => {
+    const test = services(); render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    await userEvent.click(screen.getByRole("button", { name: "Context options" }));
+    await userEvent.click(screen.getByRole("button", { name: "Rename context" }));
+    fireEvent.change(screen.getByLabelText("Context name"), { target: { value: "My draft rename" } });
+    const incoming = { id: "00000000-0000-4000-8000-000000000088", title: "Remote", createdAt: 30, updatedAt: 30, syncState: "synced" as const };
+    act(() => test.emitContexts([incoming, ...contexts]));
+    expect(screen.getByRole("heading", { name: "Remote" })).toBeTruthy();
+    expect(test.value.cloud.renameContext).not.toHaveBeenCalledWith(incoming.id, expect.anything());
+  });
+
 });
