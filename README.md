@@ -5,12 +5,13 @@ Each context contains text, code, links, screenshots, and file attachments.
 Signing in with the same Google account makes the same content available on
 every device.
 
-The application is implemented and undergoing deployment and release acceptance.
-The first private installers target Windows x64 and Apple Silicon macOS 13+.
+The application is deployed on home-dev. The first private installers target
+Windows x64 and Apple Silicon macOS 13+, with hosted native CI checks passed.
 Windows builds are unsigned; Mac builds are ad-hoc signed and not notarized.
 See the [acceptance record](docs/verification/release-acceptance.md) for completed
-checks and remaining native and hosted verification.
+checks and the remaining first-launch and sign-in checks on the target machines.
 
+- [Download private preview v0.1.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.1.0)
 - [Installation and sharing](docs/installation.md)
 - [Home-dev deployment, updates and recovery](docs/operations/deployment.md)
 - [Requirements and initial design](docs/requirements.md)

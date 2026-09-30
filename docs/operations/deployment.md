@@ -1,7 +1,7 @@
 # Home Dev deployment
 
-Status: the first home-dev deployment is live and its host checks pass. Final
-installer and Google login acceptance remain in progress; consult the
+Status: the home-dev deployment is live and its host checks pass. Installed native
+CI checks and the user’s Google browser login also passed; consult the
 [acceptance record](../verification/release-acceptance.md) for dated evidence.
 
 The server hosts the shared interface on loopback. Its dedicated PM2 instance is

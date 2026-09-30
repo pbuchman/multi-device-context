@@ -1,6 +1,6 @@
 # Release acceptance
 
-Status on 30 September 2026: **in progress; no accepted release yet**.
+Status on 30 September 2026: **private preview v0.1.0 published; source, live cloud, hosted deployment and native CI checks passed**.
 
 This record separates source checks, provider configuration, hosted acceptance,
 native CI checks, and the user's target-machine checks. A passing Linux test or
@@ -10,7 +10,7 @@ mocked browser flow does not establish Windows/macOS behavior.
 
 - Backend/rules independently reviewed, including exact user ownership,
   Google-only token verification, deletion tombstones and resumable cleanup.
-- Final source check: 132 Vitest tests, 7 runtime helper tests and 13 real
+- Final source check: 135 Vitest tests, 7 runtime helper tests and 13 real
   Firestore/Storage emulator tests passed; all workspace typechecks and production
   server/web builds passed. The UI was also checked in Chromium at desktop light,
   desktop dark and narrow widths with no browser console errors.
@@ -30,6 +30,14 @@ mocked browser flow does not establish Windows/macOS behavior.
 - Two isolated Chromium sessions using the actual FirebaseCloud adapter verified
   live bidirectional text/code sharing, exact whitespace and duplicate-free retry.
   Synthetic Firebase sessions are not evidence of an actual Google/Auth0 login.
+- The reported new-context permission banner was reproduced in the actual
+  ContextWorkspace with DurableOutbox and live Firestore. Before the fix, a read
+  preceded the parent commit and returned permission-denied. After the fix, two
+  browser sessions created a context and exchanged messages without errors.
+  Regression tests also cover pending local snapshots, tray contexts, genuine
+  permission errors, and reopening cached history with an offline edit. The
+  account-scoped acknowledgement cache contains only context IDs; rules still
+  enforce every read. Synthetic fixtures were cleaned after both runs.
 - A private verification SDK diagnostic previously printed a short-lived runtime
   access token. The dedicated account remained disabled until expiration and was
   restored and verified at 11:55 UTC. Subsequent SDK output was captured in private
@@ -41,49 +49,45 @@ mocked browser flow does not establish Windows/macOS behavior.
 
 ## Native CI evidence
 
-Hosted run [36714566553](https://github.com/pbuchman/multi-device-context/actions/runs/36714566553)
-passed on Windows, including native text/file/image clipboard, startup toggle and
-close/reopen checks. macOS installed and passed hosted bridge, startup, text and
-binary-file checks but failed the screenshot format assertion. Chromium deliberately
-omits image formats from its macOS enumeration when file references are present.
-The Mac copy path now supplies PNG data on the same native file item, and acceptance
-uses AppKit to decode the actual pasteboard image alongside a byte-exact file check.
-That check must pass native CI before release.
-
-
-[Native run 36711350538](https://github.com/pbuchman/multi-device-context/actions/runs/36711350538)
-passed on both platforms at `26b77e7`, with the hosted UI gate disabled because
-deployment was not ready. Earlier Windows failures exposed a filesystem identity
-API difference and Electron's parsing of executable paths containing spaces;
-both were fixed, reviewed and verified by this native run.
+[Native run 36715994057](https://github.com/pbuchman/multi-device-context/actions/runs/36715994057)
+passed on Windows x64 and macOS arm64 at `c43c218`, with the hosted UI gate enabled.
+Each job built, installed and exercised its packaged executable against the real
+home-dev interface. Native helper tests: 23; native typecheck and bundle checks passed.
 
 | Check | macOS arm64 runner | Windows x64 runner |
 | --- | --- | --- |
-| Native helper tests/typecheck | Passed | Passed |
-| Installer build | DMG and ZIP passed | NSIS EXE passed |
-| Install artifact | DMG copied and installed | Per-user installer executed |
+| Installer build and installation | DMG and ZIP; DMG installed | NSIS EXE installed per-user |
 | Signature | Ad-hoc verified; not notarized | Unsigned status verified |
-| Packaged executable + architecture + OS encryption | Passed | Passed |
+| Packaged architecture, secure preferences and OS encryption | Passed | Passed |
 | OS startup registration and effective enabled state | Passed | Passed |
+| Hosted UI and isolated native bridge | Passed | Passed |
+| Actual startup setting toggles | Passed | Passed |
+| Native clipboard text and binary file bytes | Passed | Passed |
+| Screenshot capture, native image and original copied PNG bytes | Passed via AppKit and bridge | Passed via native clipboard and bridge |
+| Close hides window without quitting | Passed | Passed |
 | OS-disabled startup preserved after Quit/reopen | Native source checked | Passed |
-| Recovery window / close hides window | Passed | Passed |
-| Hosted UI / native bridge / Copy / startup toggle | Not run | Not run |
+
+Earlier failures identified Windows file-identity/path handling issues and the
+macOS distinction between native pasteboard contents and Chromium's format list.
+The final Mac test decodes PNG bytes directly through AppKit; Chromium deliberately
+hides image formats from enumeration when copied-file references exist. The file
+reference and original file bytes are checked separately through the real bridge.
 
 This uses actual native CI operating systems, not the user's Dell or Mac. It does
-not prove an actual logout/login cycle, Gatekeeper/SmartScreen first launch, or
-Google authentication. Hosted release checks also exercise screenshot capture
-and an actual native image clipboard representation.
-
-Native CI emits `native-smoke.json`, a screenshot and installer SHA-256 checksums.
-The workflow must pass again with `require_hosted_ui=true` (or the corresponding
-private repository build variable) after deployment. The initial artifacts must
-not be promoted as accepted releases based solely on recovery-mode checks.
+not prove an actual logout/login cycle, Gatekeeper/SmartScreen first launch on the
+target machines, or the native Google browser callback. Those limits are explicit
+in the installation guide and release notes. The workflow emits native reports,
+screenshots and installer SHA-256 checksums; future installer builds require the
+hosted UI checks by repository configuration.
 
 ## Hosted deployment evidence
 
-- Home-dev deployment `6a957196536fae3c21f0574dba0ac4908ae1f494` installed through
+- Initial home-dev deployment `6a957196536fae3c21f0574dba0ac4908ae1f494` installed through
   the canonical systemd/PM2/Caddy procedure. App unit active/enabled, listener
   limited to `127.0.0.1:8788`, clean pinned checkout and correct cgroup ownership.
+- The new-context read-order fix is deployed at `34c8eae`. After an app-only
+  restart, the host verifier passed at 12:58:15 UTC. Public HTML and JavaScript
+  match the tested build byte-for-byte.
 - Scoped Cloudflare route/DNS addition verified against saved live inventories;
   unrelated tunnel config/order preserved. Global Terraform reconciliation is
   still separately pending.
@@ -96,10 +100,10 @@ not be promoted as accepted releases based solely on recovery-mode checks.
 - Cloudflare returns HTTP403 to Python urllib's default user agent; Node/curl and
   Chromium checks passed. No Cloudflare protection was changed for verification.
 
-## Hosted acceptance outstanding
-
-- Native Google login and cross-device acceptance with the release installers.
-- Commit sanitized Cloudflare route evidence and the future Terraform preservation guard.
+Sanitized route evidence and the Terraform preservation guard are committed in
+companion revision `5306c48`; its 39 Node checks, pinned Terraform/Caddy offline
+validation and GitHub offline-contract CI passed. The guard retains both the
+accepted MDC and Health Connect routes and their DNS records.
 
 ## Target-machine checks outstanding
 
@@ -125,9 +129,15 @@ so those CI results do not establish behavior on the exact target OS versions:
   other's data. No download token URLs are used by the application.
 - Window close, explicit Quit, manual update and uninstall behavior.
 
-## Release publication outstanding
+## Published release
 
-Final independent review, all relevant checks, versioned private release,
-both installer assets, combined checksums, download verification, supported OS
-versions, actual signing status, and final installation guide. Keep the active
-goal open until required work and user-assisted evidence are handled accurately.
+[Private preview v0.1.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.1.0)
+contains the Windows x64 EXE, macOS arm64 DMG and ZIP, installation guide,
+both native reports/screenshots, and combined SHA-256 manifest. All nine uploaded
+assets matched local sizes and GitHub SHA-256 digests; the published manifest was
+downloaded and matched the local copy. The repository remains private.
+
+The native artifacts are exactly those from `c43c218` and the successful native CI
+run above. They load the hosted interface, including fix `34c8eae`; that UI-only
+change does not alter installer binaries. Windows is unsigned and macOS is ad-hoc
+signed, not notarized. Target-machine checks remain explicitly unverified above.

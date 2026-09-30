@@ -1,8 +1,9 @@
 # Installing Multi Device Context
 
-Status: the first private release is being verified. A build artifact is not yet
-an accepted release. See [the acceptance record](verification/release-acceptance.md)
-for the actual platform and deployment evidence.
+Version 0.1.0 is the initial private build. Hosted checks and installed-application
+checks passed on Windows x64 and macOS arm64 CI. See
+[the acceptance record](https://github.com/pbuchman/multi-device-context/blob/main/docs/verification/release-acceptance.md)
+for the evidence and the remaining checks on your own machines.
 
 ## Choose your installer
 
