@@ -209,6 +209,34 @@ try {
   report.checks.push(
     "Closing the window hides it without terminating the application",
   );
+  if (process.platform === "win32") {
+    await app.evaluate(({ app }) =>
+      app.setLoginItemSettings({
+        openAtLogin: true,
+        enabled: false,
+        args: ["--background"],
+      }),
+    );
+    await app.close();
+    app = await electron.launch({ executablePath, timeout: 60000 });
+    const reopened = await app.firstWindow({ timeout: 60000 });
+    await reopened.waitForLoadState("domcontentloaded");
+    const login = await app.evaluate(({ app }) =>
+      app.getLoginItemSettings({
+        path: `"${process.execPath}"`,
+        args: ["--background"],
+      }),
+    );
+    assert.equal(login.openAtLogin, true);
+    assert.equal(
+      login.executableWillLaunchAtLogin,
+      false,
+      "Reopening the app must preserve Windows-disabled startup",
+    );
+    report.checks.push(
+      "Windows startup disablement remains respected after Quit and reopen",
+    );
+  }
   report.passed = true;
 } catch (error) {
   report.passed = false;

@@ -1,17 +1,24 @@
 import type { App } from "electron";
 import type { NativeStore } from "./store.js";
+function readLaunchSettings(
+  app: Pick<App, "getLoginItemSettings">,
+  platform: NodeJS.Platform = process.platform,
+  executable: string = process.execPath,
+) {
+  // Electron 44 parses the Windows lookup path as a command line. Quote it
+  // explicitly so spaces do not truncate it. Its registration comparison
+  // strips surrounding quotes before formatting, so both checks stay exact.
+  return app.getLoginItemSettings({
+    ...(platform === "win32" ? { path: `"${executable}"` } : {}),
+    args: ["--background"],
+  });
+}
 export function isLaunchAtLoginEnabled(
   app: Pick<App, "getLoginItemSettings">,
   platform: NodeJS.Platform = process.platform,
   executable: string = process.execPath,
 ): boolean {
-  // Electron 44 parses the Windows lookup path as a command line. Quote it
-  // explicitly so spaces do not truncate it. Its registration comparison
-  // strips surrounding quotes before formatting, so both checks stay exact.
-  const settings = app.getLoginItemSettings({
-    ...(platform === "win32" ? { path: `"${executable}"` } : {}),
-    args: ["--background"],
-  });
+  const settings = readLaunchSettings(app, platform, executable);
   return (
     settings.openAtLogin &&
     (platform !== "win32" || settings.executableWillLaunchAtLogin)
@@ -35,6 +42,14 @@ export class LaunchSettings {
     private readonly store: NativeStore,
   ) {}
   async initialize(): Promise<void> {
+    const registered = readLaunchSettings(this.app);
+    // Rewriting the Windows Run entry also clears StartupApproved. Preserve an
+    // existing OS-disabled entry; only explicit user changes should re-enable it.
+    if (
+      this.store.launchAtLogin() &&
+      (registered.openAtLogin || registered.status === "requires-approval")
+    )
+      return;
     this.apply(this.store.launchAtLogin());
   }
   private apply(enabled: boolean): void {
