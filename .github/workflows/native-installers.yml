@@ -1,0 +1,101 @@
+name: Native installers
+on:
+  push:
+    branches: [codex/installable-app]
+    paths:
+      - apps/desktop/**
+      - packages/contracts/**
+      - pnpm-lock.yaml
+      - .github/workflows/native-installers.yml
+  workflow_dispatch:
+    inputs:
+      require_hosted_ui:
+        description: Require the deployed UI and native bridge (mandatory before release)
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            platform: win
+            architecture: x64
+          - os: macos-15
+            platform: mac
+            architecture: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      MDC_APP_ORIGIN: ${{ vars.MDC_APP_ORIGIN }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      MDC_REQUIRE_HOSTED_UI: ${{ inputs.require_hosted_ui || vars.MDC_REQUIRE_HOSTED_UI == 'true' }}
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22.12.0"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Validate native sources
+        run: pnpm vitest run apps/desktop/src
+      - run: pnpm --filter @mdc/desktop typecheck
+      - name: Build platform installers
+        run: pnpm --filter @mdc/desktop package:${{ matrix.platform }}
+      - name: Install Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem apps/desktop/release -Filter '*.exe')
+          if ($installer.Count -ne 1) { throw 'Expected one Windows installer' }
+          # Start-Process -Wait also waits for descendants, including the tray app.
+          # Wait on the installer process itself, with a bounded failure timeout.
+          $result = Start-Process -FilePath $installer[0].FullName -ArgumentList '/S' -PassThru
+          if (-not $result.WaitForExit(180000)) { $result.Kill(); throw 'Installer timed out' }
+          if ($result.ExitCode -ne 0) { throw 'Installer failed' }
+          Get-Process -Name 'Multi Device Context' -ErrorAction SilentlyContinue | Stop-Process
+          $installed = @(Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Multi Device Context.exe')
+          if ($installed.Count -ne 1) { throw 'Installed executable not found' }
+          "MDC_NATIVE_EXECUTABLE=$($installed[0].FullName)" >> $env:GITHUB_ENV
+          $signature = Get-AuthenticodeSignature $installed[0].FullName
+          if ($signature.Status -ne 'NotSigned') { throw 'Unexpected Windows signing status' }
+      - name: Install macOS artifact and verify ad-hoc signing
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          volume="$RUNNER_TEMP/mdc-volume"
+          destination="$RUNNER_TEMP/mdc-installed"
+          mkdir -p "$volume" "$destination"
+          dmg=(apps/desktop/release/*.dmg)
+          test "${#dmg[@]}" = 1
+          hdiutil attach -readonly -nobrowse -mountpoint "$volume" "${dmg[0]}"
+          ditto "$volume/Multi Device Context.app" "$destination/Multi Device Context.app"
+          hdiutil detach "$volume"
+          codesign --verify --deep --strict "$destination/Multi Device Context.app"
+          codesign -dv "$destination/Multi Device Context.app" 2> "$RUNNER_TEMP/mdc-signature.txt"
+          grep -q 'Signature=adhoc' "$RUNNER_TEMP/mdc-signature.txt"
+          echo "MDC_NATIVE_EXECUTABLE=$destination/Multi Device Context.app/Contents/MacOS/Multi Device Context" >> "$GITHUB_ENV"
+      - name: Exercise installed native application
+        run: pnpm --filter @mdc/desktop exec node scripts/native-smoke.mjs
+      - name: Produce checksums
+        run: pnpm --filter @mdc/desktop exec node scripts/checksums.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-${{ matrix.platform }}-${{ matrix.architecture }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/SHA256SUMS.txt
+            apps/desktop/release/native-smoke.json
+            apps/desktop/release/native-smoke.png

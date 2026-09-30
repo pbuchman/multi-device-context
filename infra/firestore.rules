@@ -1,0 +1,121 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isUuid(value) {
+      return value is string
+        && value.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$');
+    }
+
+    function validTitle(title) {
+      return title is string
+        && title.size() <= 160
+        && title.matches('.*\\S.*');
+    }
+
+    function validContext(data) {
+      return data.keys().hasOnly(['title', 'createdAt', 'updatedAt', 'deleting'])
+        && validTitle(data.title)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.deleting is bool;
+    }
+
+    function validDevice(device) {
+      return device is map
+        && device.keys().hasOnly(['id', 'name'])
+        && isUuid(device.id)
+        && device.name is string
+        && device.name.size() >= 1
+        && device.name.size() <= 80;
+    }
+
+    function validTextContent(content) {
+      return content is map
+        && content.keys().hasOnly(['kind', 'text'])
+        && (content.kind == 'text' || content.kind == 'code')
+        && content.text is string
+        && content.text.size() >= 1
+        && content.text.toUtf8().size() <= 262144;
+    }
+
+    function validAttachmentContent(content) {
+      return content is map
+        && content.keys().hasOnly(['kind', 'name', 'contentType', 'size'])
+        && content.kind == 'attachment'
+        && content.name is string
+        && content.name.size() >= 1
+        && content.name.size() <= 255
+        && content.name.matches('^[^/\\\\\\x00-\\x1F\\x7F-\\x9F]+$')
+        && content.contentType is string
+        && content.contentType.matches("^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+        && content.size is int
+        && content.size >= 1
+        && content.size <= 104857600;
+    }
+
+    function validItem(data) {
+      return data.keys().hasOnly(['content', 'device', 'createdAt', 'ready', 'deleting'])
+        && (validTextContent(data.content) || validAttachmentContent(data.content))
+        && validDevice(data.device)
+        && data.createdAt is timestamp
+        && data.ready is bool
+        && data.deleting is bool;
+    }
+
+    function liveParentAfter(uid, contextId) {
+      let parent = /databases/$(database)/documents/users/$(uid)/contexts/$(contextId);
+      return existsAfter(parent) && getAfter(parent).data.deleting == false;
+    }
+
+    function liveParent(uid, contextId) {
+      let parent = /databases/$(database)/documents/users/$(uid)/contexts/$(contextId);
+      return exists(parent) && get(parent).data.deleting == false;
+    }
+
+    match /users/{uid}/contexts/{contextId} {
+      allow get, list: if isOwner(uid) && resource.data.deleting == false;
+      allow create: if isOwner(uid)
+        && isUuid(contextId)
+        && !exists(/databases/$(database)/documents/users/$(uid)/deletedContexts/$(contextId))
+        && validContext(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.deleting == false;
+      allow update: if isOwner(uid)
+        && validContext(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt'])
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.deleting == false;
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow get, list: if isOwner(uid)
+          && resource.data.deleting == false
+          && liveParent(uid, contextId);
+        allow create: if isOwner(uid)
+          && isUuid(contextId)
+          && isUuid(itemId)
+          && !exists(/databases/$(database)/documents/users/$(uid)/deletedItems/$(contextId + '_' + itemId))
+          && liveParentAfter(uid, contextId)
+          && validItem(request.resource.data)
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.deleting == false
+          && (
+            ((request.resource.data.content.kind == 'text' || request.resource.data.content.kind == 'code')
+              && request.resource.data.ready == true)
+            || (request.resource.data.content.kind == 'attachment'
+              && request.resource.data.ready == false)
+          );
+        allow update, delete: if false;
+      }
+    }
+    // Server-only UUID markers prevent offline clients resurrecting removed
+    // contexts/items. The default deny leaves these unreadable and immutable to clients.
+  }
+}

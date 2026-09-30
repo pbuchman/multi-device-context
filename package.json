@@ -1,0 +1,28 @@
+{
+  "name": "multi-device-context",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.29.3",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "test": "vitest run && pnpm test:runtime",
+    "build:web": "pnpm --filter @mdc/web build",
+    "test:web": "vitest run apps/web/src",
+    "test:rules": "firebase emulators:exec --project demo-mdc --only firestore,storage \"pnpm vitest run --config vitest.rules.config.ts\"",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test:runtime": "node --test scripts/runtime/*.test.mjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.2",
+    "firebase": "12.19.0",
+    "firebase-tools": "15.32.0",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
+  },
+  "dependencies": {
+    "pm2": "7.0.4"
+  }
+}

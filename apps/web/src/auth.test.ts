@@ -1,0 +1,63 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { auth0ClientOptions, exchangeSession, loadRuntimeConfig, signOutSession } from "./auth.js";
+
+const config = {
+  appOrigin: "https://contexts.example.com",
+  auth0: {
+    domain: "login.example.com",
+    audience: "https://contexts.example.com/api",
+    webClientId: "web-client",
+    nativeClientId: "native-client",
+    connection: "google-oauth2" as const,
+  },
+  firebase: {
+    apiKey: "api-key",
+    authDomain: "contexts.firebaseapp.com",
+    projectId: "contexts",
+    storageBucket: "contexts.firebasestorage.app",
+  },
+  limits: { maxTextBytes: 262144 as const, maxAttachmentBytes: 104857600 as const },
+  bridgeVersion: 1 as const,
+};
+
+describe("authentication boundary", () => {
+  it("uses Auth0 memory tokens and the Google-only connection", () => {
+    expect(auth0ClientOptions(config)).toMatchObject({
+      domain: "login.example.com",
+      clientId: "web-client",
+      cacheLocation: "memory",
+      useRefreshTokens: false,
+      authorizationParams: {
+        audience: "https://contexts.example.com/api",
+        connection: "google-oauth2",
+        redirect_uri: "https://contexts.example.com/auth/callback",
+      },
+    });
+  });
+
+  it("rejects malformed runtime configuration", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ ...config, bridgeVersion: 2 })));
+    await expect(loadRuntimeConfig(fetcher)).rejects.toThrow("configuration");
+  });
+
+  it("posts an access token without persisting it and validates the session payload", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ uid: "derived_uid", customToken: "custom" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    await expect(exchangeSession("access-token", fetcher)).resolves.toEqual({ uid: "derived_uid", customToken: "custom" });
+    expect(fetcher).toHaveBeenCalledWith("/api/session", expect.objectContaining({
+      method: "POST",
+      headers: { authorization: "Bearer access-token" },
+    }));
+  });
+
+  it("allows native cancellation before destructive Firebase disposal", async () => {
+    const events: string[] = [];
+    const native = vi.fn(async () => { events.push("native"); throw new Error("cancelled"); });
+    const dispose = vi.fn(async () => { events.push("dispose"); });
+    await expect(signOutSession(native, dispose)).rejects.toThrow("cancelled");
+    expect(events).toEqual(["native"]);
+  });
+});

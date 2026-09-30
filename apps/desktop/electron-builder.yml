@@ -1,0 +1,45 @@
+appId: com.multidevicecontext.desktop
+productName: Multi Device Context
+copyright: Copyright © 2026 Multi Device Context contributors
+asar: true
+npmRebuild: false
+files:
+  - dist/**
+  - package.json
+directories:
+  output: release
+  buildResources: resources
+protocols:
+  - name: Multi Device Context sign-in
+    schemes:
+      - multi-device-context
+artifactName: Multi-Device-Context-${version}-${os}-${arch}.${ext}
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/app.ico
+  signAndEditExecutable: true
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+mac:
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  icon: resources/app.png
+  category: public.app-category.productivity
+  minimumSystemVersion: "13.0.0"
+  identity: "-"
+  hardenedRuntime: true
+  notarize: false
+dmg:
+  sign: false

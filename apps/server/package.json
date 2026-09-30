@@ -1,0 +1,26 @@
+{
+  "name": "@mdc/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --external:fastify --external:@fastify/static --external:firebase-admin/*",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fastify/static": "10.1.5",
+    "@mdc/contracts": "workspace:*",
+    "fastify": "5.12.5",
+    "firebase-admin": "14.5.0",
+    "jose": "6.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.11",
+    "esbuild": "0.27.3",
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
+  }
+}

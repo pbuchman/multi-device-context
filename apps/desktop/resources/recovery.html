@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Multi Device Context</title>
+    <link rel="stylesheet" href="recovery.css" />
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">↔</div>
+      <h1>Let’s reconnect.</h1>
+      <p>Multi Device Context can’t reach your shared workspace right now.</p>
+      <p>
+        Check your internet connection, then try again. Clipboard shares already
+        queued on this computer remain saved.
+      </p>
+      <button id="retry" type="button">Try again</button>
+      <p id="status" role="status"></p>
+      <small>You can keep the app in the tray while you reconnect.</small>
+    </main>
+    <script src="recovery.js"></script>
+  </body>
+</html>
