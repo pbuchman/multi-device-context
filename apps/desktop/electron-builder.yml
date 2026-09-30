@@ -37,8 +37,8 @@ mac:
       arch: [arm64]
   icon: resources/app.png
   category: public.app-category.productivity
-  minimumSystemVersion: '13.0.0'
-  identity: '-'
+  minimumSystemVersion: "13.0.0"
+  identity: "-"
   hardenedRuntime: true
   notarize: false
 dmg:

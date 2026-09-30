@@ -31,15 +31,15 @@ jobs:
     timeout-minutes: 30
     env:
       MDC_APP_ORIGIN: ${{ vars.MDC_APP_ORIGIN }}
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
       MDC_REQUIRE_HOSTED_UI: ${{ inputs.require_hosted_ui || vars.MDC_REQUIRE_HOSTED_UI == 'true' }}
-      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: '22.12.0'
+          node-version: "22.12.0"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Validate native sources
