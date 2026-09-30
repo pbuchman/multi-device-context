@@ -137,6 +137,56 @@ try {
     report.checks.push(
       "Real native clipboard text and copied-file round trip preserves bytes",
     );
+    const png = await app.evaluate(
+      async ({ clipboard, ClipboardItem, nativeImage }) => {
+        const bytes = nativeImage
+          .createFromBitmap(
+            Buffer.from([
+              0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 255, 255,
+              255,
+            ]),
+            { width: 2, height: 2 },
+          )
+          .toPNG();
+        await clipboard.write([
+          new ClipboardItem({
+            "image/png": new Blob([bytes], { type: "image/png" }),
+          }),
+        ]);
+        return Array.from(bytes);
+      },
+    );
+    const screenshot = await window.evaluate(async () => {
+      const snapshot = await window.contextDesktop.readClipboard();
+      return snapshot.files.map((file) => ({
+        contentType: file.contentType,
+        bytes: Array.from(file.bytes),
+      }));
+    });
+    assert.equal(screenshot.length, 1);
+    assert.equal(screenshot[0].contentType, "image/png");
+    await window.evaluate(
+      (bytes) =>
+        window.contextDesktop.copyFile({
+          name: "native-screenshot.png",
+          contentType: "image/png",
+          bytes: new Uint8Array(bytes),
+        }),
+      png,
+    );
+    const imageSize = await app.evaluate(async ({ clipboard, nativeImage }) => {
+      const items = await clipboard.read();
+      const image = items.find((item) => item.types.includes("image/png"));
+      if (!image) return null;
+      const blob = await image.getType("image/png");
+      return nativeImage
+        .createFromBuffer(Buffer.from(await blob.arrayBuffer()))
+        .getSize();
+    });
+    assert.deepEqual(imageSize, { width: 2, height: 2 });
+    report.checks.push(
+      "Screenshot capture and Copy expose an actual native clipboard image",
+    );
   } else {
     assert.ok(
       window.url().startsWith("file:") ||
