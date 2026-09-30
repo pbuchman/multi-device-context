@@ -1,10 +1,13 @@
 # Installing Multi Device Context
 
-Version 0.2.0 extends the private preview with automatic titles, context links,
-instant switching and agent access. Hosted checks and installed-application
-checks passed on Windows x64 and macOS arm64 CI. See
-[the acceptance record](https://github.com/pbuchman/multi-device-context/blob/main/docs/verification/v0.2.0.md)
-for the evidence and the remaining checks on your own machines.
+Version 0.3.0 fixes local history deletion, draft conflicts, retry/cancellation,
+media downloads and packaging, and adds account-level AI title preferences.
+See [the acceptance record](verification/v0.3.0.md) for CI, deployment evidence
+and the remaining checks on your own machines.
+
+After updating, reconnect and close older app tabs to complete the one-time local
+history migration. Unsent drafts and the outbox are preserved. Synchronized
+history is now memory-only and requires a connection after restarting the app.
 
 ## Choose your installer
 
