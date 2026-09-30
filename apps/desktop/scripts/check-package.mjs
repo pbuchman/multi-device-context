@@ -6,7 +6,7 @@ const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 assert.equal(manifest.license, 'MIT');
 assert.equal(Object.keys(manifest.dependencies ?? {}).length, 0);
 assert.equal(Object.keys(manifest.devDependencies ?? {}).length, 0);
-const files = await readdir(root, { recursive: true });
+const files = (await readdir(root, { recursive: true })).map(path => path.replaceAll('\\', '/'));
 assert(!files.some(path => /(^|[/\\])node_modules([/\\]|$)|\.map$/.test(path)));
 for (const file of ['dist/main.cjs', 'dist/preload.cjs', 'LICENSE', 'THIRD_PARTY_NOTICES.txt']) assert(files.includes(file));
 console.log('PASS isolated desktop package: bundled runtime, MIT and dependency notices; no server packages or source maps');
