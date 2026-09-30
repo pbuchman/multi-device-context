@@ -596,13 +596,19 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
   };
   const initialNativeId = await drainNative();
   const initialNavigation = await bridge?.takeNavigation?.();
+  if (initialNavigation && !initialNavigation.contextId && !initialNativeId) window.history.replaceState({}, "", "/");
   void runner.drain();
   return {
     services: {
       ...(initialNavigation?.contextId || initialNativeId ? { initialContextId: initialNavigation?.contextId ?? initialNativeId! } : {}),
       agentKeys: cloud,
       isDesktop: Boolean(bridge),
-      ...(bridge?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => bridge.onNavigate!(event => listener(event.contextId)) } : {}),
+      ...(bridge?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => {
+        let active = true;
+        const unsubscribe = bridge.onNavigate!(event => listener(event.contextId));
+        void bridge.takeNavigation?.().then(event => { if (active && event) listener(event.contextId); }).catch(() => {});
+        return () => { active = false; unsubscribe(); };
+      } } : {}),
       viewer: session.viewer,
       device,
       cloud,
