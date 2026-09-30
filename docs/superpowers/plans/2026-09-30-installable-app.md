@@ -125,13 +125,13 @@ marks the context deleting, and idempotently cleans its descendants and files.
 `GET /health/live` proves process health; `/health/ready` verifies required cloud
 configuration/connectivity without exposing secret values.
 
-- [ ] Write API authentication tests for missing, expired, wrong audience/issuer,
+- [x] Write API authentication tests for missing, expired, wrong audience/issuer,
   wrong client, non-Google and valid signed tokens using ephemeral test keys.
-- [ ] Write rule tests with two users proving cross-user read/write/delete/list
+- [x] Write rule tests with two users proving cross-user read/write/delete/list
   denial, invalid metadata denial, deletion-state denial and file size limits.
-- [ ] Implement the auth bridge, strict public configuration projection, data
+- [x] Implement the auth bridge, strict public configuration projection, data
   access rules and resumable deletion. Do not put secrets into responses/logs.
-- [ ] Run API and emulator rule tests and review both security boundaries.
+- [x] Run API and emulator rule tests and review both security boundaries.
 
 ## Task 3: Real hosted context UI and durable sharing
 
