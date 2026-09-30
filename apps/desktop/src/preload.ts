@@ -25,6 +25,12 @@ if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
     getPendingClipboardShares: () => invoke("getPendingClipboardShares"),
     acknowledgeClipboardShare: (id: string) =>
       invoke("acknowledgeClipboardShare", id),
+    takeNavigation: () => invoke("takeNavigation"),
+    onNavigate: (listener) => {
+      const notify = () => { void invoke<{ contextId?: string } | undefined>("takeNavigation").then(value => { if (value) listener(value); }).catch(() => {}); };
+      ipcRenderer.on("mdc:navigate", notify);
+      return () => ipcRenderer.removeListener("mdc:navigate", notify);
+    },
     onShareClipboard: (listener) => {
       const notify = () => listener();
       ipcRenderer.on("mdc:shareClipboard", notify);

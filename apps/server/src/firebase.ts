@@ -145,6 +145,7 @@ export class FirebaseBackend implements Backend {
         throw new BackendConflictError();
       }
       transaction.update(itemRef, { ready: true });
+      if (currentContextSnapshot.data()?.firstItemId === itemId) transaction.update(contextRef, { ready: true });
     });
   }
 

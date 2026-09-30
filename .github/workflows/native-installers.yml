@@ -1,7 +1,7 @@
 name: Native installers
 on:
   push:
-    branches: [codex/installable-app]
+    branches: [codex/installable-app, codex/context-v0.2]
     paths:
       - apps/desktop/**
       - packages/contracts/**

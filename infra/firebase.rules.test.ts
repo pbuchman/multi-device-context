@@ -125,11 +125,24 @@ afterEach(async () => {
 afterAll(async () => environment.cleanup());
 
 describe("Firestore owner isolation and context validation", () => {
+  it("allows v0.2 context metadata and manual titles but keeps job leases server-only", async () => {
+    const owner = environment.authenticatedContext(OWNER).firestore();
+    const batch = writeBatch(owner);
+    batch.set(doc(owner, contextPath()), { ...contextRecord(), originDeviceId: CONTEXT_ID, firstItemId: ITEM_ID, ready: true, titleState: "pending" });
+    batch.set(doc(owner, itemPath()), textItem());
+    await assertSucceeds(batch.commit());
+    await assertSucceeds(updateDoc(doc(owner, contextPath()), { title: "Manual context title", titleState: "manual", updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(owner, contextPath()), { titleState: "generated", updatedAt: serverTimestamp() }));
+    await assertFails(setDoc(doc(owner, contextPath(OWNER, SECOND_CONTEXT_ID)), { ...contextRecord(), titleAttempts: 0 }));
+    await assertFails(getDoc(doc(owner, `agentKeys/${CONTEXT_ID}`)));
+  });
+
   it("prevents old outboxes recreating deleted contexts while allowing new IDs", async () => {
     const marker = `users/${OWNER}/deletedContexts/${CONTEXT_ID}`;
     await seed(marker, { deleted: true });
     const owner = environment.authenticatedContext(OWNER).firestore();
-    await assertFails(getDoc(doc(owner, marker)));
+    await assertSucceeds(getDoc(doc(owner, marker)));
+    await assertFails(getDoc(doc(environment.authenticatedContext(OTHER).firestore(), marker)));
     await assertFails(deleteDoc(doc(owner, marker)));
     await assertFails(setDoc(doc(owner, marker), { deleted: false }));
     const batch = writeBatch(owner);
@@ -194,6 +207,7 @@ describe("Firestore item validation and lifecycle", () => {
     await seed(marker, { deleted: true });
     const owner = environment.authenticatedContext(OWNER).firestore();
     await assertFails(getDoc(doc(owner, marker)));
+    await assertFails(getDoc(doc(environment.authenticatedContext(OTHER).firestore(), marker)));
     await assertFails(deleteDoc(doc(owner, marker)));
     await assertFails(setDoc(doc(owner, marker), { deleted: false }));
     await assertFails(setDoc(doc(owner, itemPath()), textItem()));

@@ -1,5 +1,5 @@
 import { createAuth0Client, type Auth0Client, type Auth0ClientOptions, type User } from "@auth0/auth0-spa-js";
-import { RuntimeConfigSchema, type DesktopBridge, type RuntimeConfig } from "@mdc/contracts";
+import { contextIdFromPath, RuntimeConfigSchema, type DesktopBridge, type RuntimeConfig } from "@mdc/contracts";
 import { deleteApp, initializeApp, type FirebaseApp } from "firebase/app";
 import { getAuth, signInWithCustomToken, signOut as firebaseSignOut } from "firebase/auth";
 import { clearIndexedDbPersistence, getFirestore, terminate } from "firebase/firestore";
@@ -112,8 +112,9 @@ export class SessionManager {
       this.#auth0 ??= await createAuth0Client(auth0ClientOptions(this.#config));
       const params = new URLSearchParams(window.location.search);
       if (params.has("code") && params.has("state")) {
-        await this.#auth0.handleRedirectCallback();
-        window.history.replaceState({}, document.title, `/${window.location.hash}`);
+        const result = await this.#auth0.handleRedirectCallback<{ returnTo?: string }>();
+        const target = result?.appState?.returnTo;
+        window.history.replaceState({}, document.title, target && contextIdFromPath(target) ? target : "/");
       }
     }
     return this.#config;
@@ -135,7 +136,7 @@ export class SessionManager {
     const config = await this.prepare();
     if (this.#bridge) return this.#establish(await this.#bridge.getAccessToken(true));
     if (!(await this.#auth0!.isAuthenticated())) {
-      await this.#auth0!.loginWithRedirect({ authorizationParams: { connection: config.auth0.connection } });
+      await this.#auth0!.loginWithRedirect({ appState: { returnTo: window.location.pathname }, authorizationParams: { connection: config.auth0.connection } });
       return undefined;
     }
     return this.#establish(await browserToken(this.#auth0!));

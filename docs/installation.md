@@ -1,8 +1,9 @@
 # Installing Multi Device Context
 
-Version 0.1.0 is the initial private build. Hosted checks and installed-application
+Version 0.2.0 extends the private preview with automatic titles, context links,
+instant switching and agent access. Hosted checks and installed-application
 checks passed on Windows x64 and macOS arm64 CI. See
-[the acceptance record](https://github.com/pbuchman/multi-device-context/blob/main/docs/verification/release-acceptance.md)
+[the acceptance record](https://github.com/pbuchman/multi-device-context/blob/main/docs/verification/v0.2.0.md)
 for the evidence and the remaining checks on your own machines.
 
 ## Choose your installer
@@ -58,8 +59,9 @@ machine; CI registration is not evidence of a user logout/login cycle.
 2. Sign in using the same Google account on both computers. Allow the browser to
    return to Multi Device Context when prompted.
 3. Open or create a context. Paste text, a link, code, a screenshot or copied files.
-   Pasting shares immediately; typed text uses the send action.
-4. On the other computer, open that context. Choose **Copy** or **Save** on an item
+   Pasting shares immediately; typed text is shared with Enter.
+4. A newly shared context opens automatically on the other running computer.
+   Unsent drafts are preserved. Choose **Copy** or **Save** on an item
    when you need it. Receiving an item never changes the clipboard automatically.
 
 **Share clipboard** in the tray captures the clipboard at that moment and queues
@@ -72,6 +74,22 @@ clipboard captures have a 256 MiB total limit. Folders, network file locations,
 links to local files, empty files and unsupported application-specific clipboard
 formats produce an explanation. Rich content with a plain-text representation is
 shared as text. Files retain their original bytes.
+
+## Context links, names and agents
+
+Every manual opening starts a fresh context. Unsent drafts remain accessible in
+the sidebar. Existing contexts can be opened by their copied HTTPS link; the
+context menu also offers **Open in desktop app**. Sign-in preserves the target.
+
+Names appear automatically after the first share. Only bounded first text or file
+names/types are sent to the title model, never attachment bytes. Rename a context
+from its menu to choose your own title. Use the × beside a context to delete it
+permanently after confirmation; there is no trash or restore.
+
+For agent access, open **Settings → Agent access**, create a named key and store
+it privately. The [agent API and portable skill guide](https://github.com/pbuchman/multi-device-context/blob/main/docs/agent-api.md)
+explains setup, watching for new contexts and returning results. Agent keys grant
+full access to your data and can be revoked from Settings.
 
 ## Connection, updates and removal
 
@@ -91,8 +109,8 @@ Before uninstalling, finish or deliberately discard pending shares, sign out,
 turn off **Launch at login**, and quit. Use Windows Installed Apps to uninstall,
 or move the macOS application from Applications to Trash. Uninstalling the app
 does not delete contexts stored in your account. Delete unwanted contexts inside
-the app first. Deletion removes the content and attachments; a small server-only
-record of the deleted IDs remains to block old offline uploads from restoring them.
+the app first. Deletion removes the content and attachments; a small server-managed
+record containing only deleted IDs remains to block old offline uploads from restoring them.
 The Windows uninstaller retains app data for a later reinstall;
 signing out clears the account's local data while the app is running.
 

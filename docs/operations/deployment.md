@@ -213,3 +213,30 @@ runtime key, restart and verify the app, then revoke the old key and disable old
 secret versions according to the chosen rollback window. A compromised bootstrap
 key also requires replacement because it can retrieve the runtime package. Do not
 claim a disabled key's package remains a usable recovery version.
+
+## v0.2 title worker and agent access
+
+The schemaVersion-1 package now accepts two optional private environment keys:
+`MDC_OPENROUTER_API_KEY` (a dedicated inference key, never a management key) and
+`MDC_TITLE_MODEL` (default `openai/gpt-4.1-nano`). Existing packages remain valid.
+Provision the inference key with `limit: 1`, `limit_reset: monthly` and
+`include_byok_in_limit: true`. Publish a new Secret Manager package and pin its
+positive version in the bootstrap configuration. Never commit either key.
+
+Deploy the v0.2 rules/indexes before the server/UI: the context `titleState`
+collection-group index drives durable jobs; composite `deleting,createdAt`
+indexes support API pagination. Wait until the indexes are READY. Clients may
+read only their own ID-only deletion markers. Agent keys are server-only hashed
+records; their administration requires Google login.
+
+The title worker starts with the service, uses a persisted lease and at most
+three attempts, and falls back without interrupting sharing. Its outgoing
+OpenRouter requests require ZDR. Configuration without an inference key keeps
+fallback titles. Install the portable skill folder on the host; configure each
+agent privately using the instructions in [agent-api.md](../agent-api.md).
+
+For acceptance, test a synthetic account: create/paginate/read/upload/download/
+delete via an agent key, verify isolation and revocation, observe automatic title
+updates and bidirectional UI selection, then remove all synthetic content and
+keys. Check actual installed artifacts via the native workflow. An older native
+v0.1 client can still load the new UI; native reopen/link behavior requires v0.2.

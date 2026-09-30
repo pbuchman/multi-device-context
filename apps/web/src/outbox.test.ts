@@ -27,6 +27,20 @@ describe("DurableOutbox", () => {
     Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: new IDBFactory() });
   });
 
+  it("does not restore pending content when deletion races an in-flight failure", async () => {
+    const outbox = new DurableOutbox(namespaceA);
+    await outbox.enqueue(draft());
+    const record = (await outbox.list())[0]!;
+    await outbox.removeContext(contextId);
+    await outbox.markFailed(record, new Error("late network failure"), 1000, false);
+    await outbox.retry();
+    expect(await outbox.list()).toEqual([]);
+    await expect(outbox.enqueue(draft())).rejects.toThrow("deleted");
+    expect(await outbox.enqueueNativeRequest(contextId, [draft({ nativeRequestId: contextId })])).toBe(true);
+    expect(await outbox.list()).toEqual([]);
+    outbox.close();
+  });
+
   it("retains stable IDs, exact content and attachment bytes across reopen", async () => {
     const first = new DurableOutbox(namespaceA);
     await first.enqueue(draft({
