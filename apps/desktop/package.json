@@ -1,0 +1,27 @@
+{
+  "name": "@mdc/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private contexts shared across your computers",
+  "author": "Multi Device Context contributors",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "package:win": "pnpm build && electron-builder --win nsis --x64 --publish never",
+    "package:mac": "pnpm build && electron-builder --mac dmg zip --arm64 --publish never"
+  },
+  "devDependencies": {
+    "@mdc/contracts": "workspace:*",
+    "@types/node": "22.19.11",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.27.3",
+    "jose": "6.2.12",
+    "playwright": "1.63.0",
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
+  }
+}

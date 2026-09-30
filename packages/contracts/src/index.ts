@@ -110,6 +110,12 @@ export type ClipboardSnapshot = {
   files: NativeFile[];
 };
 
+export type PendingClipboardShare = {
+  id: Id;
+  capturedAt: number;
+  snapshot: ClipboardSnapshot;
+};
+
 export interface DesktopBridge {
   version: 1;
   platform: "win32" | "darwin" | "linux";
@@ -122,6 +128,8 @@ export interface DesktopBridge {
   saveFile(file: NativeFile): Promise<boolean>;
   getLaunchAtLogin(): Promise<boolean>;
   setLaunchAtLogin(enabled: boolean): Promise<void>;
+  getPendingClipboardShares(): Promise<PendingClipboardShare[]>;
+  acknowledgeClipboardShare(id: Id): Promise<void>;
   onShareClipboard(listener: () => void): () => void;
 }
 
