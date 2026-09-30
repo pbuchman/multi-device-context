@@ -91,13 +91,17 @@ class FakeFirestore {
   async runTransaction<T>(callback: (transaction: {
     get(ref: FakeDocumentReference): Promise<FakeSnapshot>;
     update(ref: FakeDocumentReference, data: Stored): void;
+    set(ref: FakeDocumentReference, data: Stored): void;
   }) => Promise<T>) {
     const updates: Array<[FakeDocumentReference, Stored]> = [];
+    const sets: Array<[FakeDocumentReference, Stored]> = [];
     const result = await callback({
       get: (ref) => ref.get(),
       update: (ref, data) => updates.push([ref, data]),
+      set: (ref, data) => sets.push([ref, data]),
     });
     for (const [ref, data] of updates) await ref.update(data);
+    for (const [ref, data] of sets) await ref.set(data);
     return result;
   }
   collectionGroup(name: string) {
@@ -239,6 +243,13 @@ describe("FirebaseBackend upload completion", () => {
 });
 
 describe("FirebaseBackend deletion", () => {
+  it("records absent deletions to reject a delayed create after DELETE returns", async () => {
+    const { backend, firestore } = fixture();
+    await backend.deleteContext(UID, CONTEXT_ID);
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID);
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true });
+    expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true });
+  });
   it("persists tombstones and resumes context cleanup after an interrupted object delete", async () => {
     const { backend, firestore, bucket } = fixture();
     const { context, item, object } = paths();
@@ -258,10 +269,12 @@ describe("FirebaseBackend deletion", () => {
 
     await expect(backend.deleteContext(UID, CONTEXT_ID)).rejects.toThrow("transient");
     expect(firestore.documents.get(context)?.deleting).toBe(true);
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true });
     expect(firestore.documents.get(item)?.deleting).toBe(true);
 
     await backend.deleteContext(UID, CONTEXT_ID);
     expect(firestore.documents.has(context)).toBe(false);
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true });
     expect(firestore.documents.has(item)).toBe(false);
     expect([...bucket.objects.keys()].some((name) => name.startsWith(`${context}/`))).toBe(false);
     await expect(backend.deleteContext(UID, CONTEXT_ID)).resolves.toBeUndefined();
@@ -278,6 +291,7 @@ describe("FirebaseBackend deletion", () => {
 
     await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID);
     expect(bucket.objects.has(object)).toBe(false);
+    expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true });
     expect(bucket.objects.has(other)).toBe(true);
     await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID)).resolves.toBeUndefined();
   });

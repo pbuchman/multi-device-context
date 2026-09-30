@@ -125,6 +125,19 @@ afterEach(async () => {
 afterAll(async () => environment.cleanup());
 
 describe("Firestore owner isolation and context validation", () => {
+  it("prevents old outboxes recreating deleted contexts while allowing new IDs", async () => {
+    const marker = `users/${OWNER}/deletedContexts/${CONTEXT_ID}`;
+    await seed(marker, { deleted: true });
+    const owner = environment.authenticatedContext(OWNER).firestore();
+    await assertFails(getDoc(doc(owner, marker)));
+    await assertFails(deleteDoc(doc(owner, marker)));
+    await assertFails(setDoc(doc(owner, marker), { deleted: false }));
+    const batch = writeBatch(owner);
+    batch.set(doc(owner, contextPath()), contextRecord());
+    batch.set(doc(owner, itemPath()), textItem());
+    await assertFails(batch.commit());
+    await assertSucceeds(setDoc(doc(owner, contextPath(OWNER, SECOND_CONTEXT_ID)), contextRecord()));
+  });
   it("allows owner create/get/list/update and denies unauthenticated or cross-user access", async () => {
     const owner = environment.authenticatedContext(OWNER).firestore();
     const other = environment.authenticatedContext(OTHER).firestore();
@@ -175,6 +188,17 @@ describe("Firestore owner isolation and context validation", () => {
 });
 
 describe("Firestore item validation and lifecycle", () => {
+  it("prevents a delayed outbox from recreating an individually deleted item", async () => {
+    await seed(contextPath(), { title: "Context", deleting: false });
+    const marker = `users/${OWNER}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`;
+    await seed(marker, { deleted: true });
+    const owner = environment.authenticatedContext(OWNER).firestore();
+    await assertFails(getDoc(doc(owner, marker)));
+    await assertFails(deleteDoc(doc(owner, marker)));
+    await assertFails(setDoc(doc(owner, marker), { deleted: false }));
+    await assertFails(setDoc(doc(owner, itemPath()), textItem()));
+    await assertSucceeds(setDoc(doc(owner, itemPath(OWNER, CONTEXT_ID, SECOND_CONTEXT_ID)), textItem()));
+  });
   it("supports atomic parent/item creation with getAfter and rejects missing or deleting parents", async () => {
     const owner = environment.authenticatedContext(OWNER).firestore();
     const batch = writeBatch(owner);

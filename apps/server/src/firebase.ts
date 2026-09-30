@@ -147,8 +147,10 @@ export class FirebaseBackend implements Backend {
 
   async deleteItem(uid: string, contextId: string, itemId: string): Promise<void> {
     const reference = this.firestore.doc(itemPath(uid, contextId, itemId));
+    const deletionMarker = this.firestore.doc(`users/${uid}/deletedItems/${contextId}_${itemId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reference);
+      transaction.set(deletionMarker, { deleted: true });
       if (!snapshot.exists) return false;
       const record = snapshot.data() as ItemRecord;
       if (record.deleting !== true) transaction.update(reference, { deleting: true });
@@ -162,8 +164,12 @@ export class FirebaseBackend implements Backend {
 
   async deleteContext(uid: string, contextId: string): Promise<void> {
     const reference = this.firestore.doc(contextPath(uid, contextId));
+    const deletionMarker = this.firestore.doc(`users/${uid}/deletedContexts/${contextId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reference);
+      // Retain only the deleted UUID, so a disconnected client's original
+      // create cannot resurrect content after the cleanup removes this parent.
+      transaction.set(deletionMarker, { deleted: true });
       if (!snapshot.exists) return false;
       const record = snapshot.data() as ContextRecord;
       if (record.deleting !== true) transaction.update(reference, { deleting: true });

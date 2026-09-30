@@ -81,6 +81,7 @@ service cloud.firestore {
       allow get, list: if isOwner(uid) && resource.data.deleting == false;
       allow create: if isOwner(uid)
         && isUuid(contextId)
+        && !exists(/databases/$(database)/documents/users/$(uid)/deletedContexts/$(contextId))
         && validContext(request.resource.data)
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time
@@ -100,6 +101,7 @@ service cloud.firestore {
         allow create: if isOwner(uid)
           && isUuid(contextId)
           && isUuid(itemId)
+          && !exists(/databases/$(database)/documents/users/$(uid)/deletedItems/$(contextId + '_' + itemId))
           && liveParentAfter(uid, contextId)
           && validItem(request.resource.data)
           && request.resource.data.createdAt == request.time
@@ -113,5 +115,7 @@ service cloud.firestore {
         allow update, delete: if false;
       }
     }
+    // Server-only UUID markers prevent offline clients resurrecting removed
+    // contexts/items. The default deny leaves these unreadable and immutable to clients.
   }
 }

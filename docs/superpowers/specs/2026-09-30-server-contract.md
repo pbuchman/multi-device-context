@@ -43,3 +43,23 @@ Test config in firebase.json uses Firestore18080, Storage19199 (check listeners 
 - [Rules string UTF-8 encoding](https://firebase.google.com/docs/reference/rules/rules.String#toutf8) and [byte length](https://firebase.google.com/docs/reference/rules/rules.Bytes).
 - [Storage cross-service rules and limits](https://firebase.google.com/docs/storage/security/rules-conditions#enhance_with_firestore).
 - [Authenticated Storage downloads](https://firebase.google.com/docs/storage/web/download-files#download_data_directly_from_the_sdk).
+
+
+## Deletion retry amendment (30 September 2026)
+
+A delayed initial create must never resurrect a deleted context or item, including
+a lost acknowledgement followed by deletion on another device. The server writes
+a permanent UUID-only marker in the same transaction that marks a record deleting:
+`users/{uid}/deletedContexts/{contextId}` or
+`users/{uid}/deletedItems/{contextId}_{itemId}`, with `{deleted: true}`. DELETE
+records the marker even when the document is absent, so it also wins over a later
+create. No context title, message, filename, device information or bytes remain
+in these markers. Clients cannot read, create, change or delete them. Creation
+rules reject a matching marker. Normal cleanup removes content documents and
+all object generations but retains the small markers for the account lifetime.
+
+A new outbox record may therefore retry its original create after an offline
+failure; attempt count is not evidence that a context was previously deleted.
+Clients first query the live context list and query its items only when the parent
+exists. Missing-context appends fail; initial creates use the original stable UUID
+and let these rules resolve the ambiguous case safely.
