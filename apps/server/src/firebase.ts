@@ -97,9 +97,10 @@ export class FirebaseBackend implements Backend {
     this.assertCompletable(context, item);
     if (item.ready === true) return;
 
+    const file = this.bucket.file(objectPath(uid, contextId, itemId));
     let metadata: { size?: string | number; contentType?: string };
     try {
-      [metadata] = await this.bucket.file(objectPath(uid, contextId, itemId)).getMetadata();
+      [metadata] = await file.getMetadata();
     } catch (error) {
       if (isMissingObject(error)) throw new BackendNotFoundError();
       throw error;
@@ -109,6 +110,20 @@ export class FirebaseBackend implements Backend {
       metadata.contentType !== item.content?.contentType
     ) {
       throw new BackendConflictError();
+    }
+
+    // Firebase adds bearer download tokens during uploads, before evaluating
+    // rules. Remove them before making the attachment visible to any client.
+    try {
+      const [privateMetadata] = await file.setMetadata({
+        metadata: { firebaseStorageDownloadTokens: null },
+      });
+      if (privateMetadata.metadata?.firebaseStorageDownloadTokens) {
+        throw new Error("Attachment privacy metadata could not be finalized");
+      }
+    } catch (error) {
+      if (isMissingObject(error)) throw new BackendNotFoundError();
+      throw error;
     }
 
     await this.firestore.runTransaction(async (transaction) => {

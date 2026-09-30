@@ -117,6 +117,8 @@ type FakeObject = {
   contentType: string;
   generation: string;
   failDeletes?: number;
+  customMetadata?: Record<string, string>;
+  failMetadataUpdate?: boolean;
 };
 
 class FakeFile {
@@ -128,7 +130,17 @@ class FakeFile {
   async getMetadata() {
     const object = this.bucket.objects.get(this.name);
     if (!object) throw Object.assign(new Error("missing"), { code: 404 });
-    return [{ size: String(object.size), contentType: object.contentType, generation: object.generation }];
+    return [{ size: String(object.size), contentType: object.contentType, generation: object.generation, metadata: object.customMetadata }];
+  }
+  async setMetadata(value: { metadata: Record<string, string | null> }) {
+    const object = this.bucket.objects.get(this.name);
+    if (!object) throw Object.assign(new Error("missing"), { code: 404 });
+    if (object.failMetadataUpdate) throw new Error("metadata update failed");
+    for (const [key, entry] of Object.entries(value.metadata)) {
+      if (entry === null) delete object.customMetadata?.[key];
+      else (object.customMetadata ??= {})[key] = entry;
+    }
+    return this.getMetadata();
   }
   async delete() {
     const object = this.bucket.objects.get(this.name);
@@ -206,12 +218,51 @@ describe("FirebaseBackend upload completion", () => {
       ready: false,
       deleting: false,
     });
-    bucket.objects.set(object, { size: 12, contentType: "application/pdf", generation: "7" });
+    bucket.objects.set(object, { size: 12, contentType: "application/pdf", generation: "7", customMetadata: { firebaseStorageDownloadTokens: "synthetic-token" } });
 
     await backend.completeUpload(UID, CONTEXT_ID, ITEM_ID);
     expect(firestore.documents.get(item)?.ready).toBe(true);
+    expect(bucket.objects.get(object)?.customMetadata?.firebaseStorageDownloadTokens).toBeUndefined();
+    const readsAfterCompletion = bucket.metadataReads;
     await backend.completeUpload(UID, CONTEXT_ID, ITEM_ID);
-    expect(bucket.metadataReads).toBe(1);
+    expect(bucket.metadataReads).toBe(readsAfterCompletion);
+  });
+
+  it("keeps an attachment unavailable if download-token removal fails", async () => {
+    const { backend, firestore, bucket } = fixture();
+    const { context, item, object } = paths();
+    firestore.documents.set(context, { deleting: false });
+    firestore.documents.set(item, {
+      content: { kind: "attachment", name: "report.pdf", contentType: "application/pdf", size: 12 },
+      ready: false, deleting: false,
+    });
+    bucket.objects.set(object, { size: 12, contentType: "application/pdf", generation: "7", failMetadataUpdate: true, customMetadata: { firebaseStorageDownloadTokens: "synthetic-token" } });
+    await expect(backend.completeUpload(UID, CONTEXT_ID, ITEM_ID)).rejects.toThrow("metadata update failed");
+    expect(firestore.documents.get(item)?.ready).toBe(false);
+  });
+
+  it("returns not found when deletion races with download-token removal", async () => {
+    const { backend, firestore, bucket } = fixture();
+    const { context, item, object } = paths();
+    firestore.documents.set(context, { deleting: false });
+    firestore.documents.set(item, {
+      content: { kind: "attachment", name: "report.pdf", contentType: "application/pdf", size: 12 },
+      ready: false, deleting: false,
+    });
+    bucket.objects.set(object, { size: 12, contentType: "application/pdf", generation: "7" });
+    const originalFile = bucket.file.bind(bucket);
+    bucket.file = (name: string) => {
+      const file = originalFile(name);
+      const originalRead = file.getMetadata.bind(file);
+      file.getMetadata = async () => {
+        const metadata = await originalRead();
+        bucket.objects.delete(name);
+        return metadata;
+      };
+      return file;
+    };
+    await expect(backend.completeUpload(UID, CONTEXT_ID, ITEM_ID)).rejects.toBeInstanceOf(BackendNotFoundError);
+    expect(firestore.documents.get(item)?.ready).toBe(false);
   });
 
   it("returns not found for an absent object and conflict for mismatch or deletion", async () => {

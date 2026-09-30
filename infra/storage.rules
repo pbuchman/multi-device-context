@@ -42,8 +42,7 @@ service firebase.storage {
         && resource == null
         && liveContext(uid, contextId)
         && validPendingAttachment(uid, contextId, itemId)
-        && request.resource.size <= 104857600
-        && !request.resource.metadata.keys().hasAny(['firebaseStorageDownloadTokens']);
+        && request.resource.size <= 104857600;
       allow update, delete: if false;
     }
   }

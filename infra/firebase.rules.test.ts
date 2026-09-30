@@ -317,7 +317,21 @@ describe("Storage attachment lifecycle", () => {
     await assertFails(deleteObject(reference));
   });
 
-  it("denies mismatched metadata, token metadata, wrong paths, deleting records, and over-limit bytes", async () => {
+  it("accepts Firebase upload token metadata while keeping pending authenticated reads blocked", async () => {
+    const tokenItem = "00000000-0000-4000-8000-000000000099";
+    await seed(contextPath(), { title: "Context", deleting: false });
+    await seed(itemPath(OWNER, CONTEXT_ID, tokenItem), { ...attachmentItem(), createdAt: Timestamp.now() });
+    const owner = environment.authenticatedContext(OWNER).storage();
+    const reference = ref(owner, objectPath(OWNER, CONTEXT_ID, tokenItem));
+    await assertSucceeds(uploadBytes(reference, new TextEncoder().encode("data"), {
+      contentType: "text/plain",
+      customMetadata: { firebaseStorageDownloadTokens: "synthetic-upload-token" },
+    }));
+    await assertFails(getBytes(reference));
+    await assertFails(uploadBytes(reference, new TextEncoder().encode("data"), { contentType: "text/plain" }));
+  });
+
+  it("denies mismatched metadata, wrong paths, deleting records, and over-limit bytes", async () => {
     await seedPending();
     const owner = environment.authenticatedContext(OWNER).storage();
     await assertFails(
@@ -326,12 +340,6 @@ describe("Storage attachment lifecycle", () => {
     await assertFails(
       uploadBytes(ref(owner, objectPath()), new TextEncoder().encode("data"), {
         contentType: "application/octet-stream",
-      }),
-    );
-    await assertFails(
-      uploadBytes(ref(owner, objectPath()), new TextEncoder().encode("data"), {
-        contentType: "text/plain",
-        customMetadata: { firebaseStorageDownloadTokens: "attacker-token" },
       }),
     );
     await assertFails(
