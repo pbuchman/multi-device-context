@@ -1,5 +1,12 @@
 name: Native installers
 on:
+  push:
+    branches: [codex/installable-app]
+    paths:
+      - apps/desktop/**
+      - packages/contracts/**
+      - pnpm-lock.yaml
+      - .github/workflows/native-installers.yml
   workflow_dispatch:
     inputs:
       require_hosted_ui:
@@ -25,7 +32,7 @@ jobs:
     env:
       MDC_APP_ORIGIN: ${{ vars.MDC_APP_ORIGIN }}
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      MDC_REQUIRE_HOSTED_UI: ${{ inputs.require_hosted_ui }}
+      MDC_REQUIRE_HOSTED_UI: ${{ inputs.require_hosted_ui || vars.MDC_REQUIRE_HOSTED_UI == 'true' }}
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v5
