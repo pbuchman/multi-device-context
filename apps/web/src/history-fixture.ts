@@ -26,5 +26,6 @@ Object.assign(window, { historyProof: {
     await outbox.enqueue({ contextId, itemId, title: "Unsent", content: { kind: "text", text: "SYNTHETIC_UNSENT_QUEUE" }, device, createsContext: false });
   },
   cache: async () => { try { return (await getDocFromCache(itemRef)).data()?.content.text ?? null; } catch { return null; } },
+  saveDraft: async (id: string, text: string) => drafts.save(id, { ...emptyDraft(), text }),
   local: async () => ({ drafts: await drafts.list(), queue: await outbox.list(), databases: await indexedDB.databases() }),
 } });

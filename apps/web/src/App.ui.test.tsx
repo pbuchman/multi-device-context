@@ -45,7 +45,7 @@ function services(initialContexts = contexts) {
       attachmentBytes: vi.fn(async () => new Uint8Array()),
     },
     outbox: {
-      namespace: "project:user",
+      namespace: `project:user:${crypto.randomUUID()}`,
       enqueue: vi.fn(async () => undefined),
       count: vi.fn(async () => 0),
       clear: vi.fn(async () => undefined),
@@ -262,7 +262,7 @@ describe("ContextWorkspace", () => {
     fireEvent.change(screen.getByLabelText("Paste to share instantly, or type a note"), { target: { value: "Remove this draft too" } });
     act(() => deleted?.([alpha]));
     expect(screen.getByRole("heading", { name: "New context" })).toBeTruthy();
-    await waitFor(async () => expect(JSON.stringify(await new DraftStore("project:user").list())).not.toContain("Remove this draft too"));
+    await waitFor(async () => expect(JSON.stringify(await new DraftStore(test.value.outbox.namespace).list())).not.toContain("Remove this draft too"));
     expect(test.value.outbox.removeContext).toHaveBeenCalledWith(alpha);
   });
 

@@ -21,7 +21,7 @@ done
 
 systemd-analyze verify "$unit_source"
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-port=$(sed -nE 's/^  reverse_proxy 127\.0\.0\.1:([0-9]+)$/\1/p' "$caddy_source")
+port=$(sed -nE 's/^[[:space:]]+reverse_proxy 127\.0\.0\.1:([0-9]+)( \{)?$/\1/p' "$caddy_source" | sort -u)
 hostname=$(sed -nE 's@^http://([a-z0-9.-]+) \{@\1@p' "$caddy_source")
 [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$hostname" =~ ^[a-z0-9.-]+$ ]] || { echo 'Invalid generated Caddy site' >&2; exit 2; }
 (( port <= 65535 )) || exit 2

@@ -35,6 +35,7 @@ export type WorkspaceOutbox = {
   removeItem?(contextId: Id, itemId: Id): Promise<void>;
   cancelled?(): Promise<{ contexts: Id[]; items: Id[] }>;
   deletions?(): Promise<{ contextId: Id; itemId?: Id }[]>;
+  enqueueBatch?(drafts: ShareDraft[]): Promise<void>;
   enqueue(draft: ShareDraft): Promise<void>;
   count(): Promise<number>;
   clear(): Promise<void>;
@@ -314,13 +315,17 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [services.outbox]);
 
   const pendingDeletionCount = useRef(0);
+  const queueRefreshRevision = useRef(0);
   const refreshQueue = useCallback(async () => {
+    const revision = ++queueRefreshRevision.current;
     const queued = await services.outbox.list();
     const deletions = await services.outbox.deletions?.() ?? [];
+    if (revision !== queueRefreshRevision.current) return;
     if (deletions.length) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
     else if (pendingDeletionCount.current) setError(current => current?.startsWith("Deletion is not confirmed") ? undefined : current);
     pendingDeletionCount.current = deletions.length;
     const cancelled = await services.outbox.cancelled?.();
+    if (revision !== queueRefreshRevision.current) return;
     if (cancelled) {
       for (const id of cancelled.contexts) deleted.current.add(id);
       for (const id of cancelled.items) deletedItems.current.add(id);
@@ -375,7 +380,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         ...(manualTitle ? { manualTitle: true } : {}),
         ...(part.bytes ? { bytes: part.bytes } : {}),
       }));
-      for (const draft of drafts) await services.outbox.enqueue(draft);
+      if (services.outbox.enqueueBatch) await services.outbox.enqueueBatch(drafts);
+      else for (const draft of drafts) await services.outbox.enqueue(draft);
       navigation.commit(contextId, sentText);
       if (createsContext) {
         localQueuedContexts.current.add(contextId);

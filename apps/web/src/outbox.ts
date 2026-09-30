@@ -64,23 +64,21 @@ export class DurableOutbox {
     return this.#database;
   }
 
-  async enqueue(draft: ShareDraft): Promise<void> {
+  async enqueue(draft: ShareDraft): Promise<void> { await this.enqueueBatch([draft]); }
+  async enqueueBatch(drafts: ShareDraft[]): Promise<void> {
     const database = await this.#db();
-    const transaction = database.transaction(STORE_NAME, "readwrite");
-    const record: StoredAction = {
-      ...draft,
-      key: `action:${this.namespace}:${draft.itemId}`,
-      kind: "action",
-      namespace: this.namespace,
-      attempts: 0,
-      queuedAt: Date.now(),
-      nextAttemptAt: 0,
-      status: "pending",
-    };
-    const marker = await requestResult(transaction.objectStore(STORE_NAME).get(`deleted:${this.namespace}:${draft.contextId}`));
-    if (marker || await requestResult(transaction.objectStore(STORE_NAME).get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) throw new PublishFailure("This context was deleted", false);
-    transaction.objectStore(STORE_NAME).put(record);
-    await transactionDone(transaction);
+    const transaction = database.transaction(STORE_NAME, "readwrite"); const complete = transactionDone(transaction);
+    const store = transaction.objectStore(STORE_NAME);
+    try {
+      for (const draft of drafts) {
+        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) throw new PublishFailure("This context or item was deleted", false);
+        store.put({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
+      }
+      await complete; changed();
+    } catch (error) {
+      try { transaction.abort(); } catch { /* Already aborted by IndexedDB (quota, clone, etc.). */ }
+      await complete.catch(() => {}); throw error;
+    }
   }
 
   async enqueueNativeRequest(requestId: Id, drafts: ShareDraft[]): Promise<boolean> {

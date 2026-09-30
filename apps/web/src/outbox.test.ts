@@ -207,3 +207,12 @@ describe("DurableOutbox", () => {
     outbox.close();
   });
 });
+
+it("R6: a multi-file queue transaction cannot partially commit before a rejected item", async () => {
+  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: new IDBFactory() });
+  const outbox = new DurableOutbox(namespaceA);
+  const secondId = "00000000-0000-4000-8000-000000000003";
+  await outbox.removeItem(contextId, secondId);
+  await expect(outbox.enqueueBatch([draft(), draft({ itemId: secondId })])).rejects.toThrow("deleted");
+  expect(await outbox.list()).toEqual([]); outbox.close();
+});
