@@ -277,7 +277,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
 
   const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false) => {
-    const queued = await services.outbox.list();
+    const queued = (await services.outbox.list()).filter(record => !deleted.current.has(record.contextId));
     if (selectLatestNative) {
       selectContext = queued.filter((record) => record.nativeRequestId)
         .sort((left, right) => right.queuedAt - left.queuedAt)[0]?.contextId;

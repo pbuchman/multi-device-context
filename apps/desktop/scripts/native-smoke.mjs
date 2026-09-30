@@ -261,6 +261,16 @@ let pasteboard = NSPasteboard.general
       "Windows startup disablement remains respected after Quit and reopen",
     );
   }
+  if (report.hostedUiRequired) {
+    await app.close();
+    const contextId = "00000000-0000-4000-8000-000000000089";
+    app = await electron.launch({ executablePath, args: [`multi-device-context://context/${contextId}`], timeout: 60000 });
+    const cold = await app.firstWindow({ timeout: 60000 });
+    await cold.waitForURL(url => url.origin === process.env.MDC_APP_ORIGIN, { timeout: 60000 });
+    await cold.waitForFunction(() => typeof window.contextDesktop?.takeNavigation === "function");
+    assert.deepEqual(await cold.evaluate(() => window.contextDesktop.takeNavigation()), { contextId });
+    report.checks.push("Cold-start context URL survives application startup and awaits sign-in");
+  }
   report.passed = true;
 } catch (error) {
   report.passed = false;

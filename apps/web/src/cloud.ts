@@ -4,6 +4,7 @@ import {
   collection,
   doc,
   getDocs,
+  getDocsFromServer,
   initializeFirestore,
   onSnapshot,
   persistentLocalCache,
@@ -89,6 +90,14 @@ export async function publishQueuedShare(record: QueuedShare, port: CloudWritePo
   }
 }
 
+export async function isDeletedContextError(error: { code?: string }, contextStillExists: () => Promise<boolean>): Promise<boolean> {
+  if (error.code !== "permission-denied") return false;
+  // Deleting a parent revokes item-listener access before the parent snapshot
+  // necessarily arrives. Suppress only a deletion confirmed by an authorized
+  // server read; genuine permission/auth/network failures still reach the UI.
+  try { return !await contextStillExists(); } catch { return false; }
+}
+
 function timestampMillis(value: unknown): number {
   if (value && typeof value === "object" && "toMillis" in value && typeof value.toMillis === "function") {
     return value.toMillis();
@@ -168,11 +177,22 @@ export class FirebaseCloud {
       collection(this.#firestore, `users/${this.uid}/contexts/${contextId}/items`),
       where("deleting", "==", false),
     );
-    return onSnapshot(live, { includeMetadataChanges: true }, (snapshot) => {
+    let active = true;
+    const unsubscribe = onSnapshot(live, { includeMetadataChanges: true }, (snapshot) => {
       const records = snapshot.docs.map((entry) => itemFromDocument(contextId, entry))
         .filter((value): value is ItemRecord => Boolean(value));
       emit({ records: sorted(records, false), fromCache: snapshot.metadata.fromCache, hasPendingWrites: snapshot.metadata.hasPendingWrites });
-    }, (error) => fail(error));
+    }, (error) => {
+      void isDeletedContextError(error, async () => {
+        const contexts = await getDocsFromServer(query(collection(this.#firestore, `users/${this.uid}/contexts`), where("deleting", "==", false)));
+        return contexts.docs.some(context => context.id === contextId);
+      }).then(deleted => {
+        if (!active) return;
+        if (deleted) emit({ records: [], fromCache: false, hasPendingWrites: false });
+        else fail(error);
+      });
+    });
+    return () => { active = false; unsubscribe(); };
   }
 
   async publish(record: QueuedShare): Promise<void> {

@@ -94,3 +94,13 @@ describe("cloud publishing", () => {
   });
 
 });
+
+describe("context deletion listener race", () => {
+  it("suppresses only permission errors confirmed as a deleted parent", async () => {
+    const { isDeletedContextError } = await import("./cloud.js");
+    expect(await isDeletedContextError({ code: "permission-denied" }, async () => false)).toBe(true);
+    expect(await isDeletedContextError({ code: "permission-denied" }, async () => true)).toBe(false);
+    expect(await isDeletedContextError({ code: "permission-denied" }, async () => { throw new Error("offline"); })).toBe(false);
+    expect(await isDeletedContextError({ code: "unauthenticated" }, async () => false)).toBe(false);
+  });
+});
