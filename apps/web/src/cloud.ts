@@ -1,3 +1,4 @@
+import { liveDocumentQuery } from "./queries.js";
 import { ContentSchema, DeviceSchema, attachmentPath, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
 import type { FirebaseApp } from "firebase/app";
 import {
@@ -7,8 +8,7 @@ import {
   getDocsFromServer,
   initializeFirestore,
   onSnapshot,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+  memoryLocalCache,
   query,
   serverTimestamp,
   updateDoc,
@@ -151,7 +151,7 @@ export class FirebaseCloud {
     private readonly accessToken: () => Promise<string>,
   ) {
     this.#firestore = initializeFirestore(app, {
-      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+      localCache: memoryLocalCache(),
     });
     this.#storage = getStorage(app);
   }
@@ -184,7 +184,7 @@ export class FirebaseCloud {
       emit({ records: sorted(records, false), fromCache: snapshot.metadata.fromCache, hasPendingWrites: snapshot.metadata.hasPendingWrites });
     }, (error) => {
       void isDeletedContextError(error, async () => {
-        const contexts = await getDocsFromServer(query(collection(this.#firestore, `users/${this.uid}/contexts`), where("deleting", "==", false)));
+        const contexts = await getDocsFromServer(liveDocumentQuery(collection(this.#firestore, `users/${this.uid}/contexts`), contextId));
         return contexts.docs.some(context => context.id === contextId);
       }).then(deleted => {
         if (!active) return;
@@ -215,6 +215,18 @@ export class FirebaseCloud {
     return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedContexts`), snapshot => emit(snapshot.docs.map(d => d.id)), fail);
   }
 
+  subscribeDeletedItems(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe {
+    return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedItems`), snapshot => emit(snapshot.docs.map(d => {
+      const [contextId, itemId] = d.id.split("_"); return { contextId: contextId!, itemId: itemId! };
+    })), fail);
+  }
+  async deletionMarkers() {
+    const [contexts, items] = await Promise.all(["deletedContexts", "deletedItems"].map(name => getDocsFromServer(collection(this.#firestore, `users/${this.uid}/${name}`))));
+    return { contexts: contexts!.docs.map(d => d.id), items: items!.docs.map(d => { const [contextId, itemId] = d.id.split("_"); return { contextId: contextId!, itemId: itemId! }; }) };
+  }
+
+  async getSettings(): Promise<{ aiTitlesEnabled: boolean }> { return (await this.#api("/api/settings", "GET")).json(); }
+  async setSettings(aiTitlesEnabled: boolean): Promise<{ aiTitlesEnabled: boolean }> { return (await this.#api("/api/settings", "PATCH", { aiTitlesEnabled })).json(); }
   async listKeys(): Promise<AgentKeyInfo[]> { return (await this.#api("/api/agent-keys", "GET")).json(); }
   async createKey(name: string): Promise<AgentKeyInfo & { key: string }> { return (await this.#api("/api/agent-keys", "POST", { name })).json(); }
   async revokeKey(id: string): Promise<void> { await this.#api(`/api/agent-keys/${id}`, "DELETE"); }
@@ -235,13 +247,13 @@ export class FirebaseCloud {
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  async #api(path: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<Response> {
+  async #api(path: string, method: "GET" | "POST" | "DELETE" | "PATCH", body?: unknown): Promise<Response> {
     const response = await fetch(path, {
       method,
       headers: { authorization: `Bearer ${await this.accessToken()}`, ...(body ? { "content-type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (!response.ok) throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "Cloud request failed", response.status >= 500);
+    if (!response.ok) throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "Cloud request failed", response.status >= 500 || response.status === 429, Math.min(3600, Math.max(0, Number(response.headers.get("retry-after")) || 0)) * 1000);
     return response;
   }
 
@@ -249,11 +261,11 @@ export class FirebaseCloud {
     const contextsPath = `users/${this.uid}/contexts`;
     const itemsPath = (contextId: Id) => `${contextsPath}/${contextId}/items`;
     const findContext = async (contextId: Id) => {
-      const snapshot = await getDocs(query(collection(this.#firestore, contextsPath), where("deleting", "==", false)));
+      const snapshot = await getDocs(liveDocumentQuery(collection(this.#firestore, contextsPath), contextId));
       return snapshot.docs.some((entry) => entry.id === contextId) ? { id: contextId } : undefined;
     };
     const findItem = async (contextId: Id, itemId: Id): Promise<ExistingItem | undefined> => {
-      const snapshot = await getDocs(query(collection(this.#firestore, itemsPath(contextId)), where("deleting", "==", false)));
+      const snapshot = await getDocs(liveDocumentQuery(collection(this.#firestore, itemsPath(contextId)), itemId));
       const found = snapshot.docs.find((entry) => entry.id === itemId);
       if (!found) return undefined;
       const data = found.data();
@@ -297,7 +309,7 @@ export class FirebaseCloud {
         });
         if (response.ok) return "complete";
         if (response.status === 404) return "missing";
-        throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "File completion failed", response.status >= 500);
+        throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "File completion failed", response.status >= 500 || response.status === 429, Math.min(3600, Math.max(0, Number(response.headers.get("retry-after")) || 0)) * 1000);
       },
       upload: async (record, bytes) => {
         await uploadBytes(

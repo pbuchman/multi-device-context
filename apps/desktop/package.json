@@ -1,11 +1,11 @@
 {
   "name": "@mdc/desktop",
   "productName": "Multi Device Context",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Private contexts shared across your computers",
   "author": "Multi Device Context contributors",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "main": "dist/main.cjs",
   "scripts": {
@@ -19,7 +19,7 @@
     "@types/node": "22.19.11",
     "electron": "44.5.1",
     "electron-builder": "26.15.3",
-    "esbuild": "0.27.3",
+    "esbuild": "0.28.2",
     "jose": "6.2.12",
     "playwright": "1.63.0",
     "typescript": "5.9.3",

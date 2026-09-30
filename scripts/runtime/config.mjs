@@ -34,7 +34,7 @@ export function parseRuntimePackage(value, bootstrap) {
   const fail = () => { throw new Error('Invalid runtime package'); };
   if (!exactKeys(value, ['schemaVersion', 'environment', 'serviceAccount']) || value.schemaVersion !== 1 ||
       !object(value.environment) || !environmentKeys.every(k => text(value.environment[k])) ||
-      !Object.keys(value.environment).every(k => [...environmentKeys, 'MDC_OPENROUTER_API_KEY', 'MDC_TITLE_MODEL'].includes(k) && text(value.environment[k]))) fail();
+      !Object.keys(value.environment).every(k => [...environmentKeys, 'MDC_OPENROUTER_API_KEY', 'MDC_TITLE_MODEL', 'MDC_AI_EXISTING_OWNER_UID'].includes(k) && text(value.environment[k]))) fail();
   const e = value.environment;
   let origin;
   try { origin = new URL(e.MDC_APP_ORIGIN); } catch { fail(); }

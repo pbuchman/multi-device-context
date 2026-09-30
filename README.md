@@ -5,13 +5,13 @@ Each context contains text, code, links, screenshots, and file attachments.
 Signing in with the same Google account makes the same content available on
 every device.
 
-The application is deployed on home-dev. The v0.2 private installers target
+The application is deployed on home-dev. The v0.3 private installers target
 Windows x64 and Apple Silicon macOS 13+, with hosted native CI checks passed.
 Windows builds are unsigned; Mac builds are ad-hoc signed and not notarized.
-See the [acceptance record](docs/verification/v0.2.0.md) for completed
+See the [acceptance record](docs/verification/v0.3.0.md) for completed
 checks and the remaining first-launch and sign-in checks on the target machines.
 
-- [Download private preview v0.2.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.2.0)
+- [Download private preview v0.3.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.3.0)
 - [Agent API, CLI and portable skill](docs/agent-api.md)
 - [Installation and sharing](docs/installation.md)
 - [Home-dev deployment, updates and recovery](docs/operations/deployment.md)
@@ -22,7 +22,8 @@ Paste publishes into the selected context immediately. **Share clipboard** in
 the tray/menu bar captures the current clipboard into a new context. Incoming
 contexts open automatically on your other running devices while preserving drafts.
 Incoming items leave the receiving clipboard unchanged until you choose **Copy**.
-Contexts get short AI titles, have direct links, and can be permanently deleted.
+Contexts have optional short AI titles, direct links, and permanent deletion.
+New accounts start with AI titles off; the setting is shared across devices.
 
 The shared web interface and small API run on home-dev. Google-only Auth0 login
 identifies users; Firestore synchronizes their contexts and private GCP storage
@@ -43,3 +44,7 @@ pnpm --filter @mdc/server build
 Real rules tests use dedicated local Firebase emulators and Java 21+:
 `pnpm test:rules`. Native packaging and installed-app checks run on actual Windows
 x64 and macOS arm64 CI runners; Linux source tests do not replace those checks.
+
+## Self-hosting and data handling
+
+See [standalone setup](docs/self-hosting.md), [privacy/data flow](docs/privacy.md), [security reporting](SECURITY.md), [changelog](CHANGELOG.md) and [MIT license](LICENSE). Source publication does not grant access to the hosted personal instance.

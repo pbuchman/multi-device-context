@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { cp, mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 const value = process.env.MDC_APP_ORIGIN;
 let origin;
 try {
@@ -38,3 +38,17 @@ await writeFile(
   "dist/build-info.json",
   JSON.stringify({ appOrigin: origin, bridgeVersion: 1 }, null, 2) + "\n",
 );
+
+// electron-builder must not discover the monorepo's root production dependencies.
+await rm("bundle", { recursive: true, force: true });
+await mkdir("bundle", { recursive: true });
+await cp("dist", "bundle/dist", { recursive: true });
+const metadata = JSON.parse(await readFile("package.json", "utf8"));
+const { devDependencies, dependencies, scripts, ...manifest } = metadata;
+await writeFile("bundle/package.json", JSON.stringify(manifest, null, 2) + "\n");
+await cp("../../LICENSE", "bundle/LICENSE");
+const notices = [];
+for (const [name, license] of [["jose", "node_modules/jose/LICENSE.md"], ["zod", "../../packages/contracts/node_modules/zod/LICENSE"]]) {
+  notices.push(name + "\n" + await readFile(license, "utf8"));
+}
+await writeFile("bundle/THIRD_PARTY_NOTICES.txt", notices.join("\n\n"));

@@ -1,6 +1,10 @@
+import { prepareHistory } from "./history.js";
+import { ContextOperations } from "./operations.js";
+import { subscribeLocal } from "./local-db.js";
+import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ReactNode } from "react";
 
 import { useNavigation } from "./navigation.js";
 import { AgentKeys, type AgentKeyClient } from "./AgentKeys.js";
@@ -15,6 +19,7 @@ import "./theme.css";
 type Unsubscribe = () => void;
 
 export type WorkspaceCloud = {
+  subscribeDeletedItems?(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeDeletedContexts?(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeContexts(emit: (snapshot: CloudSnapshot<ContextRecord>) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeItems(contextId: Id, emit: (snapshot: CloudSnapshot<ItemRecord>) => void, fail: (error: Error) => void): Unsubscribe;
@@ -27,6 +32,10 @@ export type WorkspaceCloud = {
 export type WorkspaceOutbox = {
   readonly namespace: string;
   removeContext?(id: Id): Promise<void>;
+  removeItem?(contextId: Id, itemId: Id): Promise<void>;
+  cancelled?(): Promise<{ contexts: Id[]; items: Id[] }>;
+  deletions?(): Promise<{ contextId: Id; itemId?: Id }[]>;
+  enqueueBatch?(drafts: ShareDraft[]): Promise<void>;
   enqueue(draft: ShareDraft): Promise<void>;
   count(): Promise<number>;
   clear(): Promise<void>;
@@ -35,8 +44,10 @@ export type WorkspaceOutbox = {
 };
 
 export type WorkspaceServices = {
+  remove?(contextId: Id, itemId?: Id): Promise<boolean>;
   initialContextId?: Id;
   agentKeys?: AgentKeyClient;
+  settings?: { getSettings(): Promise<{ aiTitlesEnabled: boolean }>; setSettings(enabled: boolean): Promise<{ aiTitlesEnabled: boolean }> };
   isDesktop?: boolean;
   subscribeNavigation?: (listener: (id?: Id) => void) => Unsubscribe;
   viewer: Viewer;
@@ -92,31 +103,6 @@ function Icon({ children }: { children: ReactNode }) {
   return <span className="icon" aria-hidden="true">{children}</span>;
 }
 
-function AttachmentPreview({ item, cloud }: { item: ItemRecord; cloud: WorkspaceCloud }) {
-  const [url, setUrl] = useState<string>();
-  const content = item.content.kind === "attachment" ? item.content : undefined;
-  const renderable = content && item.ready && content.contentType !== "image/svg+xml"
-    && /^(image|audio|video)\//.test(content.contentType);
-  useEffect(() => {
-    if (!content || !renderable) return;
-    let revoked = false;
-    let objectUrl: string | undefined;
-    void cloud.attachmentBytes(item.contextId, item.id, content).then((bytes) => {
-      if (revoked) return;
-      objectUrl = URL.createObjectURL(new Blob([bytesBuffer(bytes)], { type: content.contentType }));
-      setUrl(objectUrl);
-    }).catch(() => undefined);
-    return () => {
-      revoked = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [cloud, content, item.contextId, item.id, renderable]);
-  if (!content || !renderable || !url) return null;
-  if (content.contentType.startsWith("image/")) return <img className="attachment-preview" src={url} alt={content.name} />;
-  if (content.contentType.startsWith("audio/")) return <audio className="attachment-preview" src={url} controls />;
-  return <video className="attachment-preview" src={url} controls />;
-}
-
 function ItemCard({
   item, cloud, onCopy, onSave, onDelete,
 }: {
@@ -164,6 +150,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [optimisticItems, setOptimisticItems] = useState<ItemRecord[]>([]);
   const [search, setSearch] = useState("");
 
+  const [aiEnabled, setAiEnabled] = useState<boolean>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -205,9 +192,18 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     void services.getLaunchAtLogin().then(setLaunchAtLoginState).catch(() => setError("Could not read the startup setting"));
   }, [services]);
 
+  useEffect(() => {
+    if (!services.settings) return;
+    let active = true;
+    const refresh = () => { void services.settings!.getSettings().then(value => { if (active) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (active) setError("Could not load AI title settings"); }); };
+    refresh(); window.addEventListener("focus", refresh);
+    return () => { active = false; window.removeEventListener("focus", refresh); };
+  }, [services.settings, settingsOpen]);
+
   const seenContexts = useRef<Set<Id> | undefined>(undefined);
   const acknowledged = useRef(new Set<Id>());
   const deleted = useRef(new Set<Id>());
+  const deletedItems = useRef(new Set<Id>());
   useEffect(() => services.cloud.subscribeContexts((snapshot) => {
     setConfirmedContextIds((current) => {
       const confirmed = snapshot.records.filter(context => (context.syncState === "synced" || context.syncState === "cached") && !current.has(context.id));
@@ -241,6 +237,12 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (deleted.current.has(navigation.selectedRef.current.id)) setSelectedId(undefined);
   }, () => setError("Could not synchronize deletions")), [services.cloud, services.outbox, navigation.remove, setSelectedId]);
 
+  useEffect(() => services.cloud.subscribeDeletedItems?.(records => {
+    for (const item of records) { deletedItems.current.add(item.itemId); void services.outbox.removeItem?.(item.contextId, item.itemId).catch(() => setError("Could not remove local pending item")); }
+    setItems(current => current.filter(item => !deletedItems.current.has(item.id)));
+    setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id)));
+  }, () => setError("Could not synchronize item deletions")), [services]);
+
   useEffect(() => services.subscribeNavigation?.(id => { setSelectedId(id); setError(undefined); setMenuOpen(false); setRenaming(false); }), [services, setSelectedId]);
 
   useEffect(() => {
@@ -256,7 +258,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   useEffect(() => {
     if (!selectedId || !selectedContextConfirmed) { setItems([]); return; }
     return services.cloud.subscribeItems(selectedId, (snapshot) => {
-      setItems(snapshot.records);
+      setItems(snapshot.records.filter(item => !deletedItems.current.has(item.id)));
       setFromCache(snapshot.fromCache);
       setPendingWrites(snapshot.hasPendingWrites);
       const cloudIds = new Set(snapshot.records.map((item) => item.id));
@@ -285,7 +287,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         .sort((left, right) => right.queuedAt - left.queuedAt)[0]?.contextId;
     }
     if (selectContext) setSelectedId(selectContext);
-    if (queued.length === 0) return;
+    if (queued.length === 0) { setOptimisticItems([]); return; }
     const queuedContexts = new Map<Id, ContextRecord>();
     for (const record of queued) {
       localQueuedContexts.current.add(record.contextId);
@@ -312,13 +314,30 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     })));
   }, [services.outbox]);
 
+  const pendingDeletionCount = useRef(0);
+  const queueRefreshRevision = useRef(0);
   const refreshQueue = useCallback(async () => {
+    const revision = ++queueRefreshRevision.current;
     const queued = await services.outbox.list();
-    setQueueCount(queued.length);
+    const deletions = await services.outbox.deletions?.() ?? [];
+    if (revision !== queueRefreshRevision.current) return;
+    if (deletions.length) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+    else if (pendingDeletionCount.current) setError(current => current?.startsWith("Deletion is not confirmed") ? undefined : current);
+    pendingDeletionCount.current = deletions.length;
+    const cancelled = await services.outbox.cancelled?.();
+    if (revision !== queueRefreshRevision.current) return;
+    if (cancelled) {
+      for (const id of cancelled.contexts) deleted.current.add(id);
+      for (const id of cancelled.items) deletedItems.current.add(id);
+      setContexts(current => current.filter(c => !deleted.current.has(c.id)));
+      setItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
+      setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
+    }
+    setQueueCount(queued.length + deletions.length);
     const failed = queued.find((record) => record.status === "paused" || record.status === "failed");
     if (failed?.lastError) setError(failed.lastError);
   }, [services.outbox]);
-  useEffect(() => { void refreshQueue(); }, [refreshQueue]);
+  useEffect(() => { void refreshQueue(); return subscribeLocal(() => { void refreshQueue(); }); }, [refreshQueue]);
   useEffect(() => {
     if (queueCount === 0) return;
     const timer = window.setInterval(() => void refreshQueue(), 2_000);
@@ -361,7 +380,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         ...(manualTitle ? { manualTitle: true } : {}),
         ...(part.bytes ? { bytes: part.bytes } : {}),
       }));
-      for (const draft of drafts) await services.outbox.enqueue(draft);
+      if (services.outbox.enqueueBatch) await services.outbox.enqueueBatch(drafts);
+      else for (const draft of drafts) await services.outbox.enqueue(draft);
       navigation.commit(contextId, sentText);
       if (createsContext) {
         localQueuedContexts.current.add(contextId);
@@ -386,21 +406,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [contexts, refreshQueue, selectedId, services, showToast]);
 
   const shareFiles = useCallback(async (files: File[] | NativeFile[], forcedContextId?: Id) => {
-    const parts: SharePart[] = [];
-    for (const file of files) {
-      const isBrowserFile = file instanceof File;
-      const bytes = isBrowserFile ? new Uint8Array(await file.arrayBuffer()) : file.bytes;
-      const contentType = isBrowserFile ? file.type : file.contentType;
-      if (bytes.byteLength === 0 || bytes.byteLength > MAX_ATTACHMENT_BYTES) {
-        setError(`${file.name} must be between 1 byte and 100 MB`);
-        continue;
-      }
-      parts.push({
-        content: { kind: "attachment", name: file.name, contentType: contentType || "application/octet-stream", size: bytes.byteLength },
-        bytes,
-      });
-    }
-    await share(parts, forcedContextId);
+    try { await share(await fileParts(files), forcedContextId); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Files could not be shared"); }
   }, [share]);
 
   const copyItem = async (item: ItemRecord) => {
@@ -431,24 +438,55 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Rename failed"); }
   };
 
+  const fallbackDeletes = useRef(new Map<string, () => Promise<void>>());
+  const remove = async (contextId: Id, itemId?: Id): Promise<boolean> => {
+    if (services.remove) return services.remove(contextId, itemId);
+    const key = `${contextId}:${itemId ?? "context"}`;
+    const action = async () => {
+      if (itemId) { await services.outbox.removeItem?.(contextId, itemId); await services.cloud.deleteItem(contextId, itemId); }
+      else { await services.outbox.removeContext?.(contextId); await services.cloud.deleteContext(contextId); }
+      fallbackDeletes.current.delete(key);
+    };
+    fallbackDeletes.current.set(key, action); await action(); return true;
+  };
   const deleteContext = async (context: ContextRecord) => {
     if (!window.confirm(`Permanently delete “${context.title}” and all its items? There is no undo.`)) return;
     setMenuOpen(false);
     try {
-      if (!navigation.localContexts.some(c => c.id === context.id)) await services.cloud.deleteContext(context.id);
-      await services.outbox.removeContext?.(context.id);
-      navigation.remove([context.id]);
+      const complete = await remove(context.id);
+      deleted.current.add(context.id); navigation.remove([context.id]);
       setContexts(current => current.filter(c => c.id !== context.id));
       setOptimisticItems(current => current.filter(item => item.contextId !== context.id));
       if (selectedId === context.id) setSelectedId(undefined);
-      showToast("Context permanently deleted");
-    } catch { setError("Deletion has not finished. The server will retry cleanup automatically."); }
+      if (complete) showToast("Context permanently deleted"); else setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+      await refreshQueue();
+    } catch { setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+  };
+  const deleteItem = async (item: ItemRecord) => {
+    try {
+      const complete = await remove(item.contextId, item.id);
+      deletedItems.current.add(item.id);
+      setItems(current => current.filter(i => i.id !== item.id));
+      setOptimisticItems(current => current.filter(i => i.id !== item.id));
+      if (!confirmedContextIds.has(item.contextId) && !(await services.outbox.list()).some(record => record.contextId === item.contextId)) {
+        localQueuedContexts.current.delete(item.contextId);
+        setContexts(current => current.filter(context => context.id !== item.contextId));
+        if (navigation.selectedRef.current.id === item.contextId) setSelectedId(undefined);
+      }
+      if (!complete) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+      await refreshQueue();
+    } catch { setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+  };
+  const retry = async () => {
+    setError(undefined); navigation.retry();
+    try { for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
+    catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
   };
 
   const signOut = async () => {
     const [webPending, nativePending] = await Promise.all([services.outbox.count(), services.pendingNativeCount?.() ?? 0]);
     if (webPending + nativePending > 0 && !window.confirm(`${webPending + nativePending} pending share(s) will be removed. Sign out?`)) return;
-    navigation.clear();
+    await navigation.clear();
     await services.signOut();
     window.location.reload();
   };
@@ -476,7 +514,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           <div className="title-group">
             {renaming ? <input className="rename-input" aria-label="Context name" value={renameText} autoFocus onChange={(event) => setRenameText(event.target.value)} onBlur={() => void submitRename()} onKeyDown={(event) => { if (event.key === "Enter") void submitRename(); }} />
               : <h1>{selected?.title ?? "New context"}</h1>}
-            <small><Icon>▣</Icon>{visibleItems.length} {visibleItems.length === 1 ? "item" : "items"} · Only you</small>
+            <small><Icon>▣</Icon>{visibleItems.length} {visibleItems.length === 1 ? "item" : "items"} · Your account</small>
           </div>
           <div className="header-actions"><span className={`sync ${fromCache ? "offline" : ""}`}><Icon>✓</Icon>{syncLabel}</span><button type="button" aria-label="Context options" aria-expanded={menuOpen} disabled={!selected} onClick={() => setMenuOpen((open) => !open)}><Icon>•••</Icon></button></div>
           {menuOpen && selected ? <div className="context-menu" role="menu">
@@ -487,9 +525,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           </div> : null}
         </header>
 
-        {error ? <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => { setError(undefined); void services.outbox.retry().then(services.drain).then(refreshQueue); }}>Retry</button><button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}>×</button></div> : null}
+        {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" onClick={() => void retry()}>Retry</button><button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}>×</button></div> : null}
         <section className="timeline" aria-label="Shared items">
-          {visibleItems.length ? <><div className="day-label">Today</div>{visibleItems.map((item) => <ItemCard key={item.id} item={item} cloud={services.cloud} onCopy={(value) => void copyItem(value)} onSave={(value) => void saveItem(value)} onDelete={(value) => void services.cloud.deleteItem(value.contextId, value.id).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Delete failed"))} />)}</>
+          {visibleItems.length ? <>{visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ItemCard item={item} cloud={services.cloud} onCopy={(value) => void copyItem(value)} onSave={(value) => void saveItem(value)} onDelete={(value) => void deleteItem(value)} /></Fragment>)}</>
             : <div className="empty"><Icon>▧</Icon><strong>A little space for your context.</strong><span>Paste text, a screenshot, or a file.</span></div>}
         </section>
 
@@ -518,7 +556,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
               }} />
             <div className="composer-tools"><div><button type="button" aria-label="Attach files" onClick={() => fileInput.current?.click()}><Icon>＋</Icon></button><button type="button" aria-label="Share as code" aria-pressed={codeMode} onClick={() => setCodeMode((active) => !active)}><Icon>&lt;/&gt;</Icon></button></div><span>Paste to share <kbd>{navigator.platform.includes("Mac") ? "⌘ V" : "Ctrl V"}</kbd></span></div>
           </div>
-          <div className="composer-note">Pastes share immediately. For a typed note, press Enter.</div>
+          <div className="composer-note">Pastes share immediately. For a typed note, press Enter.<br />{aiEnabled ? "AI titles send the first text (up to 8,000 characters), or filename and type, to OpenRouter. File contents are not sent. Disable in Settings." : aiEnabled === false ? "AI titles are off. Titles are derived without an external model." : "AI title settings are loading. OpenRouter may receive the first text or filename; never file bytes."}</div>
           <input ref={fileInput} type="file" multiple hidden onChange={(event) => { if (event.target.files) void shareFiles([...event.target.files]); event.target.value = ""; }} />
         </div>
         {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
@@ -529,7 +567,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <div className="profile-row"><span className="avatar large">{services.viewer.name.charAt(0).toUpperCase()}</span><span><strong>{services.viewer.name}</strong><small>{services.viewer.email ?? services.viewer.uid}</small></span></div>
         <label className="setting-row"><span>Theme<small>Choose how Contexts looks.</small></span><select value={theme} onChange={(event) => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start Contexts with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={(event) => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => setError("Could not change the startup setting")); }} /></label>
-        <div className="privacy-note"><Icon>▣</Icon><span>Incoming items stay here until you explicitly choose Copy. Your contexts are visible only to you.</span></div>
+        {services.settings ? <label className="setting-row"><span>AI context titles<small>Send first text or filename/type to OpenRouter. Turning off prevents new requests; already sent requests cannot be recalled.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => setAiEnabled(value.aiTitlesEnabled)).catch(() => setError("Could not save AI setting. Reopen Settings to retry.")); }} /></label> : null}
+        <div className="privacy-note"><Icon>▣</Icon><span>Incoming items stay here until you explicitly choose Copy. Other accounts cannot access your contexts. Service operators process data; this is not end-to-end encryption.</span></div>
         {services.agentKeys ? <AgentKeys client={services.agentKeys} /> : null}
         <button type="button" className="signout" onClick={() => void signOut()}>Sign out</button>
       </section></div> : null}
@@ -561,9 +600,11 @@ async function browserSaveFile(file: NativeFile): Promise<boolean> {
 
 async function buildServices(session: ActiveSession): Promise<{ services: WorkspaceServices; dispose(): void }> {
   const device = session.bridge ? await session.bridge.getDevice() : browserDevice();
+  await prepareHistory(session.firebaseApp);
   const cloud = new FirebaseCloud(session.firebaseApp, session.uid, session.accessToken);
   const outbox = new DurableOutbox({ projectId: session.config.firebase.projectId, uid: session.uid });
-  const runner = new OutboxRunner(outbox, cloud);
+  const operations = new ContextOperations(outbox, cloud);
+  const runner = operations.runner;
   const bridge = session.bridge;
   let lastNativeContext: Id | undefined;
   const storeNativeSnapshot = async (request: PendingClipboardShare) => {
@@ -597,11 +638,13 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
   const initialNativeId = await drainNative();
   const initialNavigation = await bridge?.takeNavigation?.();
   if (initialNavigation && !initialNavigation.contextId && !initialNativeId) window.history.replaceState({}, "", "/");
-  void runner.drain();
+  void runner.drain().catch(() => {});
   return {
     services: {
       ...(initialNavigation?.contextId || initialNativeId ? { initialContextId: initialNavigation?.contextId ?? initialNativeId! } : {}),
       agentKeys: cloud,
+      settings: cloud,
+      remove: (contextId, itemId) => operations.remove(contextId, itemId),
       isDesktop: Boolean(bridge),
       ...(bridge?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => {
         let active = true;
@@ -675,7 +718,7 @@ export default function App() {
   if (state === "ready" && workspace) return <ContextWorkspace services={workspace.services} />;
   return <main className="gate"><div className="gate-card"><div className="brand gate-brand"><span className="brand-mark"><Icon>▦</Icon></span>Contexts</div>
     {state === "loading" ? <><div className="spinner" /><h1>Connecting your contexts</h1><p>Restoring your private, synchronized history.</p></> : null}
-    {state === "login" ? <><h1>Move a thought between your computers.</h1><p>Sign in with your Google account. Everything stays private to you.</p><button type="button" className="login-button" onClick={() => void manager.login().then((active) => { if (active) setSession(active); }).catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : "Sign in failed"); setState("error"); })}>Continue with Google</button></> : null}
+    {state === "login" ? <><h1>Move a thought between your computers.</h1><p>Sign in with your Google account. Your contexts are isolated from other accounts. AI titles are optional; service operators process stored data.</p><button type="button" className="login-button" onClick={() => void manager.login().then((active) => { if (active) setSession(active); }).catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : "Sign in failed"); setState("error"); })}>Continue with Google</button></> : null}
     {state === "error" ? <><h1>Contexts is unavailable</h1><p role="alert">{error}</p><button type="button" className="login-button" onClick={() => void start()}>Retry</button></> : null}
   </div></main>;
 }

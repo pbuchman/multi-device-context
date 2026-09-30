@@ -7,6 +7,7 @@ import { getAuth } from "firebase-admin/auth";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
 import { AgentStore } from "./agent-store.js";
 import { FirebaseBackend } from "./firebase.js";
+import { AccountSettings } from "./settings.js";
 import { TitleWorker } from "./titles.js";
 import { BackendConflictError, BackendNotFoundError } from "./server.js";
 if (!process.env.FIRESTORE_EMULATOR_HOST || !process.env.FIREBASE_STORAGE_EMULATOR_HOST) throw new Error("Emulators required");
@@ -55,8 +56,32 @@ describe("agent persistence and title races", () => {
     await backend.deleteContext(owner, id);
     expect((await bucket.getFiles({ prefix: `users/${owner}/contexts/${id}/` }))[0]).toHaveLength(0);
   });
+  it("R9: new accounts never send data to a title provider without enabling AI", async () => {
+    const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: false });
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const id = randomUUID(); await store.writeItem(owner, id, { id: randomUUID(), content }, true);
+    await new TitleWorker(db, "test-only", undefined, settings).process(store.context(owner, id));
+    expect(fetcher).not.toHaveBeenCalled(); expect((await store.getContext(owner, id)).titleState).toBe("fallback");
+    expect(await settings.get(other)).toEqual({ aiTitlesEnabled: false }); vi.unstubAllGlobals();
+  });
+  it("R5: deleting the unfinished first attachment promotes a ready sibling", async () => {
+    const id = randomUUID(), first = randomUUID(), next = randomUUID();
+    await store.writeItem(owner, id, { id: first, content: { kind: "attachment", name: "cancel.bin", contentType: "application/octet-stream", size: 3 } }, true);
+    await store.writeItem(owner, id, { id: next, content }, false);
+    await backend.deleteItem(owner, id, first);
+    const context = await store.getContext(owner, id); expect(context.firstItemId).toBe(next); expect(context.ready).toBe(true);
+    await backend.deleteItem(owner, id, first); expect((await store.getContext(owner, id)).firstItemId).toBe(next);
+    await backend.deleteItem(owner, id, next); expect((await store.getContext(owner, id)).ready).toBe(true);
+  });
+  it("R2: ten active keys is an enforced owner limit", async () => {
+    for (const doc of (await db.collection("agentKeys").where("uid", "==", owner).get()).docs) await doc.ref.delete();
+    for (let i = 0; i < 10; i++) await store.createKey(owner, `Key ${i}`);
+    await expect(store.createKey(owner, "Overflow")).rejects.toMatchObject({ statusCode: 409 });
+    for (const key of await store.listKeys(owner)) await store.revokeKey(owner, key.id);
+  });
   it("does not overwrite manual titles or revive a deleted context after an AI response", async () => {
-    const worker = new TitleWorker(db, "test-only");
+    const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: true });
+    const worker = new TitleWorker(db, "test-only", undefined, settings);
     for (const action of ["rename", "delete"] as const) {
       const id = randomUUID(); await store.writeItem(owner, id, { id: randomUUID(), content }, true);
       let respond!: (value: Response) => void;

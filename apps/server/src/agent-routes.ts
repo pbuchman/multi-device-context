@@ -1,3 +1,4 @@
+import { WindowLimit } from "./limits.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { AgentContextInputSchema, AgentItemInputSchema, AgentKeyNameSchema, IdSchema, RenameContextSchema } from "@mdc/contracts";
 import { type AgentStore, BadInputError } from "./agent-store.js";
@@ -24,7 +25,8 @@ function paging(request: FastifyRequest): [string | undefined, number] {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (query.after !== undefined && typeof query.after !== "string")) throw new BadInputError();
   return [query.after as string | undefined, limit];
 }
-export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, verifier: AuthVerifier, backend: Backend) {
+export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, verifier: AuthVerifier, backend: Backend, allowOwner: (request: FastifyRequest, uid: string) => void = () => {}) {
+  const keyCreation = new WindowLimit(5);
   // Auth0-only key administration. Agent tokens deliberately do not enter this verifier.
   void app.register(async admin => {
     admin.decorateRequest("ownerUid", "");
@@ -32,12 +34,15 @@ export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, veri
       let uid: string | undefined;
       try { uid = (await verifier(bearer(request))).uid; } catch { /* no credential detail */ }
       if (!uid) return reply.code(401).send({ error: "Unauthorized" });
+      allowOwner(request, uid);
       (request as FastifyRequest & { ownerUid: string }).ownerUid = uid;
       reply.header("cache-control", "no-store");
     });
     const owner = (r: FastifyRequest) => (r as FastifyRequest & { ownerUid: string }).ownerUid;
     admin.get("/api/agent-keys", r => store.listKeys(owner(r)));
     admin.post("/api/agent-keys", async (r, reply) => {
+      const retry = keyCreation.take(owner(r));
+      if (retry) return reply.header("retry-after", retry).code(429).send({ error: "Too Many Requests" });
       const value = parse(AgentKeyNameSchema, r.body);
       return reply.code(201).send(await store.createKey(owner(r), value.name));
     });
@@ -47,16 +52,11 @@ export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, veri
     });
   });
   void app.register(async api => {
-    const attempts = new Map<string, { count: number; until: number }>();
     api.decorateRequest("ownerUid", "");
     api.addHook("onRequest", async (request, reply) => {
       const identity = await store.authenticate(bearer(request));
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
-      const now = Date.now();
-      for (const [key, value] of attempts) if (value.until <= now) attempts.delete(key);
-      const state = attempts.get(identity.keyId) ?? { count: 0, until: now + 60_000 };
-      state.count++; attempts.set(identity.keyId, state);
-      if (state.count > 120) return reply.header("retry-after", Math.ceil((state.until - now) / 1000)).code(429).send({ error: "Too Many Requests" });
+      allowOwner(request, identity.uid);
       (request as FastifyRequest & { ownerUid: string }).ownerUid = identity.uid;
       reply.header("cache-control", "no-store");
     });

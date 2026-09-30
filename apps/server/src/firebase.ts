@@ -1,3 +1,5 @@
+import { FieldValue } from "firebase-admin/firestore";
+import { diagnostic } from "./diagnostics.js";
 import type { Auth } from "firebase-admin/auth";
 import type { Firestore } from "firebase-admin/firestore";
 import type { Storage } from "firebase-admin/storage";
@@ -172,10 +174,23 @@ export class FirebaseBackend implements Backend {
       if (record.deleting !== true) transaction.update(reference, { deleting: true });
       return true;
     });
-    if (!exists) return;
+    if (!exists) { await this.repairFirstItem(uid, contextId, itemId); return; }
 
     await this.deleteObjectGenerations(`${itemPath(uid, contextId, itemId)}/`);
     await reference.delete();
+    await this.repairFirstItem(uid, contextId, itemId);
+  }
+
+  private async repairFirstItem(uid: string, contextId: string, removedId: string) {
+    const parent = this.firestore.doc(contextPath(uid, contextId));
+    await this.firestore.runTransaction(async tx => {
+      const context = await tx.get(parent);
+      if (!context.exists || context.data()?.deleting !== false || context.data()?.firstItemId !== removedId) return;
+      const remaining = await tx.get(parent.collection("items").where("deleting", "==", false).orderBy("createdAt").limit(1));
+      const first = remaining.docs[0];
+      tx.update(parent, { firstItemId: first?.id ?? FieldValue.delete(), ready: first ? first.data().ready === true : true,
+        ...(context.data()?.titleState === "pending" ? { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() } : {}) });
+    });
   }
 
   async deleteContext(uid: string, contextId: string): Promise<void> {
@@ -269,7 +284,8 @@ export class FirebaseBackend implements Backend {
       this.cleanupFailure = undefined;
     } catch (error) {
       // Tombstones remain persisted; readiness reports the failure while the next bounded pass retries.
-      this.cleanupFailure = error instanceof Error ? error : new Error("Cleanup failed");
+      this.cleanupFailure = new Error("Cleanup failed");
+      diagnostic("cleanup", "pass-failed");
     }
   }
 

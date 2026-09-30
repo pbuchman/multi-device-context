@@ -2,11 +2,14 @@ appId: com.multidevicecontext.desktop
 productName: Multi Device Context
 copyright: Copyright © 2026 Multi Device Context contributors
 asar: true
-npmRebuild: false
+beforeBuild: ./scripts/before-build.cjs
 files:
   - dist/**
   - package.json
+  - LICENSE
+  - THIRD_PARTY_NOTICES.txt
 directories:
+  app: bundle
   output: release
   buildResources: resources
 protocols:

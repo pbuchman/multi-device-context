@@ -272,3 +272,29 @@ describe("authenticated API", () => {
     expect(fake.deleteContext).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("review security boundaries", () => {
+  it("R7: blocks current, historical and missing source map URLs before SPA fallback", async () => {
+    const { app } = server();
+    for (const url of ["/assets/index.js.map", "/old.js.map?cache=bypass", "/test.MAP"]) {
+      const response = await app.inject({ url }); expect(response.statusCode).toBe(404); expect(response.headers["content-type"]).toContain("application/json");
+    }
+  });
+  it("R9: settings use the authenticated owner and reject agent tokens or UID overrides", async () => {
+    const settings = { get: vi.fn(async () => ({ aiTitlesEnabled: false })), set: vi.fn(async (_uid: string, value: { aiTitlesEnabled: boolean }) => value) };
+    const app = buildServer({ publicConfig, verifier, backend: backend(), settings }); openServers.push(app);
+    expect((await app.inject({ url: "/api/settings", headers: { authorization: "Bearer agent" } })).statusCode).toBe(401);
+    const headers = { authorization: "Bearer valid-token" };
+    const get = await app.inject({ url: "/api/settings", headers }); expect(get.json()).toEqual({ aiTitlesEnabled: false }); expect(settings.get).toHaveBeenCalledWith("derived_uid");
+    expect((await app.inject({ method: "PATCH", url: "/api/settings", headers, payload: { aiTitlesEnabled: true, uid: "victim" } })).statusCode).toBe(400);
+    expect((await app.inject({ method: "PATCH", url: "/api/settings", headers, payload: { aiTitlesEnabled: true } })).statusCode).toBe(200);
+    expect(settings.set).toHaveBeenCalledWith("derived_uid", { aiTitlesEnabled: true });
+  });
+  it("R2: untrusted remote clients cannot bypass the IP limit with forwarded headers", async () => {
+    const { app } = server();
+    for (let i=0; i<65; i++) {
+      const response = await app.inject({ url: "/api/unknown", remoteAddress: "192.0.2.1", headers: { "x-forwarded-for": `198.51.100.${i+1}` } });
+      expect(response.statusCode).toBe(i < 60 ? 404 : 429);
+    }
+  });
+});

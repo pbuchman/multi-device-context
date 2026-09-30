@@ -1,3 +1,5 @@
+> Historical design/plan. Current behavior is documented in `docs/privacy.md`, `docs/agent-api.md` and `CHANGELOG.md`; later revisions supersede conflicting requirements here.
+
 # Task 2 exact server and rules contracts
 
 This adds precision to Task 2 in the committed plan without changing its scope.
