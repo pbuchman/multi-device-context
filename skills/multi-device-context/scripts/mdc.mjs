@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+class InputError extends Error {}
 const args = process.argv.slice(2);
 const command = args.shift();
 const flags = {};
@@ -36,17 +37,17 @@ if (!command || command === 'help' || flags.help) { console.log(help); process.e
 try {
   const file = process.env.MDC_CONFIG ?? join(homedir(), '.config/multi-device-context/agent.json');
   const info = await stat(file);
-  if (process.platform !== 'win32' && ((info.mode & 0o077) || info.uid !== process.getuid())) throw new Error('Config must be owned by you with mode 0600');
+  if (process.platform !== 'win32' && ((info.mode & 0o077) || info.uid !== process.getuid())) throw new InputError('Config must be owned by you with mode 0600');
   const config = JSON.parse(await readFile(file, 'utf8'));
   const url = new URL(config.url);
-  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^mdc_/.test(config.key)) throw new Error('Invalid agent configuration');
+  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^mdc_/.test(config.key)) throw new InputError('Invalid agent configuration');
   const base = url.origin + '/api/agent/v1/contexts';
-  const id = value => { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? '')) throw new Error('A valid UUID is required'); return value; };
+  const id = value => { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? '')) throw new InputError('A valid UUID is required'); return value; };
   async function request(path = '', method = 'GET', body, binary = false) {
     const response = await fetch(base + path, { method, redirect: 'error', signal: AbortSignal.timeout(binary ? 300_000 : 30_000),
       headers: { authorization: `Bearer ${config.key}`, ...(body ? { 'content-type': binary ? 'application/octet-stream' : 'application/json' } : {}) },
       ...(body ? { body: binary ? body : JSON.stringify(body) } : {}), ...(binary && body ? { duplex: 'half' } : {}) });
-    if (!response.ok) throw new Error(`API returned ${response.status}${response.status === 429 ? '; retry after ' + response.headers.get('retry-after') + ' seconds' : ''}`);
+    if (!response.ok) throw new InputError(`API returned ${response.status}${response.status === 429 ? '; retry after ' + response.headers.get('retry-after') + ' seconds' : ''}`);
     return response;
   }
   const output = value => console.log(JSON.stringify(value));
@@ -72,7 +73,7 @@ try {
     let text = flags.text;
     if (flags.file === '-') { const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk); text = Buffer.concat(chunks).toString('utf8'); }
     else if (flags.file) text = await readFile(flags.file, 'utf8');
-    if (!text) throw new Error('Supply --text or --file');
+    if (!text) throw new InputError('Supply --text or --file');
     const item = { id: id(flags['item-id'] ?? randomUUID()), content: { kind: flags.code ? 'code' : 'text', text } };
     const contextId = id(command === 'create' ? flags.id ?? randomUUID() : args[0]);
     const result = await request(command === 'create' ? '' : `/${contextId}/items`, 'POST', command === 'create' ? { id: contextId, item } : item);
@@ -80,8 +81,8 @@ try {
   } else if (command === 'rename') output(await (await request('/' + id(args[0]), 'PATCH', { title: flags.title })).json());
   else if (command === 'delete') { await request('/' + id(args[0]) + (args[1] ? '/items/' + id(args[1]) : ''), 'DELETE'); output({ deleted: true }); }
   else if (command === 'download') {
-    if (!args[2]) throw new Error('Output path required');
-    const response = await request(`/${id(args[0])}/items/${id(args[1])}/content`);
+    if (!args[2]) throw new InputError('Output path required');
+    const response = await request(`/${id(args[0])}/items/${id(args[1])}/content`, 'GET', undefined, true);
     await pipeline(Readable.fromWeb(response.body), createWriteStream(args[2], { flags: 'wx', mode: 0o600 }));
     output({ saved: args[2] });
   } else if (command === 'upload') {
@@ -90,9 +91,9 @@ try {
     await request(`/${contextId}/items`, 'POST', { id: itemId, content: { kind: 'attachment', name: basename(path), size, contentType: flags.type ?? 'application/octet-stream' } });
     await request(`/${contextId}/items/${itemId}/content`, 'PUT', createReadStream(path), true);
     output({ contextId, itemId, uploaded: true });
-  } else throw new Error('Unknown command; run help');
+  } else throw new InputError('Unknown command; run help');
 } catch (error) {
   // Do not print fetch exceptions or request objects: they can contain credentials.
-  console.error(error instanceof Error && !/fetch|token|Bearer/i.test(error.message) ? error.message : 'Request failed; check connectivity and your private configuration');
+  console.error(error instanceof InputError ? error.message : 'Command failed; check the input files, connectivity and private configuration');
   process.exitCode = 1;
 }
