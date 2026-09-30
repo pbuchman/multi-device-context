@@ -112,6 +112,8 @@ describe("public and health routes", () => {
     expect(response.headers["content-security-policy"]).not.toContain("unsafe-inline");
     expect(response.headers["content-security-policy"]).not.toContain("unsafe-eval");
     expect(response.headers["content-security-policy"]).toContain("media-src 'self' blob:");
+    expect(response.headers["content-security-policy"]).toContain("frame-src https://login.example.test");
+    expect(response.headers["content-security-policy"]).toContain("worker-src 'self' blob:");
     expect(response.headers["referrer-policy"]).toBe("strict-origin-when-cross-origin");
   });
 

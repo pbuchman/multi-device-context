@@ -83,6 +83,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     "style-src 'self'",
     "img-src 'self' blob: data:",
     "media-src 'self' blob:",
+    `frame-src https://${publicConfig.auth0.domain}`,
+    "worker-src 'self' blob:",
     `connect-src 'self' https://${publicConfig.auth0.domain} https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com`,
   ].join("; ");
 
