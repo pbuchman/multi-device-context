@@ -1,0 +1,50 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function context(uid, contextId) {
+      return firestore.get(/databases/(default)/documents/users/$(uid)/contexts/$(contextId));
+    }
+
+    function item(uid, contextId, itemId) {
+      return firestore.get(/databases/(default)/documents/users/$(uid)/contexts/$(contextId)/items/$(itemId));
+    }
+
+    function liveContext(uid, contextId) {
+      return context(uid, contextId).data.deleting == false;
+    }
+
+    function validPendingAttachment(uid, contextId, itemId) {
+      let record = item(uid, contextId, itemId).data;
+      return record.deleting == false
+        && record.ready == false
+        && record.content.kind == 'attachment'
+        && record.content.size == request.resource.size
+        && record.content.contentType == request.resource.contentType;
+    }
+
+    function readyAttachment(uid, contextId, itemId) {
+      let record = item(uid, contextId, itemId).data;
+      return record.deleting == false
+        && record.ready == true
+        && record.content.kind == 'attachment';
+    }
+
+    match /users/{uid}/contexts/{contextId}/items/{itemId}/original {
+      allow read: if isOwner(uid)
+        && liveContext(uid, contextId)
+        && readyAttachment(uid, contextId, itemId);
+      allow create: if isOwner(uid)
+        && resource == null
+        && liveContext(uid, contextId)
+        && validPendingAttachment(uid, contextId, itemId)
+        && request.resource.size <= 104857600
+        && !request.resource.metadata.keys().hasAny(['firebaseStorageDownloadTokens']);
+      allow update, delete: if false;
+    }
+  }
+}
