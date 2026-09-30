@@ -1,3 +1,4 @@
+import { liveDocumentQuery } from "../apps/web/src/queries.js";
 import { readFile } from "node:fs/promises";
 
 import {
@@ -26,7 +27,7 @@ import {
   ref,
   uploadBytes,
 } from "firebase/storage";
-import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, it, expect } from "vitest";
 
 const PROJECT_ID = "demo-mdc";
 const OWNER = "owner_uid";
@@ -135,6 +136,22 @@ describe("Firestore owner isolation and context validation", () => {
     await assertFails(updateDoc(doc(owner, contextPath()), { titleState: "generated", updatedAt: serverTimestamp() }));
     await assertFails(setDoc(doc(owner, contextPath(OWNER, SECOND_CONTEXT_ID)), { ...contextRecord(), titleAttempts: 0 }));
     await assertFails(getDoc(doc(owner, `agentKeys/${CONTEXT_ID}`)));
+  });
+
+  it("R6: bounded existence reads handle absent, existing, deleting and foreign records", async () => {
+    const owner = environment.authenticatedContext(OWNER).firestore();
+    const contexts = collection(owner, `users/${OWNER}/contexts`);
+    const find = () => getDocs(liveDocumentQuery(contexts, CONTEXT_ID));
+    expect((await assertSucceeds(find())).empty).toBe(true);
+    await setDoc(doc(owner, contextPath()), contextRecord());
+    await setDoc(doc(owner, contextPath(OWNER, SECOND_CONTEXT_ID)), contextRecord());
+    expect((await assertSucceeds(find())).docs.map(d => d.id)).toEqual([CONTEXT_ID]);
+    const items = collection(owner, `${contextPath()}/items`);
+    expect((await assertSucceeds(getDocs(liveDocumentQuery(items, ITEM_ID)))).empty).toBe(true);
+    const other = environment.authenticatedContext(OTHER).firestore();
+    await assertFails(getDocs(liveDocumentQuery(collection(other, `users/${OWNER}/contexts`), CONTEXT_ID)));
+    await seed(contextPath(), contextRecord({ deleting: true }));
+    expect((await assertSucceeds(find())).empty).toBe(true);
   });
 
   it("prevents old outboxes recreating deleted contexts while allowing new IDs", async () => {

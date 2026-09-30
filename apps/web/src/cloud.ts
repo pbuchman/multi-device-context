@@ -1,3 +1,4 @@
+import { liveDocumentQuery } from "./queries.js";
 import { ContentSchema, DeviceSchema, attachmentPath, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
 import type { FirebaseApp } from "firebase/app";
 import {
@@ -8,8 +9,6 @@ import {
   initializeFirestore,
   onSnapshot,
   memoryLocalCache,
-  documentId,
-  limit,
   query,
   serverTimestamp,
   updateDoc,
@@ -185,7 +184,7 @@ export class FirebaseCloud {
       emit({ records: sorted(records, false), fromCache: snapshot.metadata.fromCache, hasPendingWrites: snapshot.metadata.hasPendingWrites });
     }, (error) => {
       void isDeletedContextError(error, async () => {
-        const contexts = await getDocsFromServer(query(collection(this.#firestore, `users/${this.uid}/contexts`), where("deleting", "==", false), where(documentId(), "==", contextId), limit(1)));
+        const contexts = await getDocsFromServer(liveDocumentQuery(collection(this.#firestore, `users/${this.uid}/contexts`), contextId));
         return contexts.docs.some(context => context.id === contextId);
       }).then(deleted => {
         if (!active) return;
@@ -262,11 +261,11 @@ export class FirebaseCloud {
     const contextsPath = `users/${this.uid}/contexts`;
     const itemsPath = (contextId: Id) => `${contextsPath}/${contextId}/items`;
     const findContext = async (contextId: Id) => {
-      const snapshot = await getDocs(query(collection(this.#firestore, contextsPath), where("deleting", "==", false), where(documentId(), "==", contextId), limit(1)));
+      const snapshot = await getDocs(liveDocumentQuery(collection(this.#firestore, contextsPath), contextId));
       return snapshot.docs.some((entry) => entry.id === contextId) ? { id: contextId } : undefined;
     };
     const findItem = async (contextId: Id, itemId: Id): Promise<ExistingItem | undefined> => {
-      const snapshot = await getDocs(query(collection(this.#firestore, itemsPath(contextId)), where("deleting", "==", false), where(documentId(), "==", itemId), limit(1)));
+      const snapshot = await getDocs(liveDocumentQuery(collection(this.#firestore, itemsPath(contextId)), itemId));
       const found = snapshot.docs.find((entry) => entry.id === itemId);
       if (!found) return undefined;
       const data = found.data();
