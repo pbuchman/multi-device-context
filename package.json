@@ -1,0 +1,16 @@
+{
+  "name": "multi-device-context",
+  "private": true,
+  "packageManager": "pnpm@10.29.3",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
+  }
+}
