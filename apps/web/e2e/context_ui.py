@@ -13,6 +13,8 @@ with sync_playwright() as playwright:
     page.on("console", lambda message: errors.append(message.text) if message.type in ("error", "warning") else None)
     page.goto(BASE_URL, wait_until="networkidle")
     assert page.title() == "Contexts · UI test"
+    page.get_by_role("heading", name="New context").wait_for()
+    page.get_by_role("button", name="Website handoff", exact=True).click()
     page.get_by_role("heading", name="Website handoff").wait_for()
     assert page.get_by_text("Here’s the layout I was working on", exact=False).is_visible()
     assert not page.locator("vite-error-overlay").count()
@@ -34,8 +36,8 @@ with sync_playwright() as playwright:
 
     page.set_viewport_size({"width": 390, "height": 844})
     page.get_by_label("Search contexts").fill("commands")
-    assert page.get_by_role("button", name="Useful commands").is_visible()
-    page.get_by_role("button", name="Useful commands").click()
+    assert page.get_by_role("button", name="Useful commands", exact=True).is_visible()
+    page.get_by_role("button", name="Useful commands", exact=True).click()
     page.get_by_text("git status", exact=False).wait_for()
     page.screenshot(path=str(SCREENSHOTS / "narrow-dark.png"), full_page=True)
     assert not errors, errors

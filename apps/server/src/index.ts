@@ -5,6 +5,9 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 
+import { AgentStore } from "./agent-store.js";
+import { TitleWorker } from "./titles.js";
+
 import { createAuthVerifier } from "./auth.js";
 import { readServerConfig } from "./config.js";
 import { FirebaseBackend } from "./firebase.js";
@@ -28,9 +31,13 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
     verifier: createAuthVerifier(config.publicConfig),
     backend,
     webDist: config.webDist,
+    agents: new AgentStore(getFirestore(adminApp), getStorage(adminApp).bucket(), backend),
   });
+  const titles = new TitleWorker(getFirestore(adminApp), env.MDC_OPENROUTER_API_KEY, env.MDC_TITLE_MODEL);
+  server.addHook("preClose", async () => { await titles.close(); });
   try {
     await backend.startCleanup();
+    titles.start();
     await server.listen({ host: config.host, port: config.port });
     return server;
   } catch (error) {

@@ -102,6 +102,12 @@ try {
       true,
     );
     report.checks.push("Actual OS startup setting toggles");
+    const contextId = "00000000-0000-4000-8000-000000000088";
+    await app.evaluate(({ app }, id) => app.emit("open-url", { preventDefault() {} }, `multi-device-context://context/${id}`), contextId);
+    assert.deepEqual(await window.evaluate(() => window.contextDesktop.takeNavigation()), { contextId });
+    await app.evaluate(({ app }) => app.emit("activate"));
+    assert.deepEqual(await window.evaluate(() => window.contextDesktop.takeNavigation()), {});
+    report.checks.push("Native context links and manual reopen emit distinct navigation intents");
     await window.evaluate(() =>
       window.contextDesktop.copyText("  Native smoke fixture\n"),
     );

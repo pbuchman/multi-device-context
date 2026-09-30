@@ -272,3 +272,13 @@ describe("isTrustedAppUrl", () => {
     expect(isTrustedAppUrl("http://192.168.1.5/", "http://192.168.1.5", true)).toBe(false);
   });
 });
+
+describe("context navigation URLs", () => {
+  it("accepts only an exact context route and safe native protocol", async () => {
+    const { contextIdFromPath, contextIdFromProtocol } = await import("./index.js");
+    const id = "00000000-0000-4000-8000-000000000001";
+    expect(contextIdFromPath(`/contexts/${id}`)).toBe(id);
+    expect(contextIdFromProtocol(`multi-device-context://context/${id}`)).toBe(id);
+    for (const value of [`https://context/${id}`, `multi-device-context://attacker@context/${id}`, `multi-device-context://context/${id}?redirect=https://evil.test`, "multi-device-context://auth/callback"]) expect(contextIdFromProtocol(value)).toBeUndefined();
+  });
+});

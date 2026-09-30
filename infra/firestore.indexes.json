@@ -1,5 +1,34 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "contexts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "deleting",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "items",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "deleting",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "ASCENDING"
+        }
+      ]
+    }
+  ],
   "fieldOverrides": [
     {
       "collectionGroup": "contexts",
@@ -31,6 +60,16 @@
           "order": "DESCENDING",
           "queryScope": "COLLECTION"
         },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "contexts",
+      "fieldPath": "titleState",
+      "indexes": [
         {
           "order": "ASCENDING",
           "queryScope": "COLLECTION_GROUP"

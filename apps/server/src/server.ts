@@ -5,6 +5,8 @@ import fastifyStatic from "@fastify/static";
 import { IdSchema, type RuntimeConfig } from "@mdc/contracts";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 
+import { registerAgentRoutes, type AgentPort } from "./agent-routes.js";
+
 import type { AuthVerifier, VerifiedIdentity } from "./auth.js";
 
 export class BackendNotFoundError extends Error {}
@@ -24,6 +26,7 @@ export type BuildServerOptions = {
   verifier: AuthVerifier;
   backend: Backend;
   webDist?: string;
+  agents?: AgentPort;
 };
 
 function hasNoBodyFields(body: unknown): boolean {
@@ -196,6 +199,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       }
     },
   );
+
+  if (options.agents) registerAgentRoutes(app, options.agents, verifier, backend);
 
   const webDist = options.webDist;
   const hasStaticUi = typeof webDist === "string" && existsSync(join(webDist, "index.html"));

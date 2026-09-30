@@ -18,6 +18,7 @@ import { pathToFileURL } from "node:url";
 import { writeFile } from "node:fs/promises";
 import {
   ContentSchema,
+  contextIdFromProtocol,
   IdSchema,
   RuntimeConfigSchema,
   isTrustedAppUrl,
@@ -47,6 +48,12 @@ let window: BrowserWindow | undefined,
 let quitting = false,
   connecting: Promise<void> | undefined;
 const callbacks: string[] = [];
+let pendingNavigation: { contextId?: string } | undefined;
+function navigate(contextId?: string): void {
+  pendingNavigation = contextId ? { contextId } : {};
+  if (window && isTrustedAppUrl(window.webContents.getURL(), MDC_APP_ORIGIN)) window.webContents.send("mdc:navigate", pendingNavigation);
+}
+function openNew(): void { navigate(); show(); }
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   return message.length > 0 &&
@@ -72,6 +79,8 @@ function show(): void {
 }
 function onCallback(url: string): void {
   if (!url.startsWith("multi-device-context:")) return;
+  const contextId = contextIdFromProtocol(url);
+  if (contextId) { navigate(contextId); show(); return; }
   if (auth) {
     if (auth.handleCallback(url)) show();
   } else if (callbacks.length < 4) callbacks.push(url);
@@ -79,8 +88,8 @@ function onCallback(url: string): void {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", (_event, argv) => {
-    for (const arg of argv) onCallback(arg);
-    show();
+    if (argv.some(arg => arg.startsWith("multi-device-context:"))) { for (const arg of argv) onCallback(arg); show(); }
+    else openNew();
   });
   app.on("open-url", (event, url) => {
     event.preventDefault();
@@ -91,7 +100,7 @@ else {
     quitting = true;
   });
   app.on("window-all-closed", () => {});
-  app.on("activate", show);
+  app.on("activate", openNew);
   void app
     .whenReady()
     .then(start)
@@ -283,13 +292,13 @@ function createTray(): void {
   if (process.platform === "darwin") icon.setTemplateImage(true);
   tray = new Tray(icon);
   tray.setToolTip("Multi Device Context");
-  tray.on("click", show);
+  tray.on("click", openNew);
   refreshTray();
 }
 function refreshTray(): void {
   tray?.setContextMenu(
     Menu.buildFromTemplate([
-      { label: "Open contexts", click: show },
+      { label: "Open contexts", click: openNew },
       {
         label: "Share clipboard",
         click: () => {
@@ -356,6 +365,7 @@ function wireBridge(): void {
         return { ok: false, message: errorMessage(error) };
       }
     });
+  handle("takeNavigation", 0, () => { const value = pendingNavigation; pendingNavigation = undefined; return value; });
   handle("getDevice", 0, () => store.device());
   handle("getAccessToken", 1, (interactive) => {
     if (typeof interactive !== "boolean")

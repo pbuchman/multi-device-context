@@ -18,7 +18,11 @@ service cloud.firestore {
     }
 
     function validContext(data) {
-      return data.keys().hasOnly(['title', 'createdAt', 'updatedAt', 'deleting'])
+      return data.keys().hasOnly(['title', 'createdAt', 'updatedAt', 'deleting', 'originDeviceId', 'firstItemId', 'ready', 'titleState', 'titleLease', 'titleLeaseUntil', 'titleAttempts'])
+        && (!('originDeviceId' in data) || isUuid(data.originDeviceId))
+        && (!('firstItemId' in data) || isUuid(data.firstItemId))
+        && (!('ready' in data) || data.ready is bool)
+        && (!('titleState' in data) || data.titleState in ['pending', 'manual', 'generated', 'fallback'])
         && validTitle(data.title)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp
@@ -83,12 +87,15 @@ service cloud.firestore {
         && isUuid(contextId)
         && !exists(/databases/$(database)/documents/users/$(uid)/deletedContexts/$(contextId))
         && validContext(request.resource.data)
+        && !request.resource.data.keys().hasAny(['titleLease', 'titleLeaseUntil', 'titleAttempts'])
+        && (!('titleState' in request.resource.data) || request.resource.data.titleState in ['pending', 'manual'])
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time
         && request.resource.data.deleting == false;
       allow update: if isOwner(uid)
         && validContext(request.resource.data)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt', 'titleState'])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['titleState']) || request.resource.data.titleState == 'manual')
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.updatedAt == request.time
         && request.resource.data.deleting == false;
@@ -114,6 +121,10 @@ service cloud.firestore {
           );
         allow update, delete: if false;
       }
+    }
+    match /users/{uid}/deletedContexts/{contextId} {
+      allow get, list: if isOwner(uid);
+      allow write: if false;
     }
     // Server-only UUID markers prevent offline clients resurrecting removed
     // contexts/items. The default deny leaves these unreadable and immutable to clients.

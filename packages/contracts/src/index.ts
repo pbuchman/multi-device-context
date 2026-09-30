@@ -130,6 +130,8 @@ export interface DesktopBridge {
   setLaunchAtLogin(enabled: boolean): Promise<void>;
   getPendingClipboardShares(): Promise<PendingClipboardShare[]>;
   acknowledgeClipboardShare(id: Id): Promise<void>;
+  takeNavigation?(): Promise<{ contextId?: Id } | undefined>;
+  onNavigate?(listener: (event: { contextId?: Id }) => void): () => void;
   onShareClipboard(listener: () => void): () => void;
 }
 
@@ -193,4 +195,33 @@ export function isTrustedAppUrl(
   } catch {
     return false;
   }
+}
+
+export const TitleSchema = z.string().trim().min(1).max(160);
+export const AgentItemInputSchema = z.object({
+  id: IdSchema,
+  content: ContentSchema,
+  device: DeviceSchema.optional(),
+}).strict();
+export const AgentContextInputSchema = z.object({
+  id: IdSchema,
+  item: AgentItemInputSchema,
+}).strict();
+export type AgentItemInput = z.infer<typeof AgentItemInputSchema>;
+export const AgentKeyNameSchema = z.object({ name: z.string().trim().min(1).max(80) }).strict();
+export const RenameContextSchema = z.object({ title: TitleSchema }).strict();
+export type AgentKeyInfo = { id: string; name: string; createdAt: number; lastUsedAt: number | null };
+
+export function contextIdFromPath(path: string): Id | undefined {
+  const match = /^\/contexts\/([^/]+)\/?$/.exec(path);
+  const parsed = IdSchema.safeParse(match?.[1]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function contextIdFromProtocol(value: string): Id | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "multi-device-context:" || url.hostname !== "context" || url.username || url.password || url.port || url.search || url.hash) return undefined;
+    return contextIdFromPath(`/contexts${url.pathname}`);
+  } catch { return undefined; }
 }

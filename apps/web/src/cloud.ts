@@ -1,4 +1,4 @@
-import { ContentSchema, DeviceSchema, attachmentPath, type Content, type Device, type Id } from "@mdc/contracts";
+import { ContentSchema, DeviceSchema, attachmentPath, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
 import type { FirebaseApp } from "firebase/app";
 import {
   collection,
@@ -102,6 +102,8 @@ function contextFromDocument(document: QueryDocumentSnapshot<DocumentData>): Con
   return {
     id: document.id as Id,
     title: data.title,
+    ...(typeof data.originDeviceId === "string" ? { originDeviceId: data.originDeviceId } : {}),
+    ...(typeof data.ready === "boolean" ? { ready: data.ready } : {}),
     createdAt: timestampMillis(data.createdAt),
     updatedAt: timestampMillis(data.updatedAt),
     syncState: document.metadata.hasPendingWrites ? "pending" : document.metadata.fromCache ? "cached" : "synced",
@@ -184,9 +186,18 @@ export class FirebaseCloud {
   async renameContext(contextId: Id, title: string): Promise<void> {
     await updateDoc(doc(this.#firestore, `users/${this.uid}/contexts/${contextId}`), {
       title,
+      titleState: "manual",
       updatedAt: serverTimestamp(),
     });
   }
+
+  subscribeDeletedContexts(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe {
+    return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedContexts`), snapshot => emit(snapshot.docs.map(d => d.id)), fail);
+  }
+
+  async listKeys(): Promise<AgentKeyInfo[]> { return (await this.#api("/api/agent-keys", "GET")).json(); }
+  async createKey(name: string): Promise<AgentKeyInfo & { key: string }> { return (await this.#api("/api/agent-keys", "POST", { name })).json(); }
+  async revokeKey(id: string): Promise<void> { await this.#api(`/api/agent-keys/${id}`, "DELETE"); }
 
   async deleteContext(contextId: Id): Promise<void> {
     await this.#api(`/api/contexts/${contextId}`, "DELETE");
@@ -204,10 +215,11 @@ export class FirebaseCloud {
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  async #api(path: string, method: "POST" | "DELETE"): Promise<Response> {
+  async #api(path: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<Response> {
     const response = await fetch(path, {
       method,
-      headers: { authorization: `Bearer ${await this.accessToken()}` },
+      headers: { authorization: `Bearer ${await this.accessToken()}`, ...(body ? { "content-type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
     });
     if (!response.ok) throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "Cloud request failed", response.status >= 500);
     return response;
@@ -247,6 +259,7 @@ export class FirebaseCloud {
         const timestamp = serverTimestamp();
         batch.set(doc(this.#firestore, contextsPath, record.contextId), {
           title: record.title, createdAt: timestamp, updatedAt: timestamp, deleting: false,
+          originDeviceId: record.device.id, firstItemId: record.itemId, ready: record.content.kind !== "attachment", titleState: record.manualTitle ? "manual" : "pending",
         });
         batch.set(doc(this.#firestore, itemsPath(record.contextId), record.itemId), itemData(record));
         await batch.commit();

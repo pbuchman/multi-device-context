@@ -9,6 +9,8 @@ export type ContextRecord = {
   updatedAt: number;
   syncState: SyncState;
   unread?: boolean;
+  originDeviceId?: string;
+  ready?: boolean;
 };
 
 export type ItemRecord = {
@@ -28,6 +30,7 @@ export type ShareDraft = {
   content: Content;
   device: Device;
   createsContext: boolean;
+  manualTitle?: boolean;
   bytes?: Uint8Array;
   nativeRequestId?: Id;
 };

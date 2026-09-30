@@ -22,7 +22,8 @@ type NativeMarker = {
 };
 
 type StoredAction = QueuedShare & { kind: "action" };
-type StoredRecord = StoredAction | NativeMarker;
+type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
+type StoredRecord = StoredAction | NativeMarker | DeletedMarker;
 
 const DATABASE_NAME = "mdc-outbox-v1";
 const STORE_NAME = "records";
@@ -84,6 +85,8 @@ export class DurableOutbox {
       nextAttemptAt: 0,
       status: "pending",
     };
+    const marker = await requestResult(transaction.objectStore(STORE_NAME).get(`deleted:${this.namespace}:${draft.contextId}`));
+    if (marker) throw new PublishFailure("This context was deleted", false);
     transaction.objectStore(STORE_NAME).put(record);
     await transactionDone(transaction);
   }
@@ -101,6 +104,7 @@ export class DurableOutbox {
     }
     store.add({ key: markerKey, kind: "native", namespace: this.namespace, requestId } satisfies NativeMarker);
     for (const draft of drafts) {
+      if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`))) continue;
       store.add({
         ...draft,
         key: `action:${this.namespace}:${draft.itemId}`,
@@ -161,6 +165,16 @@ export class DurableOutbox {
       }));
   }
 
+  async removeContext(id: Id): Promise<void> {
+    const database = await this.#db();
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const records = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
+    for (const record of records) if (record.kind === "action" && record.contextId === id) store.delete(record.key);
+    store.put({ key: `deleted:${this.namespace}:${id}`, kind: "deleted", namespace: this.namespace, contextId: id } satisfies DeletedMarker);
+    await transactionDone(transaction);
+  }
+
   async count(): Promise<number> {
     return (await this.list()).length;
   }
@@ -175,6 +189,7 @@ export class DurableOutbox {
   async markAttempting(record: QueuedShare): Promise<void> {
     const database = await this.#db();
     const transaction = database.transaction(STORE_NAME, "readwrite");
+    if (!await requestResult(transaction.objectStore(STORE_NAME).get(record.key))) { await transactionDone(transaction); return; }
     transaction.objectStore(STORE_NAME).put({
       ...record,
       kind: "action",
@@ -187,6 +202,7 @@ export class DurableOutbox {
   async markFailed(record: QueuedShare, error: unknown, delayMs: number, paused: boolean): Promise<void> {
     const database = await this.#db();
     const transaction = database.transaction(STORE_NAME, "readwrite");
+    if (!await requestResult(transaction.objectStore(STORE_NAME).get(record.key))) { await transactionDone(transaction); return; }
     transaction.objectStore(STORE_NAME).put({
       ...record,
       kind: "action",
@@ -204,7 +220,7 @@ export class DurableOutbox {
     const transaction = database.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     for (const record of records) {
-      if (!key || record.key === key) {
+      if ((!key || record.key === key) && await requestResult(store.get(record.key))) {
         store.put({ ...record, status: "pending", nextAttemptAt: 0, lastError: undefined });
       }
     }

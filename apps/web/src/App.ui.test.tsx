@@ -14,7 +14,7 @@ const contexts: ContextRecord[] = [
   { id: beta, title: "Beta", createdAt: 2, updatedAt: 10, syncState: "synced" },
 ];
 
-afterEach(() => { cleanup(); localStorage.clear(); });
+afterEach(() => { cleanup(); localStorage.clear(); history.replaceState({}, "", "/"); });
 
 function services(initialContexts = contexts) {
   let contextListener: ((snapshot: CloudSnapshot<ContextRecord>) => void) | undefined;
@@ -67,6 +67,7 @@ describe("ContextWorkspace", () => {
   it("waits for a new context to be acknowledged before reading its items", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     await userEvent.click(screen.getByRole("button", { name: "New context" }));
     fireEvent.paste(screen.getByLabelText("Paste to share instantly, or type a note"), {
       clipboardData: { files: [], getData: () => "first share" },
@@ -74,7 +75,7 @@ describe("ContextWorkspace", () => {
     await waitFor(() => expect(test.value.drain).toHaveBeenCalled());
     const draft = vi.mocked(test.value.outbox.enqueue).mock.calls[0]![0];
     expect(draft.createsContext).toBe(true);
-    expect(screen.getByText("first share")).toBeTruthy();
+    expect(within(screen.getByLabelText("Shared items")).getByText("first share")).toBeTruthy();
     expect(test.items.has(draft.contextId)).toBe(false);
 
     const pending: ContextRecord = { id: draft.contextId, title: draft.title, createdAt: 30, updatedAt: 30, syncState: "pending" };
@@ -102,6 +103,7 @@ describe("ContextWorkspace", () => {
       return () => undefined;
     });
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Missing or insufficient permissions.");
     expect(test.value.cloud.subscribeItems).toHaveBeenCalledTimes(1);
   });
@@ -109,10 +111,12 @@ describe("ContextWorkspace", () => {
   it("keeps established cached history readable after restarting with an offline edit", async () => {
     const test = services();
     const first = render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     await waitFor(() => expect(test.value.cloud.subscribeItems).toHaveBeenCalledTimes(1));
     act(() => test.emitContexts([{ ...contexts[0]!, syncState: "pending" }], { fromCache: true, hasPendingWrites: true }));
     first.unmount();
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     await waitFor(() => expect(test.value.cloud.subscribeItems).toHaveBeenCalledTimes(2));
     expect(vi.mocked(test.value.cloud.subscribeItems).mock.calls[1]![0]).toBe(alpha);
   });
@@ -120,6 +124,7 @@ describe("ContextWorkspace", () => {
   it("shares typed content on Enter without trimming and supports explicit code mode", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     const composer = await screen.findByLabelText("Paste to share instantly, or type a note");
     await userEvent.click(screen.getByRole("button", { name: "Share as code" }));
     fireEvent.change(composer, { target: { value: "  const x = 1;\n" } });
@@ -134,9 +139,10 @@ describe("ContextWorkspace", () => {
     expect(test.value.drain).toHaveBeenCalled();
   });
 
-  it("publishes pasted text immediately and incoming updates never change selection or clipboard", async () => {
+  it("publishes pasted text immediately and updates to existing contexts never change selection or clipboard", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     const composer = await screen.findByLabelText("Paste to share instantly, or type a note");
     fireEvent.paste(composer, { clipboardData: { files: [], getData: () => "pasted exactly" } });
     await waitFor(() => expect(test.value.outbox.enqueue).toHaveBeenCalled());
@@ -152,10 +158,11 @@ describe("ContextWorkspace", () => {
   it("keeps context navigation and settings usable while filtering", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     const search = await screen.findByLabelText("Search contexts");
     await userEvent.type(search, "Beta");
     expect(screen.queryByRole("button", { name: /Alpha/ })).toBeNull();
-    expect(screen.getByRole("button", { name: /Beta/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Beta" })).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(screen.getByText("alex@example.com")).toBeTruthy();
@@ -170,6 +177,7 @@ describe("ContextWorkspace", () => {
     }));
     test.value.readClipboard = readClipboard;
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     const composer = await screen.findByLabelText("Paste to share instantly, or type a note");
     fireEvent.paste(composer, { clipboardData: { files: [], getData: () => "file:///ignored.txt" } });
     await waitFor(() => expect(test.value.outbox.enqueue).toHaveBeenCalled());
@@ -205,10 +213,56 @@ describe("ContextWorkspace", () => {
       return trayContext;
     });
     render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     await screen.findByRole("heading", { name: "Alpha" });
     notify?.();
     await screen.findByRole("heading", { name: "Tray clipboard" });
     expect(screen.getByText("from tray")).toBeTruthy();
     expect(test.items.has(trayContext)).toBe(false);
   });
+  it("opens a new context by default and preserves a draft across an immediate remote switch", async () => {
+    const test = services();
+    render(<ContextWorkspace services={test.value} />);
+    expect(screen.getByRole("heading", { name: "New context" })).toBeTruthy();
+    const composer = screen.getByLabelText("Paste to share instantly, or type a note");
+    fireEvent.change(composer, { target: { value: "Unsent local work" } });
+    await userEvent.click(screen.getByRole("button", { name: "Share as code" }));
+    const incoming = { id: "00000000-0000-4000-8000-000000000088", title: "Remote context", createdAt: 30, updatedAt: 30, syncState: "synced" as const, originDeviceId: beta };
+    act(() => test.emitContexts([incoming, ...contexts]));
+    expect(screen.getByRole("heading", { name: "Remote context" })).toBeTruthy();
+    expect((composer as HTMLTextAreaElement).value).toBe("");
+    await userEvent.click(screen.getByRole("button", { name: "Draft · Unsent local work" }));
+    expect((composer as HTMLTextAreaElement).value).toBe("Unsent local work");
+    expect(screen.getByRole("button", { name: "Share as code" }).getAttribute("aria-pressed")).toBe("true");
+    act(() => test.emitContexts([{ ...incoming, title: "AI title" }, ...contexts]));
+    expect((composer as HTMLTextAreaElement).value).toBe("Unsent local work");
+    expect(test.value.copyText).not.toHaveBeenCalled();
+    expect(test.value.cloud.subscribeContexts).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not switch to a file until it is ready, and supports explicit context URLs", async () => {
+    history.replaceState({}, "", `/contexts/${alpha}`);
+    const test = services(); render(<ContextWorkspace services={test.value} />);
+    expect(screen.getByRole("heading", { name: "Alpha" })).toBeTruthy();
+    const incoming = { id: "00000000-0000-4000-8000-000000000088", title: "Screenshot", createdAt: 30, updatedAt: 30, syncState: "synced" as const, ready: false };
+    act(() => test.emitContexts([incoming, ...contexts]));
+    expect(screen.getByRole("heading", { name: "Alpha" })).toBeTruthy();
+    act(() => test.emitContexts([{ ...incoming, ready: true }, ...contexts]));
+    expect(screen.getByRole("heading", { name: "Screenshot" })).toBeTruthy();
+    expect(location.pathname).toBe(`/contexts/${incoming.id}`);
+  });
+
+  it("purges deleted contexts and returns to a fresh context", async () => {
+    const test = services(); let deleted: ((ids: string[]) => void) | undefined;
+    test.value.cloud.subscribeDeletedContexts = emit => { deleted = emit; return () => {}; };
+    test.value.outbox.removeContext = vi.fn(async () => {});
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    fireEvent.change(screen.getByLabelText("Paste to share instantly, or type a note"), { target: { value: "Remove this draft too" } });
+    act(() => deleted?.([alpha]));
+    expect(screen.getByRole("heading", { name: "New context" })).toBeTruthy();
+    expect(localStorage.getItem("mdc-drafts:project:user")).not.toContain("Remove this draft too");
+    expect(test.value.outbox.removeContext).toHaveBeenCalledWith(alpha);
+  });
+
 });
