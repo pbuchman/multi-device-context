@@ -53,7 +53,10 @@ jobs:
         run: |
           $installer = @(Get-ChildItem apps/desktop/release -Filter '*.exe')
           if ($installer.Count -ne 1) { throw 'Expected one Windows installer' }
-          $result = Start-Process -FilePath $installer[0].FullName -ArgumentList '/S' -Wait -PassThru
+          # Start-Process -Wait also waits for descendants, including the tray app.
+          # Wait on the installer process itself, with a bounded failure timeout.
+          $result = Start-Process -FilePath $installer[0].FullName -ArgumentList '/S' -PassThru
+          if (-not $result.WaitForExit(180000)) { $result.Kill(); throw 'Installer timed out' }
           if ($result.ExitCode -ne 0) { throw 'Installer failed' }
           Get-Process -Name 'Multi Device Context' -ErrorAction SilentlyContinue | Stop-Process
           $installed = @(Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Multi Device Context.exe')
