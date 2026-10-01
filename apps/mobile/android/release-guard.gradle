@@ -1,0 +1,11 @@
+// Inspect resolved tasks: assemble/build and abbreviations also schedule release packaging.
+// whenReady runs for --dry-run too, keeping CI graph regression checks meaningful.
+gradle.taskGraph.whenReady { graph ->
+    def includesRelease = graph.allTasks.any { task ->
+        task.project == project && task.name.toLowerCase().contains('release')
+    }
+    if (includesRelease) {
+        if (!project.mdcReleaseSigningAvailable) throw new GradleException('Release requires private Android signing configuration')
+        if (!project.mdcProductionConfigAvailable) throw new GradleException('Release requires fetched production config; fixtures are prohibited')
+    }
+}

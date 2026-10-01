@@ -14,6 +14,7 @@ checks and the remaining first-launch and sign-in checks on the target machines.
 - [Download private preview v0.3.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.3.0)
 - [Agent API, CLI and portable skill](docs/agent-api.md)
 - [Installation and sharing](docs/installation.md)
+- [Private Android build, USB installation and verification](docs/android.md)
 - [Home-dev deployment, updates and recovery](docs/operations/deployment.md)
 - [Requirements and initial design](docs/requirements.md)
 - [Architecture and implementation scope](docs/superpowers/specs/2026-09-30-installable-app-design.md)

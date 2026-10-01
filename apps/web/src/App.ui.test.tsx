@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DraftStore } from "./drafts.js";
-import { ContextWorkspace, type WorkspaceServices } from "./App.js";
+import { ContextWorkspace, sharePartsFromSnapshot, type WorkspaceServices } from "./App.js";
 import type { CloudSnapshot } from "./cloud.js";
 import type { ContextRecord, ItemRecord } from "./model.js";
 
@@ -65,6 +65,199 @@ function services(initialContexts = contexts) {
 }
 
 describe("ContextWorkspace", () => {
+  it("preserves Android shared text and files in one incoming snapshot", () => {
+    const parts = sharePartsFromSnapshot({
+      text: "caption",
+      files: [{ name: "photo.jpg", contentType: "image/jpeg", bytes: new Uint8Array([1, 2]) }],
+    });
+    expect(parts).toHaveLength(2);
+    expect(parts[0]?.content).toEqual({ kind: "text", text: "caption" });
+    expect(parts[1]?.content).toEqual({ kind: "attachment", name: "photo.jpg", contentType: "image/jpeg", size: 2 });
+  });
+  it("refreshes server contexts, tombstones, and selected items without changing selection or draft", async () => {
+    const test = services();
+    test.value.cloud.refreshContexts = vi.fn(async () => ({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(async () => []);
+    test.value.cloud.refreshItems = vi.fn(async () => ({ records: [], fromCache: false, hasPendingWrites: false }));
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    await userEvent.type(screen.getByLabelText("Paste to share instantly, or type a note"), "keep me");
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(test.value.cloud.refreshItems).toHaveBeenCalledWith(alpha));
+    expect(test.value.cloud.refreshContexts).toHaveBeenCalledTimes(1);
+    expect(test.value.cloud.refreshDeletedContexts).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("heading", { name: "Alpha" })).toBeTruthy();
+    expect((screen.getByLabelText("Paste to share instantly, or type a note") as HTMLTextAreaElement).value).toBe("keep me");
+  });
+
+  it("invokes refresh methods with their cloud receiver", async () => {
+    const test = services();
+    const cloud = test.value.cloud as WorkspaceServices["cloud"] & { receiverToken?: string };
+    cloud.receiverToken = "cloud";
+    cloud.refreshContexts = vi.fn(async function (this: typeof cloud) {
+      if (this.receiverToken !== "cloud") throw new Error("missing cloud receiver");
+      return { records: contexts, fromCache: false, hasPendingWrites: false };
+    });
+    cloud.refreshDeletedContexts = vi.fn(async function (this: typeof cloud) {
+      if (this.receiverToken !== "cloud") throw new Error("missing cloud receiver");
+      return [];
+    });
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(cloud.refreshContexts).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps selection and newer realtime contexts when an older manual refresh finishes late", async () => {
+    const test = services();
+    let finish!: (snapshot: CloudSnapshot<ContextRecord>) => void;
+    test.value.cloud.refreshContexts = vi.fn(() => new Promise<CloudSnapshot<ContextRecord>>(resolve => { finish = resolve; }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(async () => []);
+    test.value.cloud.refreshItems = vi.fn(async () => ({ records: [], fromCache: false, hasPendingWrites: false }));
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    act(() => test.emitContexts([
+      { ...contexts[0]!, title: "Realtime Alpha", updatedAt: 200 },
+      { id: "00000000-0000-4000-8000-000000000003", title: "Incoming", createdAt: 100, updatedAt: 100, syncState: "synced" },
+    ]));
+    expect(screen.getByRole("heading", { name: "Realtime Alpha" })).toBeTruthy();
+    await act(async () => finish({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    expect(screen.getByRole("heading", { name: "Realtime Alpha" })).toBeTruthy();
+  });
+
+  it("uses successful item refresh metadata instead of retaining cached item status", async () => {
+    const test = services();
+    test.value.cloud.refreshContexts = vi.fn(async () => ({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(async () => []);
+    test.value.cloud.refreshItems = vi.fn(async () => ({ records: [], fromCache: false, hasPendingWrites: false }));
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    act(() => test.items.get(alpha)!({ records: [], fromCache: true, hasPendingWrites: false }));
+    expect(screen.getAllByText("Offline history").length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.getAllByText("Synced").length).toBeGreaterThan(0));
+  });
+
+  it("does not overwrite newer realtime items with an older explicit read", async () => {
+    const test = services();
+    let finish!: (snapshot: CloudSnapshot<ItemRecord>) => void;
+    test.value.cloud.refreshContexts = vi.fn(async () => ({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(async () => []);
+    test.value.cloud.refreshItems = vi.fn(() => new Promise<CloudSnapshot<ItemRecord>>(resolve => { finish = resolve; }));
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    act(() => test.items.get(alpha)!({
+      records: [{ id: beta, contextId: alpha, content: { kind: "text", text: "new realtime item" }, device: test.value.device, createdAt: 50, ready: true, syncState: "synced" }],
+      fromCache: false,
+      hasPendingWrites: false,
+    }));
+    await act(async () => finish({ records: [], fromCache: false, hasPendingWrites: false }));
+    expect(screen.getByText("new realtime item")).toBeTruthy();
+  });
+
+  it("does not resume after an in-flight foreground catch-up is backgrounded", async () => {
+    const test = services();
+    let activity!: (active: boolean) => void;
+    let finishContexts!: (snapshot: CloudSnapshot<ContextRecord>) => void;
+    let finishDeleted!: (ids: string[]) => void;
+    test.value.platformKind = "android";
+    test.value.activity = { initialActive: true, subscribe: listener => { activity = listener; return () => undefined; } };
+    test.value.cloud.setNetworkEnabled = vi.fn(async () => undefined);
+    test.value.cloud.refreshContexts = vi.fn(() => new Promise<CloudSnapshot<ContextRecord>>(resolve => { finishContexts = resolve; }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(() => new Promise<string[]>(resolve => { finishDeleted = resolve; }));
+    test.value.pause = vi.fn();
+    test.value.resume = vi.fn();
+    render(<ContextWorkspace services={test.value} />);
+    await act(async () => undefined);
+    act(() => activity(false));
+    expect(test.value.pause).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      finishContexts({ records: contexts, fromCache: false, hasPendingWrites: false });
+      finishDeleted([]);
+    });
+    expect(test.value.resume).not.toHaveBeenCalled();
+  });
+
+  it("starts one catch-up for one Android activation", async () => {
+    const test = services();
+    test.value.platformKind = "android";
+    test.value.activity = { initialActive: true, subscribe: () => () => undefined };
+    test.value.cloud.setNetworkEnabled = vi.fn(async () => undefined);
+    test.value.cloud.refreshContexts = vi.fn(async () => ({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(async () => []);
+    test.value.resume = vi.fn();
+    render(<ContextWorkspace services={test.value} />);
+    await waitFor(() => expect(test.value.resume).toHaveBeenCalledTimes(1));
+    expect(test.value.cloud.refreshContexts).toHaveBeenCalledTimes(1);
+    expect(test.value.cloud.refreshDeletedContexts).toHaveBeenCalledTimes(1);
+  });
+
+  it("durably removes catch-up tombstones before resuming publishing", async () => {
+    const test = services();
+    let finishRemoval!: () => void;
+    test.value.platformKind = "android";
+    test.value.activity = { initialActive: true, subscribe: () => () => undefined };
+    test.value.cloud.setNetworkEnabled = vi.fn(async () => undefined);
+    test.value.cloud.refreshContexts = vi.fn(async () => ({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(async () => [alpha]);
+    test.value.outbox.removeContext = vi.fn(() => new Promise<void>(resolve => { finishRemoval = resolve; }));
+    test.value.resume = vi.fn();
+    render(<ContextWorkspace services={test.value} />);
+    await waitFor(() => expect(test.value.outbox.removeContext).toHaveBeenCalledWith(alpha));
+    expect(test.value.resume).not.toHaveBeenCalled();
+    await act(async () => finishRemoval());
+    await waitFor(() => expect(test.value.resume).toHaveBeenCalledTimes(1));
+  });
+
+  it("waits for realtime tombstone cleanup before catch-up resumes", async () => {
+    const test = services();
+    let emitDeleted!: (ids: string[]) => void;
+    let finishRead!: (ids: string[]) => void;
+    let finishRemoval!: () => void;
+    test.value.platformKind = "android";
+    test.value.activity = { initialActive: true, subscribe: () => () => undefined };
+    test.value.cloud.setNetworkEnabled = vi.fn(async () => undefined);
+    test.value.cloud.refreshContexts = vi.fn(async () => ({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(() => new Promise<string[]>(resolve => { finishRead = resolve; }));
+    test.value.cloud.subscribeDeletedContexts = vi.fn((emit) => { emitDeleted = emit; return () => undefined; });
+    test.value.outbox.removeContext = vi.fn(() => new Promise<void>(resolve => { finishRemoval = resolve; }));
+    test.value.resume = vi.fn();
+    render(<ContextWorkspace services={test.value} />);
+    await act(async () => undefined);
+    act(() => emitDeleted([alpha]));
+    await act(async () => finishRead([alpha]));
+    expect(test.value.resume).not.toHaveBeenCalled();
+    await act(async () => finishRemoval());
+    await waitFor(() => expect(test.value.resume).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not report Synced while tombstone refresh is failed", async () => {
+    const test = services();
+    test.value.cloud.refreshContexts = vi.fn(async () => ({ records: contexts, fromCache: false, hasPendingWrites: false }));
+    test.value.cloud.refreshDeletedContexts = vi.fn(async () => { throw new Error("offline"); });
+    render(<ContextWorkspace services={test.value} />);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("could not be refreshed"));
+    expect(screen.queryAllByText("Synced")).toHaveLength(0);
+  });
+
+  it("shows explicit Android paste, send, settings, and attachment share controls", async () => {
+    const test = services();
+    test.value.platformKind = "android";
+    test.value.readClipboard = vi.fn(async () => ({ text: "native paste", files: [] }));
+    test.value.shareFile = vi.fn(async () => true);
+    render(<ContextWorkspace services={test.value} />);
+    expect(screen.getByRole("button", { name: "Paste" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open settings" })).toBeTruthy();
+    expect(screen.queryByText("Launch at login")).toBeNull();
+    expect(screen.getByText(/Pastes share immediately\. For a typed note, tap Send\./)).toBeTruthy();
+    expect(screen.getByText(/OpenRouter may receive the first text or filename/)).toBeTruthy();
+    expect(screen.queryByText(/press Enter/)).toBeNull();
+  });
+
   it("waits for a new context to be acknowledged before reading its items", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);

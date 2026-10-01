@@ -1,0 +1,5 @@
+node_modules/
+android/app/src/main/res/values/mobile_config.xml
+*.jks
+*.keystore
+*.p12
