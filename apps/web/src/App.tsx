@@ -181,6 +181,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [, setSendTick] = useState(0);
   const binarySent = useRef(new Set<string>());
   const fileTarget = useRef<{ id: Id; owner: WorkspaceServices } | undefined>(undefined);
+  const pickerWakeups = useRef(new Set<(cancelled?: boolean) => void>());
   const [renameText, setRenameText] = useState("");
   const [queueCount, setQueueCount] = useState(0);
   const [syncStreams, setSyncStreams] = useState({
@@ -693,7 +694,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     };
   }, [active, isLive, refreshQueue, restoreQueued, services]);
 
-  const share = useCallback((parts: SharePart[], forcedContextId?: Id, sentText?: string): Promise<boolean> => {
+  const share = useCallback((parts: SharePart[], forcedContextId?: Id, sentText?: string, onEnqueueStart?: () => void): Promise<boolean> => {
     const contextId = forcedContextId ?? navigation.selectedRef.current.id;
     if (!parts.length || !isLive() || accountBlocked || deleted.current.has(contextId)) return Promise.resolve(false);
     const operation = (async () => {
@@ -710,6 +711,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           ...(manualTitle ? { manualTitle: true } : {}), ...(part.bytes ? { bytes: part.bytes } : {}),
         }));
         if (!isLive() || deleted.current.has(contextId)) return false;
+        onEnqueueStart?.();
         if (services.outbox.enqueueBatch) await services.outbox.enqueueBatch(drafts);
         else for (const draft of drafts) await services.outbox.enqueue(draft);
         enqueued = true;
@@ -804,11 +806,35 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       sendsInFlight.current.delete(key); if (live.current.mounted && live.current.services === services) setSendTick(value => value + 1);
     });
   };
+  useEffect(() => { for (const wake of [...pickerWakeups.current]) wake(); }, [active, accountBlocked, services]);
+  useEffect(() => () => { for (const wake of [...pickerWakeups.current]) wake(true); }, [services]);
+  const ownsPicker = (target: { id: Id; owner: WorkspaceServices }) => live.current.mounted
+    && target.owner === services && live.current.services === target.owner && !signingOut.current && !deleted.current.has(target.id);
+  const waitForPickerForeground = (target: { id: Id; owner: WorkspaceServices }): Promise<boolean> => new Promise(resolve => {
+    const wake = (cancelled = false) => {
+      if (cancelled || !ownsPicker(target)) { pickerWakeups.current.delete(wake); resolve(false); }
+      else if (isLive()) { pickerWakeups.current.delete(wake); resolve(true); }
+    };
+    pickerWakeups.current.add(wake); wake();
+  });
   const sharePickedFiles = async (files: File[]) => {
     const target = fileTarget.current; fileTarget.current = undefined;
-    if (!files.length || !target || target.owner !== services || !isLive()) return;
-    try { const parts = await fileParts(files); if (target.owner === live.current.services && isLive() && !deleted.current.has(target.id)) await share(parts, target.id); }
-    catch (cause) { if (isLive()) setError(cause instanceof Error ? cause.message : "Files could not be shared"); }
+    if (!files.length || !target || !ownsPicker(target)) return;
+    try {
+      // Android can deliver ActivityResult before its foreground event. Retain
+      // the accepted files across that boundary, but never publish in background.
+      const parts = await fileParts(files);
+      while (await waitForPickerForeground(target)) {
+        let enqueueStarted = false;
+        if (await share(parts, target.id, undefined, () => { enqueueStarted = true; })) return;
+        // A second pause can arrive between waking and enqueue. Keep the
+        // same captured bytes until a later resume. An attempted durable
+        // write is never repeated here, even if it failed during a pause.
+        if (enqueueStarted || isLive() || !ownsPicker(target)) return;
+      }
+    } catch (cause) {
+      if (await waitForPickerForeground(target) && ownsPicker(target)) setError(cause instanceof Error ? cause.message : "Files could not be shared");
+    }
   };
 
   const copyItem = async (item: ItemRecord) => {

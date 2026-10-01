@@ -192,3 +192,98 @@ it("exposes Add files or code as a labeled dialog opener, leaving toggle semanti
   await userEvent.click(opener);
   expect(screen.getByRole("button", { name: "Code mode" }).getAttribute("aria-pressed")).toBe("true");
 });
+
+async function openFilePicker() {
+  await userEvent.click(screen.getByRole("button", { name: "Add files or code" }));
+  await userEvent.click(screen.getByRole("button", { name: /Choose and send files/ }));
+  return document.querySelector('input[type="file"]') as HTMLInputElement;
+}
+function pickedFile(bytes = new Uint8Array([0, 128, 255])) {
+  const file = new File([bytes], "selected.bin", { type: "application/octet-stream" });
+  Object.defineProperty(file, "arrayBuffer", { value: vi.fn(async () => bytes.slice().buffer) });
+  return file;
+}
+it("retains a picker result delivered before Android resume and sends it once to the captured chat", async () => {
+  const t = fixture("android"); let activity!: (active: boolean) => void;
+  t.services.activity = { initialActive: true, subscribe: listener => { activity = listener; return () => {}; } };
+  render(<ContextWorkspace services={t.services} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  fireEvent.change(composer(), { target: { value: "keep typed draft" } });
+  const input = await openFilePicker();
+  act(() => activity(false));
+  fireEvent.change(input, { target: { files: [pickedFile()] } });
+  await act(async () => {});
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+  act(() => activity(true)); act(() => activity(false));
+  await act(async () => {}); expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+  act(() => activity(true));
+  await waitFor(() => expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(t.services.outbox.enqueueBatch!).mock.calls[0]![0]).toEqual([expect.objectContaining({ contextId: alpha, bytes: new Uint8Array([0, 128, 255]) })]);
+  expect(composer().value).toBe("keep typed draft");
+  act(() => activity(false)); act(() => activity(true));
+  await act(async () => {}); expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1);
+});
+
+it("keeps completed picker bytes through backgrounding and preserves a later chat selection", async () => {
+  const t = fixture("android"); let activity!: (value: boolean) => void; let finish!: (bytes: ArrayBuffer) => void;
+  t.services.activity = { initialActive: true, subscribe: listener => { activity = listener; return () => {}; } };
+  const file = new File([new Uint8Array([1, 2, 3])], "slow.bin", { type: "application/octet-stream" });
+  Object.defineProperty(file, "arrayBuffer", { value: () => new Promise<ArrayBuffer>(resolve => { finish = resolve; }) });
+  render(<ContextWorkspace services={t.services} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  fireEvent.change(composer(), { target: { value: "Alpha draft" } });
+  fireEvent.change(await openFilePicker(), { target: { files: [file] } });
+  act(() => t.navigate(beta)); act(() => activity(false));
+  await act(async () => finish(new Uint8Array([1, 2, 3]).buffer));
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+  act(() => activity(true));
+  await waitFor(() => expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(t.services.outbox.enqueueBatch!).mock.calls[0]![0][0]!.contextId).toBe(alpha);
+  expect(screen.getByRole("heading", { name: "Beta" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" })); expect(composer().value).toBe("Alpha draft");
+});
+
+it.each(["account replacement", "target deletion", "sign-out", "unmount"])("invalidates a pending picker read on %s", async kind => {
+  const t = fixture("android"); let finish!: (bytes: ArrayBuffer) => void; let deleted!: (ids: string[]) => void; let locked = false;
+  t.services.cloud.subscribeDeletedContexts = emit => { deleted = emit; return () => {}; };
+  t.services.accountSignOut = { get locked() { return locked; }, prepare: vi.fn(async () => ({ token: "reviewed", drafts: 0, webShares: 0, nativeBatches: 0, deletions: 0 })), confirm: vi.fn(async () => { locked = true; throw new Error("Auth incomplete"); }), retry: vi.fn() };
+  const file = new File([new Uint8Array([7])], "delayed.bin", { type: "application/octet-stream" });
+  Object.defineProperty(file, "arrayBuffer", { value: () => new Promise<ArrayBuffer>(resolve => { finish = resolve; }) });
+  const view = render(<ContextWorkspace services={t.services} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  fireEvent.change(await openFilePicker(), { target: { files: [file] } });
+  if (kind === "account replacement") view.rerender(<ContextWorkspace services={fixture("android").services} />);
+  else if (kind === "target deletion") await act(async () => deleted([alpha]));
+  else if (kind === "unmount") view.unmount();
+  else {
+    await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Confirm sign out" }));
+    await screen.findByText("Auth incomplete");
+  }
+  await act(async () => finish(new Uint8Array([7]).buffer));
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled(); expect(t.services.outbox.enqueue).not.toHaveBeenCalled();
+});
+
+it("does not send or announce success when the file picker is cancelled", async () => {
+  const t = fixture("android"); render(<ContextWorkspace services={t.services} />);
+  fireEvent.change(await openFilePicker(), { target: { files: [] } });
+  await act(async () => {});
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+  expect(screen.queryByText("Shared · syncing to your other devices")).toBeNull();
+});
+
+it("does not automatically repeat a picker enqueue failure that settles while Android is inactive", async () => {
+  const t = fixture("android"); let activity!: (value: boolean) => void; let rejectWrite!: (error: Error) => void;
+  t.services.activity = { initialActive: true, subscribe: listener => { activity = listener; return () => {}; } };
+  t.services.outbox.enqueueBatch = vi.fn(() => new Promise<void>((_, reject) => { rejectWrite = reject; }));
+  render(<ContextWorkspace services={t.services} />);
+  fireEvent.change(await openFilePicker(), { target: { files: [pickedFile()] } });
+  await waitFor(() => expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1));
+  act(() => activity(false));
+  await act(async () => rejectWrite(new Error("Local file write failed")));
+  act(() => activity(true));
+  await act(async () => {});
+  expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("alert").textContent).toContain("Local file write failed");
+});
