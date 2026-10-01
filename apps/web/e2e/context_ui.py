@@ -1,7 +1,9 @@
+import os
+import re
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
-BASE_URL = "http://127.0.0.1:4173/e2e.html"
+BASE_URL = os.environ.get("MDC_E2E_URL", "http://127.0.0.1:4173/e2e.html")
 SCREENSHOTS = Path("/tmp/mdc-task3-screenshots")
 SCREENSHOTS.mkdir(parents=True, exist_ok=True)
 
@@ -13,32 +15,41 @@ with sync_playwright() as playwright:
     page.on("console", lambda message: errors.append(message.text) if message.type in ("error", "warning") else None)
     page.goto(BASE_URL, wait_until="networkidle")
     assert page.title() == "Contexts · UI test"
-    page.get_by_role("heading", name="New context").wait_for()
+    page.get_by_role("heading", name="New chat").wait_for()
     page.get_by_role("button", name="Website handoff", exact=True).click()
     page.get_by_role("heading", name="Website handoff").wait_for()
     assert page.get_by_text("Here’s the layout I was working on", exact=False).is_visible()
     assert not page.locator("vite-error-overlay").count()
     page.screenshot(path=str(SCREENSHOTS / "desktop-light.png"), full_page=True)
 
-    composer = page.get_by_label("Paste to share instantly, or type a note")
+    composer = page.get_by_label("Message to yourself")
     composer.fill("Browser interaction proof")
     composer.press("Enter")
     page.get_by_text("Browser interaction proof", exact=True).wait_for()
-    page.get_by_label("Attach files").click()
-    page.locator('input[type="file"]').set_input_files({"name": "handoff.txt", "mimeType": "text/plain", "buffer": b"exact bytes"})
+    page.get_by_role("button", name="Add files or code").click()
+    with page.expect_file_chooser() as chooser:
+        page.get_by_role("button", name=re.compile(r"^Choose and send files")).click()
+    chooser.value.set_files({"name": "handoff.txt", "mimeType": "text/plain", "buffer": b"exact bytes"})
     page.get_by_text("handoff.txt", exact=False).wait_for()
 
     page.get_by_label("Open settings").click()
     page.get_by_role("combobox", name="Theme").select_option("dark")
     assert page.locator("html").get_attribute("data-theme") == "dark"
     page.screenshot(path=str(SCREENSHOTS / "desktop-dark.png"), full_page=True)
-    page.get_by_label("Close settings").click()
+    page.get_by_role("button", name="Close dialog").click()
 
     page.set_viewport_size({"width": 390, "height": 844})
-    page.get_by_label("Search contexts").fill("commands")
+    expect(page.locator(".sidebar")).to_have_attribute("inert", "")
+    expect(page.get_by_label("Search chat titles")).not_to_be_in_viewport()
+    page.get_by_role("button", name="Open chats menu").click()
+    page.get_by_label("Search chat titles").fill("commands")
     assert page.get_by_role("button", name="Useful commands", exact=True).is_visible()
     page.get_by_role("button", name="Useful commands", exact=True).click()
     page.get_by_text("git status", exact=False).wait_for()
+    assert page.get_by_role("button", name="Open chats menu").get_attribute("aria-expanded") == "false"
+    expect(page.locator(".sidebar")).to_have_attribute("inert", "")
+    expect(page.get_by_label("Search chat titles")).not_to_be_in_viewport()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.screenshot(path=str(SCREENSHOTS / "narrow-dark.png"), full_page=True)
     assert not errors, errors
     browser.close()
