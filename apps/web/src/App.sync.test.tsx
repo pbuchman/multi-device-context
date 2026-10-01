@@ -346,3 +346,15 @@ it("a successful refresh preserves an unrelated native intake error", async () =
  await userEvent.click(screen.getByRole("button",{name:"Refresh"}));await act(async()=>{});
  expect(screen.getByRole("alert").textContent).toContain("Native intake failed");
 });
+
+it("consumes native Back only while Settings is open and preserves the draft", async () => {
+ const t=services();t.value.platformKind="android";
+ render(createElement(ContextWorkspace,{services:t.value}));
+ const composer=screen.getByLabelText("Paste to share instantly, or type a note");await userEvent.type(composer,"Keep this draft");
+ const plain=new Event("mdc:back",{cancelable:true});act(()=>window.dispatchEvent(plain));expect(plain.defaultPrevented).toBe(false);
+ await userEvent.click(screen.getByRole("button",{name:"Open settings"}));
+ const open=new Event("mdc:back",{cancelable:true});act(()=>window.dispatchEvent(open));
+ expect(open.defaultPrevented).toBe(true);expect(screen.queryByRole("dialog")).toBeNull();
+ expect((composer as HTMLTextAreaElement).value).toBe("Keep this draft");
+ const closed=new Event("mdc:back",{cancelable:true});act(()=>window.dispatchEvent(closed));expect(closed.defaultPrevented).toBe(false);
+});

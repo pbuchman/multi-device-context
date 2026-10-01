@@ -27,7 +27,9 @@ export type AndroidDependencies = {
   plugin: MdcNativePlugin;
   app: {
     getState(): Promise<{ isActive: boolean }>;
+    minimizeApp(): Promise<void>;
     addListener(event: "appStateChange", listener: (event: { isActive: boolean }) => void): Promise<ListenerHandle>;
+    addListener(event: "backButton", listener: (event: { canGoBack: boolean }) => void): Promise<ListenerHandle>;
   };
   convertFileSrc(path: string): string;
   fetcher: typeof fetch;
@@ -93,6 +95,11 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
       if (disposed) return;
       stateEvents++; active = event.isActive;
       for (const listener of activityListeners) listener(active);
+    }));
+    handles.push(await app.addListener("backButton", event => {
+      if (disposed || !window.dispatchEvent(new Event("mdc:back", { cancelable: true }))) return;
+      if (event.canGoBack) window.history.back();
+      else void app.minimizeApp().catch(() => {});
     }));
     const beforeState = stateEvents;
     const initial = await app.getState();

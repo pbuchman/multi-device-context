@@ -395,11 +395,15 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape") { setMenuOpen(false); setSettingsOpen(false); setRenaming(false); }
     };
-    const back = () => { setMenuOpen(false); setSettingsOpen(false); setRenaming(false); };
+    const back = (event: Event) => {
+      if (!menuOpen && !settingsOpen && !renaming) return;
+      event.preventDefault();
+      setMenuOpen(false); setSettingsOpen(false); setRenaming(false);
+    };
     window.addEventListener("keydown", close);
     window.addEventListener("mdc:back", back);
     return () => { window.removeEventListener("keydown", close); window.removeEventListener("mdc:back", back); };
-  }, []);
+  }, [menuOpen, settingsOpen, renaming]);
 
   const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))];
   const selected = allContexts.find((context) => context.id === selectedId);

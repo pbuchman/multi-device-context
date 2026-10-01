@@ -19,7 +19,7 @@ function fixture(overrides: Partial<MdcNativePlugin> = {}) {
     takeNavigation: vi.fn(async () => ({})), addListener, ...overrides,
   } as MdcNativePlugin;
   const dependencies: AndroidDependencies = {
-    plugin, app: { getState: async () => ({ isActive: true }), addListener },
+    plugin, app: { getState: async () => ({ isActive: true }), minimizeApp: vi.fn(async () => {}), addListener },
     convertFileSrc: path => `https://localhost/_capacitor_file_${path.slice(7)}`,
     fetcher: vi.fn(async () => new Response(new Uint8Array([1, 2, 3]))),
   };
@@ -89,7 +89,7 @@ it("tracks current activity, sanitizes navigation, and removes all event listene
   f.callbacks.get("navigate")!({ contextId: id }); expect(navigate).toHaveBeenCalledWith({ contextId: id });
   stop(); adapter.dispose(); adapter.dispose();
   f.callbacks.get("shareReceived")!({}); expect(share).toHaveBeenCalledTimes(1);
-  expect(f.handles).toHaveLength(3);
+  expect(f.handles).toHaveLength(4);
   for (const handle of f.handles) expect(handle.remove).toHaveBeenCalledTimes(1);
 });
 
@@ -116,6 +116,28 @@ it("rejects an entire oversized share before reading any staged file", async () 
 it("cleans already registered listeners if plugin initialization fails", async () => {
   const f = fixture({ addListener: vi.fn(async () => { throw new Error("plugin unavailable"); }) });
   await expect(createAndroidAdapter(f.dependencies)).rejects.toThrow("plugin unavailable");
-  expect(f.handles).toHaveLength(1);
-  expect(f.handles[0]!.remove).toHaveBeenCalledTimes(1);
+  expect(f.handles).toHaveLength(2);
+  for (const handle of f.handles) expect(handle.remove).toHaveBeenCalledTimes(1);
+});
+
+it("routes Back through overlays, history and root minimization and ignores disposed callbacks", async () => {
+  const f = fixture();
+  const minimizeApp = vi.fn(async () => {});
+  Object.assign(f.dependencies.app, { minimizeApp });
+  const dispatchEvent = vi.fn((_event: Event) => false);
+  const back = vi.fn();
+  vi.stubGlobal("window", { dispatchEvent, history: { back } });
+  try {
+    const adapter = await createAndroidAdapter(f.dependencies);
+    const callback = f.callbacks.get("backButton");
+    expect(callback).toBeTypeOf("function");
+    callback!({ canGoBack: true });
+    expect(dispatchEvent.mock.calls[0]?.[0]).toMatchObject({ type: "mdc:back", cancelable: true });
+    expect(back).not.toHaveBeenCalled();expect(minimizeApp).not.toHaveBeenCalled();
+    dispatchEvent.mockReturnValue(true);
+    callback!({ canGoBack: true });expect(back).toHaveBeenCalledTimes(1);
+    callback!({ canGoBack: false });expect(minimizeApp).toHaveBeenCalledTimes(1);
+    adapter.dispose();callback!({ canGoBack: false });expect(minimizeApp).toHaveBeenCalledTimes(1);
+    for (const handle of f.handles) expect(handle.remove).toHaveBeenCalledTimes(1);
+  } finally { vi.unstubAllGlobals(); }
 });
