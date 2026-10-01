@@ -90,12 +90,13 @@ generate configuration, build bundled web assets, run Capacitor sync and invoke
 Gradle. `build` only builds the mobile web assets; `sync` only synchronizes the
 already-built assets with Android.
 
-The device-access branch prepares version 0.5.0/code 7 as an **uninstalled release
-candidate**. The last documented phone build is code 6, but its actual installed
-code must be checked again before installation. This candidate needs the reviewed
-device-access backend and rules deployment, plus the controlled phone update in
-[the rollout guide](operations/device-access.md); building it alone does not
-change the running service or complete a Google Password Manager passkey ceremony.
+The device-access **0.5.0/code 7 release is installed** on the test phone after
+verifying its previous code 6 and matching signing certificate. The reviewed
+backend/rules and required index are deployed. The original draft and installation
+identity survived the in-place update. The owner's real Google Password Manager
+confirmation and full-access grant remain pending; the phone currently uses OWN
+mode. See [the verification record](verification/device-access-2026-10-01.md) and
+[controlled rollout guide](operations/device-access.md).
 
 ## Install on an authorized USB phone
 

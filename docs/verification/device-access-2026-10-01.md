@@ -1,8 +1,10 @@
 # Device access verification — 2026-10-01
 
 The implementation and local integration checks passed on `codex/device-access`,
-based on `63bb80b3095f1c97d27a387ef354a539ac9bc24b`. This records a reviewed,
-uninstalled candidate, not production or physical-device acceptance.
+based on `63bb80b3095f1c97d27a387ef354a539ac9bc24b`. The reviewed implementation
+`fd39e6df852c827c81a2c74e1a3ae282d218e033` was subsequently deployed and its signed
+release installed on the phone. The owner's passkey confirmation and full-access
+grant remain pending; completed checks and remaining acceptance are separated below.
 
 ## Automated checks
 
@@ -36,7 +38,7 @@ agent-key actions passed. Six workspace own/all viewport cases passed. Auth0 and
 API responses in that browser harness were synthetic. This does not verify real
 Google Password Manager synchronization or the phone's browser handoff.
 
-## Signed Android candidate
+## Signed Android build
 
 Package `com.multidevicecontext.mobile`, version **0.5.0 / code 7**, min SDK 26,
 target SDK 36. Both debug and release signature verification passed with the
@@ -58,22 +60,75 @@ Both APKs contain the final bundled web assets, no source maps, and public runti
 configuration matching the canonical `/api/config` response. Native Auth0/origin
 configuration matches that response, with fixture mode disabled.
 
-## Remaining acceptance
+## Controlled production and phone rollout
 
-`adb devices -l` returned no attached devices. Code 7 exceeds the last documented
-phone version (6); read its actual version and certificate before any installation.
-The [controlled rollout](../operations/device-access.md) still requires draining
-the existing phone queue, an in-place signed upgrade, coordinated backend/rules
-deployment, exact reviewed old-phone origin mapping and verification. No data was
-remapped or removed, and no app was installed during this integration.
+The connected phone was verified as 0.4.2/code 6 with the same signing certificate.
+The first operation saved its original display settings and enabled staying awake
+while powered, with a 30-minute screen timeout. These remain enabled as requested;
+original values are retained privately. Screen lock/PIN settings were not changed.
 
-The owner must perform the real Chrome/Google Password Manager enrollment and
-mode-change ceremonies. Verify two-installation access/revocation and native
-persistence on the phone. The full 104,857,600-byte attachment roundtrip through
-the public proxy, interrupted retry and one-byte-over rejection remain required;
-the local checks do not establish Cloudflare's effective ingress limit. DUDU7
-and other native hardware acceptance remain deferred.
+A separately signed, explicitly selected instrumentation inventory read only
+native identifiers/counts and IndexedDB queue/draft metadata. The ordinary
+share-injecting instrumentation test was not run on the user's data. Before
+cutover: no queued sends, queued deletions or pending native inbox entries; one
+draft and one clipboard staging entry were retained.
 
-Detailed command logs and independent review/browser evidence are retained in the
-ignored worktree directory `.local/device-access-work/`. No merge, push or
-production deployment is part of this verification snapshot.
+The required context ownership index reached READY. Backend and web revision
+`fd39e6d`, Firestore rules and deny-direct-access Storage rules were deployed.
+Only the named process in this application's dedicated PM2 instance was stopped
+and restarted; the systemd unit and other services were unchanged. Canonical
+readiness and `/access` returned HTTP200; unauthenticated session returned HTTP401.
+
+An in-place same-key update first used the matching debug build for bounded
+diagnostics, then installed the final release above. The installed APK was pulled
+back and its SHA-256 matched the release artifact exactly. It is not debuggable.
+Release cold-start retained the same registered installation and legacy device
+ID. Pre-upgrade, post-debug and post-release inventories all retained the one
+original draft with the identical digest, clipboard staging entry and deletion
+fences; pending sends/deletions/native inbox remained empty. The diagnostic helper
+package and temporary ADB port forwards were removed; the main app was never
+uninstalled and its data was never cleared.
+
+The mapper dry run selected six exact old-phone context origins. Review confirmed
+each first-item author matched that same old phone ID. Only those six origins
+were changed atomically to the new registered phone ID; read-only verification
+and unchanged non-origin context digests confirmed preservation. No other or
+missing origin was adopted. The native OWN interface, manual refresh, disabled
+account-wide settings and native handoff to the exact phone's canonical Chrome
+access panel passed physical checks.
+
+## Production boundary and authorization acceptance
+
+All probes used an isolated synthetic account with two fixture installations.
+They did not change the owner's grants or original drafts.
+
+| Check | Result |
+| --- | --- |
+| UTF-8 text / PNG public upload and download | Correct bytes, MIME and SHA-256; foreign OWN installation denied |
+| Exactly 104,857,600 bytes through public Cloudflare/Caddy route | PUT204, GET200, identical byte count and SHA-256 |
+| 104,857,601 bytes against the supported-size metadata | PUT413; GET409 confirmed unpublished |
+| Interrupted 2 MiB upload and retry | Interrupted after 65,536 bytes; unpublished; retry uploaded/downloaded intact |
+| Deployed Firestore isolation/query rules | 9/9 probes passed |
+| Live OWN→ALL→OWN policy with unchanged Firebase ID token | 6/6 API/document/query probes passed; revoked access denied without token renewal |
+
+No live SDK listener assertion was run in this production fixture. Local tests
+cover listener/client transitions. Fixture-only Storage objects, Firestore
+contexts/items/devices and the synthetic Auth user were removed and absence
+verified; temporary token files were removed. Cleanup touched no owner data.
+
+## Remaining owner confirmation
+
+Real Chrome/Google Password Manager registration reached Android's actual
+fingerprint/PIN prompt. The owner had not confirmed before the server challenge
+expired; only that stale ceremony was cancelled. No passkey or full-access grant
+was fabricated. The phone remains in OWN mode, and its original draft remains
+preserved. Chrome is open to the exact phone's `/access` panel with **Create
+passkey** enabled, ready for the owner to start a fresh ceremony and subsequently
+approve **Allow all contexts** for the phone.
+
+Real passkey registration/assertion, the phone's subsequent ALL view and its
+live mode transition therefore remain outstanding. No destructive downgrade was
+tested against the user's original draft. DUDU7 and other native hardware
+acceptance remain deferred. Detailed logs and independent review/browser/public
+acceptance evidence are retained in `.local/device-access-work/`. Main was not
+merged or pushed by this rollout; the deployed code revision is `fd39e6d`.
