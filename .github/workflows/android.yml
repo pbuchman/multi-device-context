@@ -1,0 +1,80 @@
+name: Android checks
+
+on:
+  pull_request:
+    paths:
+      - apps/mobile/**
+      - apps/web/**
+      - apps/server/**
+      - packages/contracts/**
+      - scripts/runtime/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - vitest*.ts
+      - .github/workflows/android.yml
+  push:
+    branches: [main, codex/android]
+    paths:
+      - apps/mobile/**
+      - apps/web/**
+      - apps/server/**
+      - packages/contracts/**
+      - scripts/runtime/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - vitest*.ts
+      - .github/workflows/android.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      MDC_APP_ORIGIN: https://context.example.com
+      MDC_MOBILE_CONFIG_FIXTURE: ${{ github.workspace }}/apps/mobile/tests/fixtures/runtime-config.json
+      MDC_ANDROID_SIGNING_CONFIG: ${{ github.workspace }}/.local/android-ci-no-private-signing.json
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22.12.0"
+          cache: pnpm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK components
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - run: pnpm install --frozen-lockfile
+      - name: Shared, server, runtime and mobile configuration tests
+        run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm build:web
+      - run: pnpm --filter @mdc/server build
+      - name: Verify fixture cannot use private signing
+        run: test ! -e "$MDC_ANDROID_SIGNING_CONFIG"
+      - name: Build debug APK with explicit synthetic configuration
+        run: pnpm --filter @mdc/mobile android:debug
+      - name: Android unit tests
+        run: pnpm --filter @mdc/mobile android:test
+      - name: Android lint
+        run: pnpm --filter @mdc/mobile android:lint
+      # Configuration tests assert that fixture mode rejects release generation;
+      # Gradle independently rejects fixture release tasks and private signing.
+      # No production configuration, private key, or APK publication belongs here.

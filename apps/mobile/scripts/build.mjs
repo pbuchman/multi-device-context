@@ -1,0 +1,11 @@
+import { generateConfig, mobileCsp } from './config.mjs';
+import { spawnSync } from 'node:child_process';
+import { readFile,writeFile, readdir, unlink } from 'node:fs/promises';
+const config=await generateConfig({release:process.argv.includes('--release')});
+const result=spawnSync('pnpm',['--filter','@mdc/web','exec','vite','build','--outDir','dist-mobile'],{stdio:'inherit',env:{...process.env,VITE_MDC_MOBILE:'true',VITE_MDC_APP_ORIGIN:config.appOrigin}});
+if(result.status!==0) process.exit(result.status??1);
+const dist=new URL('../../web/dist-mobile/',import.meta.url);
+const index=new URL('index.html',dist);
+const html=await readFile(index,'utf8');
+await writeFile(index,html.replace('<head>',`<head><meta http-equiv="Content-Security-Policy" content="${mobileCsp(config)}" />`));
+for(const name of await readdir(new URL('assets/',dist))) if(name.endsWith('.map')) await unlink(new URL('assets/'+name,dist));

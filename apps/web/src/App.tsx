@@ -10,6 +10,7 @@ import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
 import { drainNativeClipboardQueue, type NativeQueueStore } from "./desktop.js";
 import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
 import { DurableOutbox, OutboxRunner, type QueuedShare } from "./outbox.js";
+import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
 import "./theme.css";
 
 type Unsubscribe = () => void;
@@ -18,6 +19,10 @@ export type WorkspaceCloud = {
   subscribeDeletedContexts?(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeContexts(emit: (snapshot: CloudSnapshot<ContextRecord>) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeItems(contextId: Id, emit: (snapshot: CloudSnapshot<ItemRecord>) => void, fail: (error: Error) => void): Unsubscribe;
+  refreshContexts?(): Promise<CloudSnapshot<ContextRecord>>;
+  refreshDeletedContexts?(): Promise<Id[]>;
+  refreshItems?(contextId: Id): Promise<CloudSnapshot<ItemRecord>>;
+  setNetworkEnabled?(enabled: boolean): Promise<void>;
   renameContext(contextId: Id, title: string): Promise<void>;
   deleteContext(contextId: Id): Promise<void>;
   deleteItem(contextId: Id, itemId: Id): Promise<void>;
@@ -38,15 +43,21 @@ export type WorkspaceServices = {
   initialContextId?: Id;
   agentKeys?: AgentKeyClient;
   isDesktop?: boolean;
+  platformKind?: "browser" | "desktop" | "android";
+  appOrigin?: string;
+  activity?: { initialActive: boolean; subscribe(listener: (active: boolean) => void): Unsubscribe };
   subscribeNavigation?: (listener: (id?: Id) => void) => Unsubscribe;
   viewer: Viewer;
   device: Device;
   cloud: WorkspaceCloud;
   outbox: WorkspaceOutbox;
   drain(): Promise<void>;
+  pause?(): void;
+  resume?(): void;
   copyText(text: string): Promise<void>;
   copyFile(file: NativeFile): Promise<void>;
   saveFile(file: NativeFile): Promise<boolean>;
+  shareFile?: (file: NativeFile) => Promise<boolean>;
   signOut(): Promise<void>;
   getLaunchAtLogin?: () => Promise<boolean>;
   setLaunchAtLogin?: (enabled: boolean) => Promise<void>;
@@ -76,6 +87,13 @@ function bytesBuffer(bytes: Uint8Array): ArrayBuffer {
 export function deriveTitle(content: Content): string {
   const candidate = content.kind === "attachment" ? content.name : content.text.split(/\r?\n/, 1)[0]!.trim();
   return (candidate || (content.kind === "code" ? "Code snippet" : "Shared note")).slice(0, 160);
+}
+
+export function sharePartsFromSnapshot(snapshot: ClipboardSnapshot): SharePart[] {
+  return [
+    ...(snapshot.text?.length ? [{ content: { kind: "text" as const, text: snapshot.text } }] : []),
+    ...snapshot.files.map(file => ({ content: { kind: "attachment" as const, name: file.name, contentType: file.contentType, size: file.bytes.byteLength }, bytes: file.bytes })),
+  ];
 }
 
 function formatTime(timestamp: number): string {
@@ -118,12 +136,13 @@ function AttachmentPreview({ item, cloud }: { item: ItemRecord; cloud: Workspace
 }
 
 function ItemCard({
-  item, cloud, onCopy, onSave, onDelete,
+  item, cloud, onCopy, onSave, onShare, onDelete,
 }: {
   item: ItemRecord;
   cloud: WorkspaceCloud;
   onCopy(item: ItemRecord): void;
   onSave(item: ItemRecord): void;
+  onShare?(item: ItemRecord): void;
   onDelete(item: ItemRecord): void;
 }) {
   const attachment = item.content.kind === "attachment" ? item.content : undefined;
@@ -145,6 +164,7 @@ function ItemCard({
       <div className="item-actions">
         <button type="button" onClick={() => onCopy(item)}><Icon>⧉</Icon>Copy</button>
         {attachment ? <button type="button" onClick={() => onSave(item)} disabled={!item.ready}><Icon>↓</Icon>Save</button> : null}
+        {attachment && onShare ? <button type="button" onClick={() => onShare(item)} disabled={!item.ready}><Icon>↗</Icon>Share</button> : null}
         <button type="button" className="danger-quiet" aria-label={`Delete ${attachment?.name ?? "item"}`} onClick={() => onDelete(item)}><Icon>×</Icon></button>
       </div>
     </article>
@@ -155,6 +175,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [contexts, setContexts] = useState<ContextRecord[]>([]);
   const confirmedKey = `mdc-confirmed:${services.outbox.namespace}`;
   const [confirmedContextIds, setConfirmedContextIds] = useState(() => readConfirmedContexts(confirmedKey));
+  const confirmedContextIdsRef = useRef(confirmedContextIds);
+  confirmedContextIdsRef.current = confirmedContextIds;
   const navigation = useNavigation(services.outbox.namespace, services.initialContextId);
   const { selectedId, select: setSelectedId, draftContext, text, codeMode } = navigation;
   const setText = (text: string) => navigation.patch({ text });
@@ -170,12 +192,17 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [renameText, setRenameText] = useState("");
   const [renameTargetId, setRenameTargetId] = useState<Id>();
   const [queueCount, setQueueCount] = useState(0);
-  const [fromCache, setFromCache] = useState(false);
-  const [pendingWrites, setPendingWrites] = useState(false);
+  const [syncStreams, setSyncStreams] = useState({
+    contexts: { fromCache: false, pending: false },
+    items: { fromCache: false, pending: false },
+    deleted: { confirmed: !services.cloud.refreshDeletedContexts, failed: false },
+  });
   const [error, setError] = useState<string>();
   const [toast, setToast] = useState<string>();
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("mdc-theme") as Theme | null) ?? "system");
   const [launchAtLogin, setLaunchAtLoginState] = useState<boolean>();
+  const [refreshing, setRefreshing] = useState(false);
+  const [active, setActive] = useState(() => services.activity?.initialActive ?? true);
   const fileInput = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number | undefined>(undefined);
   const localQueuedContexts = useRef(new Set<Id>());
@@ -204,11 +231,59 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (!services.getLaunchAtLogin) return;
     void services.getLaunchAtLogin().then(setLaunchAtLoginState).catch(() => setError("Could not read the startup setting"));
   }, [services]);
+  useEffect(() => services.activity?.subscribe(setActive), [services.activity]);
 
   const seenContexts = useRef<Set<Id> | undefined>(undefined);
   const acknowledged = useRef(new Set<Id>());
   const deleted = useRef(new Set<Id>());
-  useEffect(() => services.cloud.subscribeContexts((snapshot) => {
+  const suppressCatchupAutoSelect = useRef(false);
+  const backgroundInactive = useRef(false);
+  const streamVersions = useRef({ contexts: 0, deleted: 0, items: 0 });
+  const deletionCleanup = useMemo(() => new DeletionCleanup(), [services.outbox]);
+  const catchup = useRef(new ForegroundCatchup());
+  const live = useRef({ services, active, mounted: true });
+  live.current.services = services;
+  live.current.active = active;
+  const isLive = useCallback(() => live.current.mounted && live.current.services === services
+    && (services.platformKind !== "android" || live.current.active), [services]);
+  const refreshers = useRef({ contexts: new ForegroundRefresh(), deleted: new ForegroundRefresh(), items: new ForegroundRefresh() });
+  const applyDeleted = useCallback(async (ids: Id[]) => {
+    for (const id of ids) deleted.current.add(id);
+    navigation.remove(ids);
+    setContexts(current => current.filter(context => !deleted.current.has(context.id)));
+    setOptimisticItems(current => current.filter(item => !deleted.current.has(item.contextId)));
+    setConfirmedContextIds(current => {
+      const retained = [...current].filter(id => !deleted.current.has(id));
+      return retained.length === current.size ? current : new Set(retained);
+    });
+    for (const id of ids) localQueuedContexts.current.delete(id);
+    if (deleted.current.has(navigation.selectedRef.current.id)) setSelectedId(undefined);
+    // Retry known failed tombstones too, even if a subsequent snapshot omits them.
+    const currentCleanup = deletionCleanup.reconcile(deleted.current,
+      id => services.outbox.removeContext?.(id) ?? Promise.resolve());
+    try {
+      await currentCleanup;
+      if (!isLive()) return;
+      setSyncStreams(current => ({ ...current, deleted: { confirmed: true, failed: false } }));
+    } catch (cause) {
+      if (!isLive()) throw cause;
+      setSyncStreams(current => ({ ...current, deleted: { confirmed: false, failed: true } }));
+      setError("Could not remove local pending shares");
+      throw cause;
+    }
+  }, [deletionCleanup, isLive, navigation.remove, services.outbox, setSelectedId]);
+  useEffect(() => {
+    live.current.mounted = true;
+    return () => {
+      live.current.mounted = false;
+      catchup.current.invalidate();
+      for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
+    };
+  }, [services]);
+  useEffect(() => {
+    if (services.platformKind === "android" && !active) return;
+    return services.cloud.subscribeContexts((snapshot) => {
+    streamVersions.current.contexts += 1;
     setConfirmedContextIds((current) => {
       const confirmed = snapshot.records.filter(context => (context.syncState === "synced" || context.syncState === "cached") && !current.has(context.id));
       return confirmed.length ? new Set([...current, ...confirmed.map(context => context.id)]) : current;
@@ -216,10 +291,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const currentId = navigation.selectedRef.current.id;
     for (const context of snapshot.records) localQueuedContexts.current.delete(context.id);
     setContexts(snapshot.records.filter(c => !deleted.current.has(c.id)).map(context => ({ ...context, unread: context.id !== currentId && context.updatedAt > (lastRead.current[context.id] ?? context.createdAt) })));
-    setFromCache(snapshot.fromCache); setPendingWrites(snapshot.hasPendingWrites);
+    setSyncStreams(current => ({ ...current, contexts: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites } }));
     if (!snapshot.fromCache) {
       const ready = snapshot.records.filter(c => c.syncState === "synced" && c.ready !== false);
-      if (seenContexts.current) {
+      if (seenContexts.current && !suppressCatchupAutoSelect.current) {
         const incoming = ready.filter(c => !seenContexts.current!.has(c.id) && c.originDeviceId !== services.device.id && !localQueuedContexts.current.has(c.id))
           .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
         if (incoming[0]) setSelectedId(incoming[0].id);
@@ -229,17 +304,19 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (acknowledged.current.has(currentId) && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setSelectedId(undefined);
       else if (!navigation.selectedRef.current.drafts[currentId]?.local && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setError("This context is unavailable or has been deleted");
     }
-  }, cause => setError(cause.message || "Could not load contexts")), [services.cloud, services.device.id, setSelectedId]);
+    }, cause => setError(cause.message || "Could not load contexts"));
+  }, [active, services.cloud, services.device.id, services.platformKind, setSelectedId]);
 
-  useEffect(() => services.cloud.subscribeDeletedContexts?.(ids => {
-    for (const id of ids) deleted.current.add(id);
-    navigation.remove(ids);
-    setContexts(current => current.filter(c => !deleted.current.has(c.id)));
-    setOptimisticItems(current => current.filter(item => !deleted.current.has(item.contextId)));
-    setConfirmedContextIds(current => new Set([...current].filter(id => !deleted.current.has(id))));
-    for (const id of ids) { localQueuedContexts.current.delete(id); void services.outbox.removeContext?.(id).catch(() => setError("Could not remove local pending shares")); }
-    if (deleted.current.has(navigation.selectedRef.current.id)) setSelectedId(undefined);
-  }, () => setError("Could not synchronize deletions")), [services.cloud, services.outbox, navigation.remove, setSelectedId]);
+  useEffect(() => {
+    if (services.platformKind === "android" && !active) return;
+    return services.cloud.subscribeDeletedContexts?.(ids => {
+    streamVersions.current.deleted += 1;
+    void applyDeleted(ids).catch(() => undefined);
+    }, () => {
+      setSyncStreams(current => ({ ...current, deleted: { confirmed: false, failed: true } }));
+      setError("Could not synchronize deletions");
+    });
+  }, [active, applyDeleted, services.cloud, services.platformKind]);
 
   useEffect(() => services.subscribeNavigation?.(id => { setSelectedId(id); setError(undefined); setMenuOpen(false); setRenaming(false); }), [services, setSelectedId]);
 
@@ -255,21 +332,26 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const selectedContextConfirmed = selectedId !== undefined && confirmedContextIds.has(selectedId);
   useEffect(() => {
     if (!selectedId || !selectedContextConfirmed) { setItems([]); return; }
+    if (services.platformKind === "android" && !active) return;
+    streamVersions.current.items += 1;
     return services.cloud.subscribeItems(selectedId, (snapshot) => {
+      if (navigation.selectedRef.current.id !== selectedId) return;
+      streamVersions.current.items += 1;
       setItems(snapshot.records);
-      setFromCache(snapshot.fromCache);
-      setPendingWrites(snapshot.hasPendingWrites);
+      setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites } }));
       const cloudIds = new Set(snapshot.records.map((item) => item.id));
       setOptimisticItems((current) => current.filter((item) => item.contextId !== selectedId || !cloudIds.has(item.id)));
     }, (cause) => setError(cause.message || "Could not load shared items"));
-  }, [selectedContextConfirmed, selectedId, services.cloud]);
+  }, [active, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
 
   useEffect(() => {
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape") { setMenuOpen(false); setSettingsOpen(false); setRenaming(false); }
     };
+    const back = () => { setMenuOpen(false); setSettingsOpen(false); setRenaming(false); };
     window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
+    window.addEventListener("mdc:back", back);
+    return () => { window.removeEventListener("keydown", close); window.removeEventListener("mdc:back", back); };
   }, []);
 
   const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))];
@@ -277,6 +359,99 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const visibleContexts = allContexts.filter((context) => context.title.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   const visibleItems = [...items.filter(item => item.contextId === selectedId), ...optimisticItems.filter((item) => item.contextId === selectedId)]
     .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+
+  const refresh = useCallback((): Promise<void> => {
+    if (!isLive() || !services.cloud.refreshContexts || !services.cloud.refreshDeletedContexts) return Promise.resolve();
+    const selectedAtStart = navigation.selectedRef.current.id;
+    const scope = `${services.viewer.uid}:${selectedAtStart}`;
+    return catchup.current.run(scope, async owns => {
+      const current = () => owns() && isLive();
+      if (!current()) return;
+      for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
+      const versionsAtStart = { ...streamVersions.current };
+      suppressCatchupAutoSelect.current = true;
+      setRefreshing(true);
+      const tasks: Promise<void>[] = [
+        refreshers.current.contexts.run(`${services.viewer.uid}:contexts`, () => services.cloud.refreshContexts!(), snapshot => {
+          if (!current() || streamVersions.current.contexts !== versionsAtStart.contexts) return;
+          for (const context of snapshot.records) seenContexts.current?.add(context.id);
+          setContexts(current => {
+            const queued = current.filter(context => localQueuedContexts.current.has(context.id));
+            const queuedIds = new Set(queued.map(context => context.id));
+            return [...queued, ...snapshot.records.filter(context => !queuedIds.has(context.id) && !deleted.current.has(context.id))];
+          });
+          setConfirmedContextIds(current => {
+            const incoming = snapshot.records.filter(context => !current.has(context.id));
+            return incoming.length ? new Set([...current, ...incoming.map(context => context.id)]) : current;
+          });
+          setSyncStreams(current => ({ ...current, contexts: { fromCache: false, pending: snapshot.hasPendingWrites } }));
+        }),
+        refreshers.current.deleted.run(`${services.viewer.uid}:deleted`, () => services.cloud.refreshDeletedContexts!(), async ids => {
+          if (!current()) return;
+          if (streamVersions.current.deleted === versionsAtStart.deleted) return applyDeleted(ids);
+        }),
+      ];
+      if (selectedAtStart && confirmedContextIdsRef.current.has(selectedAtStart) && services.cloud.refreshItems) {
+        tasks.push(refreshers.current.items.run(`${services.viewer.uid}:${selectedAtStart}`, () => services.cloud.refreshItems!(selectedAtStart), snapshot => {
+          if (!current() || navigation.selectedRef.current.id !== selectedAtStart || streamVersions.current.items !== versionsAtStart.items) return;
+          setItems(snapshot.records);
+          const ids = new Set(snapshot.records.map(item => item.id));
+          setOptimisticItems(current => current.filter(item => item.contextId !== selectedAtStart || !ids.has(item.id)));
+          setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites } }));
+        }));
+      }
+      const results = await Promise.allSettled(tasks);
+      if (!current()) return;
+      const deletionReady = results[1]?.status === "fulfilled";
+      if (!deletionReady) setSyncStreams(state => ({ ...state, deleted: { confirmed: false, failed: true } }));
+      if (results.some(result => result.status === "rejected")) {
+        setError(results.every(result => result.status === "rejected") ? "Could not refresh from the server" : "Some data could not be refreshed");
+      }
+      if (deletionReady) {
+        await deletionCleanup.finish(current, () => {
+          setSyncStreams(state => ({ ...state, deleted: { confirmed: true, failed: false } }));
+          if (services.platformKind === "android") services.resume?.();
+        });
+      }
+    }, cause => {
+      if (!isLive()) return;
+      if (cause) {
+        setSyncStreams(state => ({ ...state, deleted: { confirmed: false, failed: true } }));
+        setError(cause instanceof Error ? cause.message : "Could not refresh from the server");
+      }
+      setRefreshing(false);
+      suppressCatchupAutoSelect.current = backgroundInactive.current;
+    });
+  }, [applyDeleted, deletionCleanup, isLive, navigation.selectedRef, services]);
+
+  useEffect(() => {
+    if (services.platformKind !== "android") return;
+    let current = true;
+    if (!active) {
+      backgroundInactive.current = true;
+      suppressCatchupAutoSelect.current = true;
+      catchup.current.invalidate();
+      for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
+      setRefreshing(false);
+      services.pause?.();
+      void services.cloud.setNetworkEnabled?.(false);
+      return () => { current = false; };
+    }
+    backgroundInactive.current = false;
+    void Promise.resolve(services.cloud.setNetworkEnabled?.(true)).then(async () => {
+      if (!current) return;
+      await refresh();
+    }).catch(() => {
+      if (current) setError("Could not restore network access");
+    });
+    return () => { current = false; };
+  }, [active, refresh, services]);
+  useEffect(() => {
+    if (!active) return;
+    const online = () => void refresh();
+    window.addEventListener("online", online);
+    return () => window.removeEventListener("online", online);
+  }, [active, refresh]);
 
   const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false) => {
     const queued = (await services.outbox.list()).filter(record => !deleted.current.has(record.contextId));
@@ -320,17 +495,17 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [services.outbox]);
   useEffect(() => { void refreshQueue(); }, [refreshQueue]);
   useEffect(() => {
-    if (queueCount === 0) return;
+    if (queueCount === 0 || (services.platformKind === "android" && !active)) return;
     const timer = window.setInterval(() => void refreshQueue(), 2_000);
     return () => window.clearInterval(timer);
-  }, [queueCount, refreshQueue]);
+  }, [active, queueCount, refreshQueue, services.platformKind]);
   useEffect(() => {
     let active = true;
     void restoreQueued().catch(() => { if (active) setError("Pending shares could not be restored"); });
     return () => { active = false; };
   }, [restoreQueued]);
   useEffect(() => {
-    if (!services.subscribeNativeShares || !services.drainNativeShares) return;
+    if (!services.subscribeNativeShares || !services.drainNativeShares || (services.platformKind === "android" && !active)) return;
     return services.subscribeNativeShares(() => {
       void services.drainNativeShares!()
         .then((contextId) => restoreQueued(contextId))
@@ -340,7 +515,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           setError(cause instanceof Error ? cause.message : "Clipboard sharing failed");
         });
     });
-  }, [refreshQueue, restoreQueued, services]);
+  }, [active, refreshQueue, restoreQueued, services]);
 
   const share = useCallback(async (parts: SharePart[], forcedContextId?: Id, sentText?: string) => {
     if (parts.length === 0) return;
@@ -419,6 +594,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (await services.saveFile({ name: item.content.name, contentType: item.content.contentType, bytes })) showToast("File saved");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Save failed"); }
   };
+  const shareItem = async (item: ItemRecord) => {
+    if (item.content.kind !== "attachment" || !services.shareFile) return;
+    try {
+      const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
+      if (await services.shareFile({ name: item.content.name, contentType: item.content.contentType, bytes })) showToast("Share sheet opened");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Share failed"); }
+  };
 
   const submitRename = async () => {
     const title = renameText.trim().slice(0, 160);
@@ -453,8 +635,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     window.location.reload();
   };
 
+  const pendingWrites = syncStreams.contexts.pending || syncStreams.items.pending;
+  const fromCache = syncStreams.contexts.fromCache || syncStreams.items.fromCache;
   const syncLabel = queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
-    : fromCache ? "Offline history" : "Synced";
+    : fromCache ? "Offline history" : syncStreams.deleted.failed || !syncStreams.deleted.confirmed ? "Sync incomplete" : "Synced";
 
   return (
     <div className="app-shell">
@@ -468,7 +652,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         </nav>
         <div className="sidebar-spacer" />
         <div className="device-state"><div><span className={`status-dot ${fromCache ? "offline" : ""}`} />{syncLabel}</div><div><Icon>▣</Icon>{services.device.name} · This device</div></div>
-        <div className="account"><span className="avatar">{services.viewer.name.charAt(0).toLocaleUpperCase()}</span><span>{services.viewer.name}<small>Personal account</small></span><button type="button" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Icon>⚙</Icon></button></div>
+        <div className="account"><span className="avatar">{services.viewer.name.charAt(0).toLocaleUpperCase()}</span><span>{services.viewer.name}<small>Personal account</small></span>{services.platformKind !== "android" ? <button type="button" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Icon>⚙</Icon></button> : null}</div>
       </aside>
 
       <main className="main-panel">
@@ -478,18 +662,18 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
               : <h1>{selected?.title ?? "New context"}</h1>}
             <small><Icon>▣</Icon>{visibleItems.length} {visibleItems.length === 1 ? "item" : "items"} · Only you</small>
           </div>
-          <div className="header-actions"><span className={`sync ${fromCache ? "offline" : ""}`}><Icon>✓</Icon>{syncLabel}</span><button type="button" aria-label="Context options" aria-expanded={menuOpen} disabled={!selected} onClick={() => setMenuOpen((open) => !open)}><Icon>•••</Icon></button></div>
+          <div className="header-actions"><button type="button" className="refresh" aria-label="Refresh" disabled={refreshing} onClick={() => void refresh()}><Icon>↻</Icon><span>{refreshing ? "Refreshing" : "Refresh"}</span></button><span className={`sync ${fromCache ? "offline" : ""}`}><Icon>✓</Icon>{syncLabel}</span>{services.platformKind === "android" ? <button type="button" className="mobile-settings" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Icon>⚙</Icon></button> : null}<button type="button" aria-label="Context options" aria-expanded={menuOpen} disabled={!selected} onClick={() => setMenuOpen((open) => !open)}><Icon>•••</Icon></button></div>
           {menuOpen && selected ? <div className="context-menu" role="menu">
             <button type="button" onClick={() => { setRenameTargetId(selected.id); setRenameText(selected.title); setRenaming(true); setMenuOpen(false); }}>Rename context</button>
-            {!draftContext ? <button type="button" onClick={() => { void services.copyText(`${location.origin}/contexts/${selected.id}`).then(() => showToast("Context link copied")); setMenuOpen(false); }}>Copy link</button> : null}
-            {!services.isDesktop && !draftContext ? <a href={`multi-device-context://context/${selected.id}`}>Open in desktop app</a> : null}
+            {!draftContext ? <button type="button" onClick={() => { void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${selected.id}`).then(() => showToast("Context link copied")); setMenuOpen(false); }}>Copy link</button> : null}
+            {!services.isDesktop && services.platformKind !== "android" && !draftContext ? <a href={`multi-device-context://context/${selected.id}`}>Open in app</a> : null}
             <button type="button" className="danger" onClick={() => void deleteContext(selected)}>Delete context</button>
           </div> : null}
         </header>
 
         {error ? <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => { setError(undefined); void services.outbox.retry().then(services.drain).then(refreshQueue); }}>Retry</button><button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}>×</button></div> : null}
         <section className="timeline" aria-label="Shared items">
-          {visibleItems.length ? <><div className="day-label">Today</div>{visibleItems.map((item) => <ItemCard key={item.id} item={item} cloud={services.cloud} onCopy={(value) => void copyItem(value)} onSave={(value) => void saveItem(value)} onDelete={(value) => void services.cloud.deleteItem(value.contextId, value.id).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Delete failed"))} />)}</>
+          {visibleItems.length ? <><div className="day-label">Today</div>{visibleItems.map((item) => <ItemCard key={item.id} item={item} cloud={services.cloud} onCopy={(value) => void copyItem(value)} onSave={(value) => void saveItem(value)} {...(services.shareFile ? { onShare: (value: ItemRecord) => void shareItem(value) } : {})} onDelete={(value) => void services.cloud.deleteItem(value.contextId, value.id).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Delete failed"))} />)}</>
             : <div className="empty"><Icon>▧</Icon><strong>A little space for your context.</strong><span>Paste text, a screenshot, or a file.</span></div>}
         </section>
 
@@ -512,13 +696,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
                 if (pasted.length) { event.preventDefault(); void share([{ content: { kind: codeMode || pasted.trimStart().startsWith("```") ? "code" : "text", text: pasted } }]); }
               }}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && text.length) {
+                if (services.platformKind !== "android" && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && text.length) {
                   event.preventDefault(); const value = text; void share([{ content: { kind: codeMode ? "code" : "text", text: value } }], undefined, value);
                 }
               }} />
-            <div className="composer-tools"><div><button type="button" aria-label="Attach files" onClick={() => fileInput.current?.click()}><Icon>＋</Icon></button><button type="button" aria-label="Share as code" aria-pressed={codeMode} onClick={() => setCodeMode((active) => !active)}><Icon>&lt;/&gt;</Icon></button></div><span>Paste to share <kbd>{navigator.platform.includes("Mac") ? "⌘ V" : "Ctrl V"}</kbd></span></div>
+            <div className="composer-tools"><div><button type="button" aria-label="Attach files" onClick={() => fileInput.current?.click()}><Icon>＋</Icon></button><button type="button" aria-label="Share as code" aria-pressed={codeMode} onClick={() => setCodeMode((active) => !active)}><Icon>&lt;/&gt;</Icon></button></div>{services.platformKind === "android" ? <div className="mobile-compose-actions"><button type="button" aria-label="Paste" onClick={() => { void services.readClipboard?.().then(snapshot => share(sharePartsFromSnapshot(snapshot).map(part => part.content.kind === "text" && codeMode ? { ...part, content: { kind: "code", text: part.content.text } } : part))).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Clipboard sharing failed")); }}>Paste</button><button type="button" className="send" aria-label="Send" disabled={!text.length} onClick={() => { const value = text; void share([{ content: { kind: codeMode ? "code" : "text", text: value } }], undefined, value); }}>Send</button></div> : <span>Paste to share <kbd>{navigator.platform.includes("Mac") ? "⌘ V" : "Ctrl V"}</kbd></span>}</div>
           </div>
-          <div className="composer-note">Pastes share immediately. For a typed note, press Enter.</div>
+          <div className="composer-note">{services.platformKind === "android" ? "Pastes share immediately. For a typed note, tap Send." : "Pastes share immediately. For a typed note, press Enter."}</div>
           <input ref={fileInput} type="file" multiple hidden onChange={(event) => { if (event.target.files) void shareFiles([...event.target.files]); event.target.value = ""; }} />
         </div>
         {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
@@ -528,7 +712,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <div className="settings-head"><h2 id="settings-title">Settings</h2><button type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>
         <div className="profile-row"><span className="avatar large">{services.viewer.name.charAt(0).toUpperCase()}</span><span><strong>{services.viewer.name}</strong><small>{services.viewer.email ?? services.viewer.uid}</small></span></div>
         <label className="setting-row"><span>Theme<small>Choose how Contexts looks.</small></span><select value={theme} onChange={(event) => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-        <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start Contexts with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={(event) => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => setError("Could not change the startup setting")); }} /></label>
+        {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start Contexts with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={(event) => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => setError("Could not change the startup setting")); }} /></label> : null}
         <div className="privacy-note"><Icon>▣</Icon><span>Incoming items stay here until you explicitly choose Copy. Your contexts are visible only to you.</span></div>
         {services.agentKeys ? <AgentKeys client={services.agentKeys} /> : null}
         <button type="button" className="signout" onClick={() => void signOut()}>Sign out</button>
@@ -560,16 +744,14 @@ async function browserSaveFile(file: NativeFile): Promise<boolean> {
 }
 
 async function buildServices(session: ActiveSession): Promise<{ services: WorkspaceServices; dispose(): void }> {
-  const device = session.bridge ? await session.bridge.getDevice() : browserDevice();
+  const native = session.platform.native;
+  const device = native ? await native.getDevice() : browserDevice();
   const cloud = new FirebaseCloud(session.firebaseApp, session.uid, session.accessToken);
   const outbox = new DurableOutbox({ projectId: session.config.firebase.projectId, uid: session.uid });
   const runner = new OutboxRunner(outbox, cloud);
-  const bridge = session.bridge;
   let lastNativeContext: Id | undefined;
   const storeNativeSnapshot = async (request: PendingClipboardShare) => {
-    const parts: SharePart[] = request.snapshot.files.length
-      ? request.snapshot.files.map((file) => ({ content: { kind: "attachment", name: file.name, contentType: file.contentType, size: file.bytes.byteLength }, bytes: file.bytes }))
-      : request.snapshot.text?.length ? [{ content: { kind: "text", text: request.snapshot.text } }] : [];
+    const parts = sharePartsFromSnapshot(request.snapshot);
     const drafts = parts.map((part, index): ShareDraft => ({
       contextId: request.id,
       itemId: newId(),
@@ -589,24 +771,27 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
     markNativeAcknowledged: (id) => outbox.markNativeAcknowledged(id),
   };
   const drainNative = async (): Promise<Id | undefined> => {
-    if (!bridge) return undefined;
+    if (!native) return undefined;
     lastNativeContext = undefined;
-    await drainNativeClipboardQueue(bridge, nativeStore);
+    await drainNativeClipboardQueue(native, nativeStore);
     return lastNativeContext;
   };
   const initialNativeId = await drainNative();
-  const initialNavigation = await bridge?.takeNavigation?.();
+  const initialNavigation = await native?.takeNavigation?.();
   if (initialNavigation && !initialNavigation.contextId && !initialNativeId) window.history.replaceState({}, "", "/");
-  void runner.drain();
+  if (session.platform.activity?.initialActive !== false) void runner.drain();
   return {
     services: {
       ...(initialNavigation?.contextId || initialNativeId ? { initialContextId: initialNavigation?.contextId ?? initialNativeId! } : {}),
       agentKeys: cloud,
-      isDesktop: Boolean(bridge),
-      ...(bridge?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => {
+      isDesktop: session.platform.kind === "desktop",
+      platformKind: session.platform.kind,
+      appOrigin: session.config.appOrigin,
+      ...(session.platform.activity ? { activity: session.platform.activity } : {}),
+      ...(native?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => {
         let active = true;
-        const unsubscribe = bridge.onNavigate!(event => listener(event.contextId));
-        void bridge.takeNavigation?.().then(event => { if (active && event) listener(event.contextId); }).catch(() => {});
+        const unsubscribe = native.onNavigate!(event => listener(event.contextId));
+        void native.takeNavigation?.().then(event => { if (active && event) listener(event.contextId); }).catch(() => {});
         return () => { active = false; unsubscribe(); };
       } } : {}),
       viewer: session.viewer,
@@ -614,10 +799,13 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
       cloud,
       outbox,
       drain: () => runner.drain(),
-      copyText: bridge ? (value) => bridge.copyText(value) : (value) => navigator.clipboard.writeText(value),
-      copyFile: bridge ? (file) => bridge.copyFile(file) : browserCopyFile,
-      saveFile: bridge ? (file) => bridge.saveFile(file) : browserSaveFile,
-      signOut: bridge
+      pause: () => runner.stop(),
+      resume: () => runner.resume(),
+      copyText: native ? (value) => native.copyText(value) : (value) => navigator.clipboard.writeText(value),
+      copyFile: native ? (file) => native.copyFile(file) : browserCopyFile,
+      saveFile: native ? (file) => native.saveFile(file) : browserSaveFile,
+      ...(session.platform.shareFile ? { shareFile: session.platform.shareFile } : {}),
+      signOut: native
         ? async () => {
             runner.stop();
             try { await session.signOut(); await outbox.clear(); }
@@ -628,12 +816,12 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
             try { await outbox.clear(); await session.signOut(); }
             catch (error) { runner.resume(); void runner.drain(); throw error; }
           },
-      ...(bridge ? {
-        getLaunchAtLogin: () => bridge.getLaunchAtLogin(),
-        setLaunchAtLogin: (enabled: boolean) => bridge.setLaunchAtLogin(enabled),
-        pendingNativeCount: async () => (await bridge.getPendingClipboardShares()).length,
-        readClipboard: () => bridge.readClipboard(),
-        subscribeNativeShares: (listener: () => void) => bridge.onShareClipboard(listener),
+      ...(native ? {
+        ...(native.getLaunchAtLogin ? { getLaunchAtLogin: () => native.getLaunchAtLogin!() } : {}),
+        ...(native.setLaunchAtLogin ? { setLaunchAtLogin: (enabled: boolean) => native.setLaunchAtLogin!(enabled) } : {}),
+        pendingNativeCount: async () => (await native.getPendingClipboardShares()).length,
+        readClipboard: () => native.readClipboard(),
+        subscribeNativeShares: (listener: () => void) => native.onShareClipboard(listener),
         drainNativeShares: async () => {
           const contextId = await drainNative();
           window.setTimeout(() => void runner.drain(), 0);

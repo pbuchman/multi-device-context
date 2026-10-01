@@ -272,3 +272,29 @@ describe("authenticated API", () => {
     expect(fake.deleteContext).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('Android CORS', () => {
+  it('answers allowed preflight without bypassing actual bearer validation', async () => {
+    const { app } = server();
+    const preflight = await app.inject({method:'OPTIONS',url:'/api/session',headers:{origin:'https://localhost','access-control-request-method':'POST','access-control-request-headers':'authorization,content-type'}});
+    expect(preflight.statusCode).toBe(204);
+    expect(preflight.headers['access-control-allow-origin']).toBe('https://localhost');
+    expect(preflight.headers['access-control-allow-credentials']).toBeUndefined();
+    const actual = await app.inject({method:'POST',url:'/api/session',headers:{origin:'https://localhost'}});
+    expect(actual.statusCode).toBe(401);
+    expect(actual.headers['access-control-allow-origin']).toBe('https://localhost');
+    expect(actual.headers.vary).toContain('Origin');
+  });
+  it('does not authorize unrelated origins, methods or headers', async () => {
+    const { app } = server();
+    for(const headers of [
+      {origin:'https://localhost.evil.test','access-control-request-method':'POST'},
+      {origin:'https://localhost','access-control-request-method':'PATCH'},
+      {origin:'https://localhost','access-control-request-method':'POST','access-control-request-headers':'x-secret'},
+    ]) {
+      const response=await app.inject({method:'OPTIONS',url:'/api/session',headers});
+      expect(response.statusCode).toBe(403);
+      expect(response.headers['access-control-allow-origin']).toBeUndefined();
+    }
+  });
+});

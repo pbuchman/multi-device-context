@@ -1,8 +1,11 @@
+import { apiUrl } from "./api.js";
 import { ContentSchema, DeviceSchema, attachmentPath, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
 import type { FirebaseApp } from "firebase/app";
 import {
   collection,
+  disableNetwork,
   doc,
+  enableNetwork,
   getDocs,
   getDocsFromServer,
   initializeFirestore,
@@ -168,6 +171,14 @@ export class FirebaseCloud {
     }, (error) => fail(error));
   }
 
+  async refreshContexts(): Promise<CloudSnapshot<ContextRecord>> {
+    const live = query(collection(this.#firestore, `users/${this.uid}/contexts`), where("deleting", "==", false));
+    const snapshot = await getDocsFromServer(live);
+    const records = snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value));
+    records.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
+    return { records, fromCache: false, hasPendingWrites: snapshot.metadata.hasPendingWrites };
+  }
+
   subscribeItems(
     contextId: Id,
     emit: (snapshot: CloudSnapshot<ItemRecord>) => void,
@@ -195,6 +206,14 @@ export class FirebaseCloud {
     return () => { active = false; unsubscribe(); };
   }
 
+  async refreshItems(contextId: Id): Promise<CloudSnapshot<ItemRecord>> {
+    const live = query(collection(this.#firestore, `users/${this.uid}/contexts/${contextId}/items`), where("deleting", "==", false));
+    const snapshot = await getDocsFromServer(live);
+    const records = snapshot.docs.map(entry => itemFromDocument(contextId, entry))
+      .filter((value): value is ItemRecord => Boolean(value));
+    return { records: sorted(records, false), fromCache: false, hasPendingWrites: snapshot.metadata.hasPendingWrites };
+  }
+
   async publish(record: QueuedShare): Promise<void> {
     try {
       await publishQueuedShare(record, this.#writePort());
@@ -213,6 +232,15 @@ export class FirebaseCloud {
 
   subscribeDeletedContexts(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe {
     return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedContexts`), snapshot => emit(snapshot.docs.map(d => d.id)), fail);
+  }
+
+  async refreshDeletedContexts(): Promise<Id[]> {
+    const snapshot = await getDocsFromServer(collection(this.#firestore, `users/${this.uid}/deletedContexts`));
+    return snapshot.docs.map(document => document.id as Id);
+  }
+
+  setNetworkEnabled(enabled: boolean): Promise<void> {
+    return enabled ? enableNetwork(this.#firestore) : disableNetwork(this.#firestore);
   }
 
   async listKeys(): Promise<AgentKeyInfo[]> { return (await this.#api("/api/agent-keys", "GET")).json(); }
@@ -236,7 +264,7 @@ export class FirebaseCloud {
   }
 
   async #api(path: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<Response> {
-    const response = await fetch(path, {
+    const response = await fetch(apiUrl(path), {
       method,
       headers: { authorization: `Bearer ${await this.accessToken()}`, ...(body ? { "content-type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -291,7 +319,7 @@ export class FirebaseCloud {
         await batch.commit();
       },
       completeAttachment: async (record) => {
-        const response = await fetch(`/api/contexts/${record.contextId}/items/${record.itemId}/complete`, {
+        const response = await fetch(apiUrl(`/api/contexts/${record.contextId}/items/${record.itemId}/complete`), {
           method: "POST",
           headers: { authorization: `Bearer ${await this.accessToken()}` },
         });

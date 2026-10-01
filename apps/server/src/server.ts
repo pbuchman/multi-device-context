@@ -76,6 +76,25 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     trustProxy: ["127.0.0.1", "::1"],
   });
   const { publicConfig, verifier, backend } = options;
+  app.addHook("onRequest", async (request, reply) => {
+    if (!request.url.startsWith("/api/")) return;
+    reply.header("vary", "Origin");
+    const origin = request.headers.origin;
+    const permitted = origin === "https://localhost" || origin === publicConfig.appOrigin;
+    if (request.method === "OPTIONS") {
+      const method = request.headers["access-control-request-method"];
+      const requested = String(request.headers["access-control-request-headers"] ?? "").toLowerCase().split(",").map(h => h.trim()).filter(Boolean);
+      if (!permitted || !["GET", "POST", "DELETE"].includes(String(method)) || requested.some(h => !["authorization", "content-type"].includes(h))) {
+        return reply.code(403).send({ error: "Forbidden" });
+      }
+      reply.header("access-control-allow-origin", origin!);
+      reply.header("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+      reply.header("access-control-allow-headers", "Authorization, Content-Type");
+      reply.header("access-control-max-age", "600");
+      return reply.code(204).send();
+    }
+    if (permitted) reply.header("access-control-allow-origin", origin!);
+  });
   const sessionAttempts = new Map<string, { count: number; resetAt: number }>();
   const csp = [
     "default-src 'self'",

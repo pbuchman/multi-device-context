@@ -21,7 +21,7 @@ export function inspectDesktopBridge():
 }
 
 export async function drainNativeClipboardQueue(
-  bridge: DesktopBridge,
+  bridge: Pick<DesktopBridge, "getPendingClipboardShares" | "acknowledgeClipboardShare">,
   store: NativeQueueStore,
 ): Promise<void> {
   const requests = await bridge.getPendingClipboardShares();

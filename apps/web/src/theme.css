@@ -23,3 +23,5 @@
 .settings { max-height: 90vh; overflow-y: auto; }
 
 .context-row > button:first-child > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.refresh{display:flex;align-items:center;gap:4px;font-size:11px}.mobile-settings{display:inline-grid;place-items:center}.mobile-compose-actions{display:flex;gap:8px}.mobile-compose-actions button{min-width:64px;min-height:44px;padding:8px 14px;border:1px solid var(--line);border-radius:9px}.mobile-compose-actions .send{background:var(--green);color:white}
+@media(max-width:680px){body{overscroll-behavior:none}.app-shell{padding-top:env(safe-area-inset-top);padding-right:env(safe-area-inset-right);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left)}button,.context-list button,.header-actions>button,.item-actions button{min-height:44px}.mobile-settings{display:inline-grid;place-items:center}.refresh>span:last-child,.sync{display:none}.titlebar{gap:8px}.title-group{min-width:0}.title-group h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.composer-wrap{padding-bottom:max(13px,env(safe-area-inset-bottom))}.composer-note{display:none}}

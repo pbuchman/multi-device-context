@@ -1,0 +1,95 @@
+import groovy.json.JsonSlurper
+
+def signingFile = new File(System.getenv("MDC_ANDROID_SIGNING_CONFIG") ?: "${System.getProperty('user.home')}/.config/multi-device-context/android-signing.json")
+def localSigning = signingFile.exists() ? new JsonSlurper().parse(signingFile) : [:]
+def signingValue = { env, key -> System.getenv(env) ?: localSigning[key] }
+def privateKeystore = signingValue('MDC_ANDROID_KEYSTORE', 'keystore')
+def privateAlias = signingValue('MDC_ANDROID_KEY_ALIAS', 'alias')
+def privateStorePassword = signingValue('MDC_ANDROID_STORE_PASSWORD', 'storePassword')
+def privateKeyPassword = signingValue('MDC_ANDROID_KEY_PASSWORD', 'keyPassword')
+def signingAvailable = privateKeystore && privateAlias && privateStorePassword && privateKeyPassword
+def publicConfigFile = file('src/main/res/values/mobile_config.xml')
+def fixtureBuild = publicConfigFile.exists() && new XmlSlurper().parse(publicConfigFile).string.find { it.@name == 'mdc_fixture' }.text() == 'true'
+if (fixtureBuild && (System.getenv('CI') != 'true' || signingAvailable)) throw new GradleException('Fixture builds require CI=true and the generic debug test key')
+ext.mdcReleaseSigningAvailable = signingAvailable
+ext.mdcProductionConfigAvailable = publicConfigFile.exists() && new XmlSlurper().parse(publicConfigFile).string.find { it.@name == 'mdc_fixture' }.text() == 'false'
+apply from: '../release-guard.gradle'
+def authDomain() {
+ def config = file("src/main/res/values/mobile_config.xml")
+ return config.exists() ? new XmlSlurper().parse(config).string.find { it.@name == "com_auth0_domain" }.text() : "invalid.example"
+}
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+android {
+    namespace = "com.multidevicecontext.mobile"
+    compileSdk = rootProject.ext.compileSdkVersion
+    buildToolsVersion "36.0.0"
+    defaultConfig {
+        applicationId "com.multidevicecontext.mobile"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode Integer.parseInt(System.getenv("MDC_ANDROID_VERSION_CODE") ?: "1")
+        versionName "0.3.0"
+        manifestPlaceholders = [auth0Domain: "${authDomain()}", auth0Scheme: "com.multidevicecontext.mobile"]
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_21; targetCompatibility JavaVersion.VERSION_21 }
+    kotlinOptions { jvmTarget = "21" }
+    signingConfigs {
+        if (signingAvailable) {
+            localPrivate {
+                storeFile file(privateKeystore)
+                storePassword privateStorePassword
+                keyAlias privateAlias
+                keyPassword privateKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        debug { if (signingAvailable) signingConfig signingConfigs.localPrivate }
+
+        release {
+            if (signingAvailable) signingConfig signingConfigs.localPrivate
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation 'com.auth0.android:auth0:4.1.0'
+    androidTestImplementation 'androidx.test:rules:1.7.0'
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.json:json:20250517"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

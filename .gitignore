@@ -26,3 +26,13 @@ playwright-report/
 firebase-debug.log
 firestore-debug.log
 storage-debug.log
+
+# Generated private Android web bundle and public deployment snapshot
+apps/web/dist-mobile/
+apps/web/public/mobile-config.json
+apps/mobile/android/local.properties
+*.jks
+*.keystore
+*.p12
+android-signing.json
+.env.android*
