@@ -79,7 +79,7 @@ increase it for each update. The current default is 1; it is not automatically
 incremented. Keep the application ID and signing key unchanged.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=1
+export MDC_ANDROID_VERSION_CODE=2
 pnpm --filter @mdc/mobile android:release
 ```
 

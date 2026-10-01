@@ -464,6 +464,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (results[2]?.status !== "fulfilled") setSyncStreams(state => ({ ...state, deletedItems: { confirmed: false, failed: true } }));
       if (results.some(result => result.status === "rejected")) {
         setError(results.every(result => result.status === "rejected") ? "Could not refresh from the server" : "Some data could not be refreshed");
+      } else {
+        setError(message => message === "Could not refresh from the server" || message === "Some data could not be refreshed" || message === "Refresh timed out" ? undefined : message);
       }
       if (deletionReady) {
         await deletionCleanup.finish(current, () => {
@@ -751,7 +753,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const retry = async () => {
     setError(undefined); navigation.retry();
     nativeReconcile.current?.();
-    try { for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
+    try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
     catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
   };
 

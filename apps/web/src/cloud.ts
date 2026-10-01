@@ -147,6 +147,8 @@ function sorted<T extends { id: Id; createdAt: number }>(records: T[], descendin
 export class FirebaseCloud {
   readonly #firestore: Firestore;
   readonly #storage: FirebaseStorage;
+  #networkEnabled = true;
+  #networkTransition: Promise<void> = Promise.resolve();
 
   constructor(
     app: FirebaseApp,
@@ -240,7 +242,15 @@ export class FirebaseCloud {
   }
 
   setNetworkEnabled(enabled: boolean): Promise<void> {
-    return enabled ? enableNetwork(this.#firestore) : disableNetwork(this.#firestore);
+    const transition = this.#networkTransition.catch(() => undefined).then(async () => {
+      // Firestore starts enabled. Re-enabling an active stream can register its
+      // listen targets twice; only real foreground/background transitions touch it.
+      if (this.#networkEnabled === enabled) return;
+      await (enabled ? enableNetwork(this.#firestore) : disableNetwork(this.#firestore));
+      this.#networkEnabled = enabled;
+    });
+    this.#networkTransition = transition;
+    return transition;
   }
 
   subscribeDeletedItems(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe {

@@ -311,3 +311,38 @@ it("resets item failure and cache metadata when selecting a different context", 
  expect(screen.queryAllByText("Synced")).toHaveLength(0);
  await userEvent.click(screen.getByRole("button",{name:"Beta"}));expect(screen.queryAllByText("Synced").length).toBeGreaterThan(0);
 });
+
+it("retries Android cloud catch-up from the banner before allowing queued publishing", async () => {
+ const t=services();let fail=true;
+ t.value.platformKind="android";t.value.activity={initialActive:true,subscribe:()=>()=>{}};
+ t.value.cloud.refreshContexts=vi.fn(async()=>{if(fail)throw new Error("unavailable");return snap();});
+ t.value.cloud.refreshDeletedContexts=async()=>{if(fail)throw new Error("unavailable");return [];};
+ t.value.resume=vi.fn();
+ render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
+ expect(t.value.resume).not.toHaveBeenCalled();fail=false;
+ await userEvent.click(screen.getByRole("button",{name:"Retry"}));await act(async()=>{});
+ expect(t.value.cloud.refreshContexts).toHaveBeenCalledTimes(2);
+ expect(t.value.resume).toHaveBeenCalledTimes(1);
+ expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("clears a stale refresh banner only after every refresh stream succeeds", async () => {
+ const t=services();let fail=true;
+ t.value.cloud.refreshContexts=async()=>snap();t.value.cloud.refreshDeletedContexts=async()=>[];
+ t.value.cloud.refreshItems=async()=>{if(fail)throw new Error("items unavailable");return {records:[],fromCache:false,hasPendingWrites:false};};
+ render(createElement(ContextWorkspace,{services:t.value}));await userEvent.click(screen.getByRole("button",{name:"Alpha"}));
+ await userEvent.click(screen.getByRole("button",{name:"Refresh"}));await act(async()=>{});
+ expect(screen.getByRole("alert").textContent).toContain("could not be refreshed");fail=false;
+ await userEvent.click(screen.getByRole("button",{name:"Refresh"}));await act(async()=>{});
+ expect(screen.queryByRole("alert")).toBeNull();expect(screen.getAllByText("Synced").length).toBeGreaterThan(0);
+});
+
+it("a successful refresh preserves an unrelated native intake error", async () => {
+ const t=services();t.value.platformKind="android";t.value.subscribeNativeShares=()=>()=>{};
+ t.value.drainNativeShares=async()=>{throw new Error("Native intake failed");};
+ t.value.cloud.refreshContexts=async()=>snap();t.value.cloud.refreshDeletedContexts=async()=>[];
+ render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
+ expect(screen.getByRole("alert").textContent).toContain("Native intake failed");
+ await userEvent.click(screen.getByRole("button",{name:"Refresh"}));await act(async()=>{});
+ expect(screen.getByRole("alert").textContent).toContain("Native intake failed");
+});
