@@ -2,7 +2,7 @@ name: Quality
 on:
   pull_request:
   push:
-    branches: [main, codex/review-remediation]
+    branches: [main]
   schedule:
     - cron: '17 7 * * 1'
   workflow_dispatch:

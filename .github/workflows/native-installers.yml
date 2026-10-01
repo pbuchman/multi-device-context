@@ -1,7 +1,7 @@
 name: Native installers
 on:
   push:
-    branches: [main, codex/review-remediation]
+    branches: [main]
     paths:
       - apps/desktop/**
       - packages/contracts/**
@@ -39,6 +39,9 @@ jobs:
     env:
       MDC_APP_ORIGIN: ${{ vars.MDC_APP_ORIGIN || 'https://example.invalid' }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # identity is explicitly "-" (ad-hoc); no signing secrets enter PR jobs.
+      # electron-builder otherwise skips even the required ad-hoc macOS seal.
+      CSC_FOR_PULL_REQUEST: "true"
       MDC_REQUIRE_HOSTED_UI: ${{ github.event_name != 'pull_request' && (inputs.require_hosted_ui || vars.MDC_REQUIRE_HOSTED_UI == 'true') }}
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
