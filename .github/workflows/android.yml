@@ -73,6 +73,8 @@ jobs:
         run: pnpm --filter @mdc/mobile android:debug
       - name: Android unit tests
         run: pnpm --filter @mdc/mobile android:test
+      - name: Android release policy guards
+        run: pnpm --filter @mdc/mobile android:guards
       - name: Android lint
         run: pnpm --filter @mdc/mobile android:lint
       # Configuration tests assert that fixture mode rejects release generation;
