@@ -120,7 +120,8 @@ personal-device acceptance.
 - Android's system Share action sends text or files to a new context while
   preserving an existing draft. Native incoming shares are stored before the
   interface is notified and acknowledged only after the durable outbox accepts
-  them.
+  them. Returning to the app checks the pending inbox, including shares received
+  while it was in the background; failed intake can be retried.
 - **Attach files** uses the system picker. **Save** asks for a destination;
   **Share** opens Android's chooser. A recipient's support for copied file URIs
   determines whether pasting files is available there.
@@ -137,6 +138,8 @@ personal-device acceptance.
   Confirmed item deletion removes that item's pending send. Foreground catch-up
   waits for both deletion streams and durable local cleanup before publishing
   resumes. Failed refreshes and incomplete cached reads do not imply deletion.
+  A failed context or item refresh keeps synchronization incomplete until that
+  stream receives a fresh server result.
 
 ## Cloud changes required before phone acceptance
 

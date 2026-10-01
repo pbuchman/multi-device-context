@@ -181,8 +181,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [renameTargetId, setRenameTargetId] = useState<Id>();
   const [queueCount, setQueueCount] = useState(0);
   const [syncStreams, setSyncStreams] = useState({
-    contexts: { fromCache: false, pending: false },
-    items: { fromCache: false, pending: false },
+    contexts: { fromCache: false, pending: false, failed: false },
+    items: { fromCache: false, pending: false, failed: false },
     deleted: { confirmed: !services.cloud.refreshDeletedContexts, failed: false },
     deletedItems: { confirmed: !services.cloud.refreshDeletedItems, failed: false },
   });
@@ -240,10 +240,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const streamVersions = useRef({ contexts: 0, deleted: 0, deletedItems: 0, items: 0 });
   const deletionCleanup = useMemo(() => new DeletionCleanup(), [services.outbox]);
   const catchup = useRef(new ForegroundCatchup());
+  const signingOut = useRef(false);
+  const nativeReconcile = useRef<(() => void) | undefined>(undefined);
+  const itemStatusScope = useRef<Id | undefined>(undefined);
   const live = useRef({ services, active, mounted: true });
   live.current.services = services;
   live.current.active = active;
-  const isLive = useCallback(() => live.current.mounted && live.current.services === services
+  const isLive = useCallback(() => !signingOut.current && live.current.mounted && live.current.services === services
     && (services.platformKind !== "android" || live.current.active), [services]);
   const refreshers = useRef({ contexts: new ForegroundRefresh(), deleted: new ForegroundRefresh(), deletedItems: new ForegroundRefresh(), items: new ForegroundRefresh() });
   const applyDeleted = useCallback(async (ids: Id[]) => {
@@ -311,7 +314,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const currentId = navigation.selectedRef.current.id;
     for (const context of snapshot.records) localQueuedContexts.current.delete(context.id);
     setContexts(snapshot.records.filter(c => !deleted.current.has(c.id)).map(context => ({ ...context, unread: context.id !== currentId && context.updatedAt > (lastRead.current[context.id] ?? context.createdAt) })));
-    setSyncStreams(current => ({ ...current, contexts: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites } }));
+    setSyncStreams(current => ({ ...current, contexts: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.contexts.failed } }));
     if (!snapshot.fromCache) {
       const ready = snapshot.records.filter(c => c.syncState === "synced" && c.ready !== false);
       if (seenContexts.current && !suppressCatchupAutoSelect.current) {
@@ -324,7 +327,11 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (acknowledged.current.has(currentId) && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setSelectedId(undefined);
       else if (!navigation.selectedRef.current.drafts[currentId]?.local && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setError("This context is unavailable or has been deleted");
     }
-    }, cause => setError(cause.message || "Could not load contexts"));
+    }, cause => {
+      streamVersions.current.contexts += 1;
+      setSyncStreams(current => ({ ...current, contexts: { ...current.contexts, failed: true } }));
+      setError(cause.message || "Could not load contexts");
+    });
   }, [active, services.cloud, services.device.id, services.platformKind, setSelectedId]);
 
   useEffect(() => {
@@ -362,6 +369,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const selectedContextConfirmed = selectedId !== undefined && confirmedContextIds.has(selectedId);
   useEffect(() => {
+    if (itemStatusScope.current !== selectedId) {
+      itemStatusScope.current = selectedId;
+      setSyncStreams(current => ({ ...current, items: { fromCache: false, pending: false, failed: false } }));
+    }
     if (!selectedId || !selectedContextConfirmed) { setItems([]); return; }
     if (services.platformKind === "android" && !active) return;
     streamVersions.current.items += 1;
@@ -369,10 +380,15 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (navigation.selectedRef.current.id !== selectedId) return;
       streamVersions.current.items += 1;
       setItems(snapshot.records.filter(item => !deletedItems.current.has(item.id)));
-      setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites } }));
+      setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.items.failed } }));
       const cloudIds = new Set(snapshot.records.map((item) => item.id));
       setOptimisticItems((current) => current.filter((item) => item.contextId !== selectedId || !cloudIds.has(item.id)));
-    }, (cause) => setError(cause.message || "Could not load shared items"));
+    }, (cause) => {
+      if (navigation.selectedRef.current.id !== selectedId) return;
+      streamVersions.current.items += 1;
+      setSyncStreams(current => ({ ...current, items: { ...current.items, failed: true } }));
+      setError(cause.message || "Could not load shared items");
+    });
   }, [active, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
 
   useEffect(() => {
@@ -415,7 +431,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
             const incoming = snapshot.records.filter(context => !current.has(context.id));
             return incoming.length ? new Set([...current, ...incoming.map(context => context.id)]) : current;
           });
-          setSyncStreams(current => ({ ...current, contexts: { fromCache: false, pending: snapshot.hasPendingWrites } }));
+          setSyncStreams(current => ({ ...current, contexts: { fromCache: false, pending: snapshot.hasPendingWrites, failed: false } }));
         }),
         refreshers.current.deleted.run(`${services.viewer.uid}:deleted`, () => services.cloud.refreshDeletedContexts!(), async ids => {
           if (!current()) return;
@@ -432,11 +448,17 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           setItems(snapshot.records.filter(item => !deletedItems.current.has(item.id)));
           const ids = new Set(snapshot.records.map(item => item.id));
           setOptimisticItems(current => current.filter(item => item.contextId !== selectedAtStart || !ids.has(item.id)));
-          setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites } }));
+          setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.items.failed } }));
         }));
       }
       const results = await Promise.allSettled(tasks);
       if (!current()) return;
+      if (results[0]?.status === "rejected" && streamVersions.current.contexts === versionsAtStart.contexts) {
+        setSyncStreams(state => ({ ...state, contexts: { ...state.contexts, failed: true } }));
+      }
+      if (results[3]?.status === "rejected" && navigation.selectedRef.current.id === selectedAtStart && streamVersions.current.items === versionsAtStart.items) {
+        setSyncStreams(state => ({ ...state, items: { ...state.items, failed: true } }));
+      }
       const deletionReady = results[1]?.status === "fulfilled" && results[2]?.status === "fulfilled";
       if (!deletionReady) setSyncStreams(state => ({ ...state, deleted: { confirmed: false, failed: true } }));
       if (results[2]?.status !== "fulfilled") setSyncStreams(state => ({ ...state, deletedItems: { confirmed: false, failed: true } }));
@@ -489,8 +511,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     return () => window.removeEventListener("online", online);
   }, [active, refresh]);
 
-  const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false) => {
+  const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false, current: () => boolean = () => true) => {
     const queued = (await services.outbox.list()).filter(record => !deleted.current.has(record.contextId));
+    if (!current()) return;
     if (selectLatestNative) {
       selectContext = queued.filter((record) => record.nativeRequestId)
         .sort((left, right) => right.queuedAt - left.queuedAt)[0]?.contextId;
@@ -559,16 +582,48 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [restoreQueued]);
   useEffect(() => {
     if (!services.subscribeNativeShares || !services.drainNativeShares || (services.platformKind === "android" && !active)) return;
-    return services.subscribeNativeShares(() => {
-      void services.drainNativeShares!()
-        .then((contextId) => restoreQueued(contextId))
-        .then(refreshQueue)
-        .catch((cause: unknown) => {
-          void restoreQueued(undefined, true).then(refreshQueue).then(services.drain);
-          setError(cause instanceof Error ? cause.message : "Clipboard sharing failed");
-        });
-    });
-  }, [active, refreshQueue, restoreQueued, services]);
+    let subscribed = true;
+    let running = false;
+    let requested = false;
+    const current = () => subscribed && isLive();
+    const reconcile = () => {
+      requested = true;
+      if (running || !current()) return;
+      running = true;
+      void (async () => {
+        try {
+          while (requested && current()) {
+            requested = false;
+            try {
+              const contextId = await services.drainNativeShares!();
+              if (!current()) return;
+              await restoreQueued(contextId, false, current);
+              if (current()) await refreshQueue();
+            } catch (cause) {
+              if (!current()) return;
+              // A durable write may have succeeded before native acknowledgement
+              // failed. Show that queue without losing the original intake error.
+              await restoreQueued(undefined, true, current).catch(() => undefined);
+              if (!current()) return;
+              await refreshQueue().catch(() => undefined);
+              if (!current()) return;
+              setError(cause instanceof Error ? cause.message : "Clipboard sharing failed");
+              void services.drain().catch(() => undefined);
+            }
+          }
+        } finally { running = false; }
+      })();
+    };
+    // Subscribe first: an event after the native snapshot schedules another read.
+    const unsubscribe = services.subscribeNativeShares(reconcile);
+    nativeReconcile.current = reconcile;
+    if (services.platformKind === "android") reconcile();
+    return () => {
+      subscribed = false;
+      if (nativeReconcile.current === reconcile) nativeReconcile.current = undefined;
+      unsubscribe();
+    };
+  }, [active, isLive, refreshQueue, restoreQueued, services]);
 
   const share = useCallback(async (parts: SharePart[], forcedContextId?: Id, sentText?: string) => {
     if (parts.length === 0) return;
@@ -695,6 +750,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   };
   const retry = async () => {
     setError(undefined); navigation.retry();
+    nativeReconcile.current?.();
     try { for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
     catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
   };
@@ -702,15 +758,21 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const signOut = async () => {
     const [webPending, nativePending] = await Promise.all([services.outbox.count(), services.pendingNativeCount?.() ?? 0]);
     if (webPending + nativePending > 0 && !window.confirm(`${webPending + nativePending} pending share(s) will be removed. Sign out?`)) return;
-    await navigation.clear();
-    await services.signOut();
-    window.location.reload();
+    signingOut.current = true;
+    try {
+      await navigation.clear();
+      await services.signOut();
+      window.location.reload();
+    } catch (cause) {
+      signingOut.current = false;
+      setError(cause instanceof Error ? cause.message : "Could not sign out");
+    }
   };
 
   const pendingWrites = syncStreams.contexts.pending || syncStreams.items.pending;
   const fromCache = syncStreams.contexts.fromCache || syncStreams.items.fromCache;
   const syncLabel = queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
-    : fromCache ? "Offline history" : syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
+    : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
 
   return (
     <div className="app-shell">
@@ -825,6 +887,9 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
   const operations = new ContextOperations(outbox, cloud);
   const runner = operations.runner;
   let lastNativeContext: Id | undefined;
+  let nativeIntakeEnabled = true;
+  let nativeDrainRequested = false;
+  let nativeDrainPending: Promise<Id | undefined> | undefined;
   const storeNativeSnapshot = async (request: PendingClipboardShare) => {
     const parts = sharePartsFromSnapshot(request.snapshot);
     const drafts = parts.map((part, index): ShareDraft => ({
@@ -845,11 +910,19 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
     storeNativeSnapshot,
     markNativeAcknowledged: (id) => outbox.markNativeAcknowledged(id),
   };
-  const drainNative = async (): Promise<Id | undefined> => {
-    if (!native) return undefined;
+  const drainNative = (): Promise<Id | undefined> => {
+    if (!native || !nativeIntakeEnabled) return Promise.resolve(undefined);
+    nativeDrainRequested = true;
+    if (nativeDrainPending) return nativeDrainPending;
     lastNativeContext = undefined;
-    await drainNativeClipboardQueue(native, nativeStore);
-    return lastNativeContext;
+    nativeDrainPending = (async () => {
+      do {
+        nativeDrainRequested = false;
+        await drainNativeClipboardQueue(native, nativeStore, () => nativeIntakeEnabled);
+      } while (nativeDrainRequested && nativeIntakeEnabled);
+      return nativeIntakeEnabled ? lastNativeContext : undefined;
+    })().finally(() => { nativeDrainPending = undefined; });
+    return nativeDrainPending;
   };
   const initialNativeId = await drainNative();
   const initialNavigation = await native?.takeNavigation?.();
@@ -887,9 +960,12 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
       ...(session.platform.shareFile ? { shareFile: session.platform.shareFile } : {}),
       signOut: native
         ? async () => {
+            nativeIntakeEnabled = false;
             runner.stop();
-            try { await session.signOut(); await outbox.clear(); }
-            catch (error) { runner.resume(); void runner.drain(); throw error; }
+            try {
+              await nativeDrainPending?.catch(() => undefined);
+              await session.signOut(); await outbox.clear();
+            } catch (error) { nativeIntakeEnabled = true; runner.resume(); throw error; }
           }
         : async () => {
             runner.stop();
@@ -904,12 +980,14 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
         subscribeNativeShares: (listener: () => void) => native.onShareClipboard(listener),
         drainNativeShares: async () => {
           const contextId = await drainNative();
-          window.setTimeout(() => void runner.drain(), 0);
+          if (nativeIntakeEnabled) window.setTimeout(() => {
+            if (nativeIntakeEnabled) void runner.drain().catch(() => undefined);
+          }, 0);
           return contextId;
         },
       } : {}),
     },
-    dispose: () => { runner.stop(); outbox.close(); },
+    dispose: () => { nativeIntakeEnabled = false; runner.stop(); outbox.close(); },
   };
 }
 

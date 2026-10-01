@@ -45,7 +45,7 @@ function services(initialContexts = contexts) {
       attachmentBytes: vi.fn(async () => new Uint8Array()),
     },
     outbox: {
-      namespace: "project:user",
+      namespace: `project:user:${crypto.randomUUID()}`,
       enqueue: vi.fn(async () => undefined),
       count: vi.fn(async () => 0),
       clear: vi.fn(async () => undefined),
@@ -223,4 +223,91 @@ it("a failed merged item tombstone refresh blocks publishing and the Synced labe
  Object.assign(t.value.cloud,{refreshDeletedItems:async()=>{throw new Error("offline");}});t.value.resume=vi.fn();
  render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
  expect(t.value.resume).not.toHaveBeenCalled();expect(screen.queryAllByText("Synced")).toHaveLength(0);
+});
+
+it("reconciles the native inbox after subscribing on Android foreground without a new event", async () => {
+ const t=services(); let activity!:(active:boolean)=>void; let listener:(()=>void)|undefined;
+ t.value.platformKind="android";t.value.activity={initialActive:false,subscribe:emit=>{activity=emit;return ()=>{};}};
+ t.value.subscribeNativeShares=emit=>{listener=emit;return ()=>{listener=undefined;};};
+ t.value.drainNativeShares=vi.fn(async()=>{expect(listener).toBeDefined();return beta;});
+ render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
+ expect(t.value.drainNativeShares).not.toHaveBeenCalled();
+ await act(async()=>activity(true));
+ expect(t.value.drainNativeShares).toHaveBeenCalledTimes(1);
+ expect(screen.getByRole("heading",{name:"Beta"})).toBeTruthy();
+});
+
+it("serializes native foreground and event reads while preserving an existing draft", async () => {
+ const t=services();const first=deferred<string|undefined>();let activity!:(active:boolean)=>void;let event!:()=>void;
+ t.value.platformKind="android";t.value.activity={initialActive:false,subscribe:emit=>{activity=emit;return ()=>{};}};
+ t.value.subscribeNativeShares=emit=>{event=emit;return ()=>{};};
+ t.value.drainNativeShares=vi.fn().mockImplementationOnce(()=>first.promise).mockResolvedValue(beta);
+ render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>activity(true));
+ await userEvent.click(screen.getByRole("button",{name:"Alpha"}));
+ const composer=screen.getByLabelText("Paste to share instantly, or type a note");
+ await userEvent.type(composer,"Keep my draft");
+ act(()=>{event();event();});
+ expect(t.value.drainNativeShares).toHaveBeenCalledTimes(1);
+ await act(async()=>first.resolve(undefined));
+ expect(t.value.drainNativeShares).toHaveBeenCalledTimes(2);
+ expect(screen.getByRole("heading",{name:"Beta"})).toBeTruthy();
+ await userEvent.click(screen.getByRole("button",{name:"Alpha"}));
+ expect((composer as HTMLTextAreaElement).value).toBe("Keep my draft");
+});
+
+it.each(["background", "account replacement", "unmount"])("does not apply native inbox completion after %s", async transition => {
+ const t=services();const first=deferred<string|undefined>();let activity!:(active:boolean)=>void;let event!:()=>void;
+ t.value.platformKind="android";t.value.activity={initialActive:true,subscribe:emit=>{activity=emit;return ()=>{};}};
+ t.value.subscribeNativeShares=emit=>{event=emit;return ()=>{};};t.value.drainNativeShares=vi.fn(()=>first.promise);
+ const view=render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
+ await userEvent.click(screen.getByRole("button",{name:"Alpha"}));act(()=>event());
+ if(transition==="background") act(()=>activity(false));
+ else if(transition==="unmount") view.unmount();
+ else {
+  const next=services();next.value.viewer={uid:"other",name:"Other"};
+  view.rerender(createElement(ContextWorkspace,{services:next.value}));
+ }
+ await act(async()=>first.resolve(beta));expect(screen.queryByRole("heading",{name:"Beta"})).toBeNull();
+ if(transition==="background") expect(screen.getByRole("heading",{name:"Alpha"})).toBeTruthy();
+});
+
+it("offers a retry after native inbox intake fails", async () => {
+ const t=services();t.value.platformKind="android";t.value.subscribeNativeShares=()=>()=>{};
+ t.value.drainNativeShares=vi.fn().mockRejectedValueOnce(new Error("Native intake failed")).mockResolvedValue(beta);
+ render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
+ expect(screen.getByRole("alert").textContent).toContain("Native intake failed");
+ await userEvent.click(screen.getByRole("button",{name:"Retry"}));await act(async()=>{});
+ expect(t.value.drainNativeShares).toHaveBeenCalledTimes(2);expect(screen.getByRole("heading",{name:"Beta"})).toBeTruthy();
+});
+
+it("keeps a failed item refresh incomplete until that item stream recovers", async () => {
+ const t=services();t.value.cloud.refreshContexts=async()=>snap();t.value.cloud.refreshDeletedContexts=async()=>[];
+ t.value.cloud.refreshItems=async()=>{throw new Error("items offline");};
+ render(createElement(ContextWorkspace,{services:t.value}));await userEvent.click(screen.getByRole("button",{name:"Alpha"}));
+ await userEvent.click(screen.getByRole("button",{name:"Refresh"}));await act(async()=>{});
+ expect(screen.getByRole("alert").textContent).toContain("could not be refreshed");expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ act(()=>t.emitContexts(contexts));expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ act(()=>t.items.get(alpha)!({records:[],fromCache:true,hasPendingWrites:false}));
+ expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ act(()=>t.items.get(alpha)!({records:[],fromCache:false,hasPendingWrites:false}));
+ expect(screen.queryAllByText("Synced").length).toBeGreaterThan(0);
+});
+
+it("keeps a failed context refresh incomplete when only the items recover", async () => {
+ const t=services();t.value.cloud.refreshContexts=async()=>{throw new Error("contexts offline");};t.value.cloud.refreshDeletedContexts=async()=>[];
+ t.value.cloud.refreshItems=async()=>({records:[],fromCache:false,hasPendingWrites:false});
+ render(createElement(ContextWorkspace,{services:t.value}));await userEvent.click(screen.getByRole("button",{name:"Alpha"}));
+ await userEvent.click(screen.getByRole("button",{name:"Refresh"}));await act(async()=>{});
+ expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ act(()=>t.items.get(alpha)!({records:[],fromCache:false,hasPendingWrites:false}));expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ act(()=>t.emitContexts(contexts));expect(screen.queryAllByText("Synced").length).toBeGreaterThan(0);
+});
+
+it("resets item failure and cache metadata when selecting a different context", async () => {
+ const t=services();t.value.cloud.refreshContexts=async()=>snap();t.value.cloud.refreshDeletedContexts=async()=>[];
+ t.value.cloud.refreshItems=async()=>{throw new Error("items offline");};
+ render(createElement(ContextWorkspace,{services:t.value}));await userEvent.click(screen.getByRole("button",{name:"Alpha"}));
+ await userEvent.click(screen.getByRole("button",{name:"Refresh"}));await act(async()=>{});
+ expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ await userEvent.click(screen.getByRole("button",{name:"Beta"}));expect(screen.queryAllByText("Synced").length).toBeGreaterThan(0);
 });
