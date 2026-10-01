@@ -22,6 +22,7 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 
 @CapacitorPlugin(name="MdcNative")
 class MdcNativePlugin:Plugin() {
@@ -43,10 +44,18 @@ class MdcNativePlugin:Plugin() {
   call.resolve(JSObject().put("id",id).put("name","${Build.MANUFACTURER} ${Build.MODEL}".take(80)))
  }
  @PluginMethod fun getAccessToken(call:PluginCall) { auth.token(call) }
- @PluginMethod fun signOut(call:PluginCall) { activity.runOnUiThread {
-  auth.signOut()
-  background(call) { inbox.clear();clipboardFiles.clear();exports.clearStaging();exports.cleanup();call.resolve() }
- } }
+ @PluginMethod fun signOut(call:PluginCall) = background(call) {
+  val values=call.getArray("reviewedNativeIds") ?: JSArray()
+  require(values.length()<=4096)
+  val reviewed=(0 until values.length()).map { values.getString(it).also { id -> require(UUID.fromString(id).toString()==id) } }.toSet()
+  inbox.signOut(reviewed) {
+   // SecureCredentialsManager.clearCredentials is synchronous. No UI path
+   // takes the inbox monitor: receiving intents reads only a volatile epoch.
+   val invalidation=FutureTask<Unit> { auth.signOut() }
+   activity.runOnUiThread(invalidation);invalidation.get()
+  }
+  clipboardFiles.clear();exports.clearStaging();exports.cleanup();call.resolve()
+ }
  @PluginMethod fun copyText(call:PluginCall) { activity.runOnUiThread {
   val text=call.getString("text")
   if(text==null || text.toByteArray().size>NativePolicy.MAX_TEXT) {call.reject("Invalid text");return@runOnUiThread}
@@ -125,15 +134,16 @@ class MdcNativePlugin:Plugin() {
   }
   if(intent.action!=Intent.ACTION_SEND && intent.action!=Intent.ACTION_SEND_MULTIPLE)return
   val id=intent.getStringExtra(MainActivity.SHARE_ID) ?: return
+  val captureGeneration=inbox.captureGeneration()
   val text=intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
   val uris=mutableListOf<Uri>()
   if(intent.action==Intent.ACTION_SEND) (intent.getParcelableExtra<android.os.Parcelable>(Intent.EXTRA_STREAM) as? Uri)?.let {uris.add(it)}
   else intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let {uris.addAll(it)}
   intent.clipData?.let {clip -> for(i in 0 until clip.itemCount)clip.getItemAt(i).uri?.let {if(!uris.contains(it))uris.add(it)} }
   worker.execute { try {
-   inbox.capture(id,text,uris.map {incoming(it)})
+   inbox.capture(id,text,uris.map {incoming(it)},captureGeneration)
    notifyListeners("shareReceived",JSObject())
-  } catch(_:Exception) {activity.runOnUiThread {Toast.makeText(context,"Share could not be imported (empty, unavailable, or too large)",Toast.LENGTH_LONG).show()} } }
+  } catch(_:Exception) {activity.runOnUiThread {Toast.makeText(context,"Share could not be imported. If signing out, finish and share it again; otherwise check the file and size.",Toast.LENGTH_LONG).show()} } }
  }
  private fun incoming(uri:Uri):IncomingFile {
   require(uri.scheme=="content") { "Only content grants accepted" }

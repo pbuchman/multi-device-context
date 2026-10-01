@@ -9,6 +9,9 @@ import org.json.JSONObject
 data class IncomingFile(val name:String,val contentType:String,val open:()->InputStream)
 /** Directory rename is the commit point: JS can only see fully copied, durable requests. */
 class ShareInbox(private val root:File) {
+ @Volatile private var generation=0L
+ /** Lock-free so the UI can receive an intent while logout waits for UI auth. */
+ fun captureGeneration():Long = generation
  init { root.mkdirs();root.listFiles()?.filter { it.name.endsWith(".partial") }?.forEach { it.deleteRecursively() } }
  private var rejected=0
  @Synchronized fun consumeRejections():Int = rejected.also { rejected=0 }
@@ -40,8 +43,14 @@ class ShareInbox(private val root:File) {
   }
   require(NativePolicy.validShare(text,sizes,0))
  }
- @Synchronized fun capture(id:String,text:String?,files:List<IncomingFile>) {
+ @Synchronized fun capture(id:String,text:String?,files:List<IncomingFile>,expectedGeneration:Long=captureGeneration()) {
   require(UUID.fromString(id).toString()==id)
+  if(generation!=expectedGeneration || generation%2L!=0L) {
+   // A rejected ACTION_SEND can still be the Activity's launch intent. Keep
+   // only its ID so recreation cannot silently import it into another account.
+   rememberAcknowledged(id)
+   throw IllegalStateException("Account changed; share again")
+  }
   val destination=File(root,id);if(destination.exists() || File(root,"$id.rejected").exists() || acknowledged().contains(id))return
   val used=root.walkTopDown().filter { it.isFile }.sumOf { it.length() }
   require(NativePolicy.validShare(text,files.map { 1L },used)) { "Share exceeds limits or is empty" }
@@ -71,13 +80,28 @@ class ShareInbox(private val root:File) {
   } catch(e:Exception) { staging.deleteRecursively();throw e }
  }
  private fun acknowledged():List<String> = File(root,"acknowledged").takeIf { it.exists() }?.readLines() ?: emptyList()
- @Synchronized fun acknowledge(id:String) {
+ private fun rememberAcknowledged(id:String) {
   require(UUID.fromString(id).toString()==id)
   val entries=(acknowledged()+id).distinct().takeLast(4096)
   val temp=File(root,"acknowledged.tmp")
   FileOutputStream(temp).use { it.write(entries.joinToString("\n").toByteArray());it.fd.sync() }
   check(temp.renameTo(File(root,"acknowledged")))
-  File(root,id).deleteRecursively()
  }
- @Synchronized fun clear() { root.listFiles()?.forEach { it.deleteRecursively() } }
+ @Synchronized fun acknowledge(id:String) {
+  rememberAcknowledged(id)
+  check(File(root,id).deleteRecursively()) { "Could not clear acknowledged share" }
+ }
+ @Synchronized fun signOut(reviewedIds:Set<String>,invalidateCredentials:()->Unit) {
+  val requests=pending()
+  check((0 until requests.length()).all { reviewedIds.contains(requests.getJSONObject(it).getString("id")) }) { "Incoming shares changed; review and confirm sign-out again" }
+  generation++ // odd: intents received while invalidating cannot enter the next account
+  try {
+   invalidateCredentials()
+   // Remember discarded intent IDs so Activity recreation cannot import them
+   // into a later account. The existing bounded acknowledgement ledger has no bytes.
+   for(i in 0 until requests.length()) acknowledge(requests.getJSONObject(i).getString("id"))
+   root.listFiles()?.filter { it.name!="acknowledged" }?.forEach {check(it.deleteRecursively()) { "Could not clear saved share" }}
+  } finally { generation++ }
+ }
+ @Synchronized fun clear() { root.listFiles()?.forEach { check(it.deleteRecursively()) { "Could not clear saved share" } } }
 }

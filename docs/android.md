@@ -79,7 +79,7 @@ increase it for each update. The current default is 1; it is not automatically
 incremented. Keep the application ID and signing key unchanged.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=3
+export MDC_ANDROID_VERSION_CODE=4
 pnpm --filter @mdc/mobile android:release
 ```
 
@@ -115,15 +115,19 @@ personal-device acceptance.
 
 ## Sharing and offline behavior
 
-- Use **Send** for a typed note and **Paste** for clipboard text. Choose code mode
-  when needed. Receiving content never changes the clipboard automatically.
+- Ordinary text paste edits the draft at the cursor. Use **Send** to publish;
+  Android Enter adds a new line in both text and code modes. **Paste and send**
+  immediately shares a captured clipboard snapshot without clearing your draft.
+  Ordinary file/image paste requires confirmation; Cancel sends nothing.
+  Receiving content never changes the clipboard automatically.
 - Android's system Share action sends text or files to a new context while
   preserving an existing draft. Native incoming shares are stored before the
   interface is notified and acknowledged only after the durable outbox accepts
   them. Returning to the app checks the pending inbox, including shares received
   while it was in the background; failed intake can be retried.
-- **Attach files** uses the system picker. **Save** asks for a destination;
-  **Share** opens Android's chooser. A recipient's support for copied file URIs
+- **Add files or code → Choose and send files** uses the system picker and
+  sends the selected files immediately. Message options include **Save to this
+  device** and **Share through Android**. A recipient's support for copied file URIs
   determines whether pasting files is available there.
 - Text is limited to 262,144 UTF-8 bytes. A share can contain at most 32 files,
   totaling 100 MiB; the pending native inbox is bounded at 256 MiB. Files retain

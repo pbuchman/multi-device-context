@@ -3,17 +3,24 @@ import { mobileBuild } from "./api.js";
 import { inspectDesktopBridge } from "./desktop.js";
 
 /** Desktop v1 remains unchanged; shared callers use only supported capabilities. */
-export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLaunchAtLogin" | "setLaunchAtLogin"> &
-  Partial<Pick<DesktopBridge, "getLaunchAtLogin" | "setLaunchAtLogin">>;
+export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLaunchAtLogin" | "setLaunchAtLogin" | "signOut"> &
+  Partial<Pick<DesktopBridge, "getLaunchAtLogin" | "setLaunchAtLogin">> & {
+    /** Private adapter argument, never part of the public DesktopBridge v1 contract. */
+    signOut(reviewedNativeIds?: readonly string[]): Promise<void>;
+  };
 export type PlatformAdapter = {
   kind: "browser" | "desktop" | "android";
   native?: NativePlatform;
   activity?: { readonly initialActive: boolean; subscribe(listener: (active: boolean) => void): () => void };
   shareFile?: (file: NativeFile) => Promise<boolean>;
+  assertCanSignOut?(): void;
   dispose(): void;
 };
 
 export class DesktopUpdateRequiredError extends Error {}
+
+/** Only the installed preload advertises this private implementation affordance. */
+type ReviewedDesktopBridge = DesktopBridge & { readonly reviewedSignOut?: true; signOut(reviewedIds?: readonly string[]): Promise<void> };
 
 export async function createPlatformAdapter(options: {
   mobile?: boolean;
@@ -26,7 +33,16 @@ export async function createPlatformAdapter(options: {
   if (desktop.kind === "incompatible") {
     throw new DesktopUpdateRequiredError(`This desktop app uses bridge version ${String(desktop.actual)}. Install the current app to continue.`);
   }
-  return desktop.kind === "ready"
-    ? { kind: "desktop", native: desktop.bridge, dispose() {} }
-    : { kind: "browser", dispose() {} };
+  if (desktop.kind !== "ready") return { kind: "browser", dispose() {} };
+  const bridge = desktop.bridge as ReviewedDesktopBridge;
+  const assertCanSignOut = () => {
+    if (bridge.reviewedSignOut !== true) throw new DesktopUpdateRequiredError("Update this desktop app before signing out. This installed version cannot safely preserve newly arriving shares; your local data has not been cleared.");
+  };
+  return { kind: "desktop", assertCanSignOut, native: {
+    ...bridge,
+    signOut: async (reviewedIds = []) => {
+      assertCanSignOut();
+      await bridge.signOut(reviewedIds);
+    },
+  }, dispose() {} };
 }

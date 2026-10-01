@@ -81,3 +81,76 @@ it("cleans Firebase if the browser profile lookup fails after authentication", a
   await expect(manager.login()).rejects.toThrow("profile unavailable");
   expect(sdk.deleteApp).toHaveBeenCalledTimes(1);
 });
+
+it("invalidates native auth before web cleanup and leaves web data untouched on auth failure", async () => {
+  const f = fixture(); const session = (await f.manager.login())!;
+  const cleanup = vi.fn(async () => {});
+  f.native.signOut.mockRejectedValueOnce(new Error("partial native failure"));
+  await expect(session.signOut(cleanup)).rejects.toThrow("partial native failure");
+  expect(cleanup).not.toHaveBeenCalled();
+  await expect(session.accessToken()).rejects.toThrow("expired");
+  await session.signOut(cleanup);
+  expect(cleanup).toHaveBeenCalledOnce();
+});
+
+it("retries failed cleanup without repeating successful native sign-out", async () => {
+  const f = fixture(); const session = (await f.manager.login())!;
+  const cleanup = vi.fn().mockRejectedValueOnce(new Error("disk unavailable")).mockResolvedValue(undefined);
+  await expect(session.signOut(cleanup)).rejects.toThrow("disk unavailable");
+  await session.signOut(cleanup);
+  expect(f.native.signOut).toHaveBeenCalledOnce(); expect(sdk.deleteApp).toHaveBeenCalledOnce();
+  expect(cleanup).toHaveBeenCalledTimes(2);
+});
+
+it("passes only explicitly reviewed native IDs and allows reconfirmation after a native race", async () => {
+  const f = fixture("desktop"), session = (await f.manager.login())!, cleanup = vi.fn(async () => {});
+  f.native.signOut.mockRejectedValueOnce(new Error("Inbox changed"));
+  await expect(session.signOut(cleanup, ["reviewed"])).rejects.toThrow("changed");
+  expect(cleanup).not.toHaveBeenCalled();
+  await session.signOut(cleanup, ["reviewed", "new"]);
+  expect(f.native.signOut.mock.calls).toEqual([[["reviewed"]], [["reviewed", "new"]]]);
+  expect(cleanup).toHaveBeenCalledOnce();
+});
+
+it("leaves a legacy desktop session usable when reviewed sign-out is unsupported", async () => {
+  const f = fixture("desktop"), session = (await f.manager.login())!;
+  f.platform.assertCanSignOut = () => { throw new Error("Update this desktop app"); };
+  const cleanup = vi.fn();
+  await expect(session.signOut(cleanup, [])).rejects.toThrow("Update this desktop app");
+  expect(f.native.signOut).not.toHaveBeenCalled(); expect(cleanup).not.toHaveBeenCalled();
+  expect(await session.accessToken()).toBe("access"); expect(await f.manager.restore()).toBe(session);
+});
+
+it("captures browser logout navigation and purges only after local auth logout succeeds", async () => {
+  const events: string[] = [];
+  const logout = vi.fn(async (options: { openUrl: (url: string) => Promise<void> }) => { events.push("auth0"); await options.openUrl("https://login.example.test/logout"); });
+  sdk.createAuth0Client.mockResolvedValueOnce({ isAuthenticated: async () => true, getTokenSilently: async () => "access", getUser: async () => ({ name: "User" }), logout });
+  const f = fixture(); const navigate = vi.fn((url: string) => { events.push("navigate"); expect(url).toBe("https://login.example.test/logout"); });
+  const manager = new SessionManager(f.fetcher, { platformFactory: async () => ({ kind: "browser", dispose() {} }), navigateAfterSignOut: navigate });
+  const session = (await manager.login())!;
+  await session.signOut(async () => { events.push("cleanup"); });
+  expect(events).toEqual(["auth0", "cleanup", "navigate"]);
+  expect(logout).toHaveBeenCalledWith(expect.objectContaining({ openUrl: expect.any(Function) }));
+});
+
+it("does not purge or navigate if browser local logout fails, and blocks the old token", async () => {
+  const logout = vi.fn().mockRejectedValueOnce(new Error("cache unavailable"));
+  sdk.createAuth0Client.mockResolvedValueOnce({ isAuthenticated: async () => true, getTokenSilently: async () => "access", getUser: async () => ({}), logout });
+  const f = fixture(), navigate = vi.fn(), cleanup = vi.fn();
+  const manager = new SessionManager(f.fetcher, { platformFactory: async () => ({ kind: "browser", dispose() {} }), navigateAfterSignOut: navigate });
+  const session = (await manager.login())!;
+  await expect(session.signOut(cleanup)).rejects.toThrow("cache unavailable");
+  expect(cleanup).not.toHaveBeenCalled(); expect(navigate).not.toHaveBeenCalled();
+  await expect(session.accessToken()).rejects.toThrow("expired");
+});
+
+it("does not repeat account cleanup after browser navigation fails", async () => {
+  const logout = vi.fn(async (options: { openUrl: (url: string) => Promise<void> }) => { await options.openUrl("https://login.example.test/logout"); });
+  sdk.createAuth0Client.mockResolvedValueOnce({ isAuthenticated: async () => true, getTokenSilently: async () => "access", getUser: async () => ({}), logout });
+  const f = fixture(), navigate = vi.fn().mockImplementationOnce(() => { throw new Error("navigation blocked"); }), cleanup = vi.fn(async () => {});
+  const manager = new SessionManager(f.fetcher, { platformFactory: async () => ({ kind: "browser", dispose() {} }), navigateAfterSignOut: navigate });
+  const session = (await manager.login())!;
+  await expect(session.signOut(cleanup)).rejects.toThrow("navigation blocked");
+  await session.signOut(cleanup);
+  expect(logout).toHaveBeenCalledOnce(); expect(cleanup).toHaveBeenCalledOnce(); expect(navigate).toHaveBeenCalledTimes(2);
+});

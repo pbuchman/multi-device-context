@@ -27,6 +27,27 @@ describe("DurableOutbox", () => {
     Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: new IDBFactory() });
   });
 
+  it("can quiesce for sign-out without draining queued uploads", async () => {
+    const outbox = new DurableOutbox(namespaceA); await outbox.enqueue(draft());
+    const publish = vi.fn(async () => {}), runner = new OutboxRunner(outbox, { publish });
+    expect(runner.stopped).toBe(false);
+    await runner.stopAndWait();
+    expect(runner.stopped).toBe(true); expect(publish).not.toHaveBeenCalled(); expect(await outbox.count()).toBe(1);
+    outbox.close();
+  });
+
+  it("waits for an already running upload but fences its late local completion", async () => {
+    const outbox = new DurableOutbox(namespaceA); await outbox.enqueue(draft());
+    let finish!: () => void; const gate = new Promise<void>(resolve => { finish = resolve; });
+    const publish = vi.fn(async () => gate), runner = new OutboxRunner(outbox, { publish });
+    const draining = runner.drain(); await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
+    let settled = false; const stopped = runner.stopAndWait().then(() => { settled = true; });
+    await Promise.resolve(); expect(settled).toBe(false);
+    finish(); await Promise.all([draining, stopped]);
+    expect(settled).toBe(true); expect(await outbox.count()).toBe(1); expect(publish).toHaveBeenCalledOnce();
+    outbox.close();
+  });
+
   it("does not restore pending content when deletion races an in-flight failure", async () => {
     const outbox = new DurableOutbox(namespaceA);
     await outbox.enqueue(draft());

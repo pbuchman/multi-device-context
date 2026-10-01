@@ -140,7 +140,7 @@ async function start(): Promise<void> {
   window = new BrowserWindow({
     width: 1180,
     height: 800,
-    minWidth: 680,
+    minWidth: 360,
     minHeight: 520,
     show: false,
     backgroundColor: "#f7f7f5",
@@ -373,11 +373,11 @@ function wireBridge(): void {
     if (!auth) throw new Error("Sign-in is unavailable. Reconnect and retry.");
     return auth.getAccessToken(interactive);
   });
-  handle("signOut", 0, async () => {
-    // The trusted top-level UI confirms the combined web and native pending
-    // count before invoking this method. Clear the account atomically below.
+  handle("signOut", 1, async (reviewed) => {
+    if (!Array.isArray(reviewed) || reviewed.length > 256) throw new Error("Invalid sign-out review.");
+    const reviewedIds = reviewed.map(id => IdSchema.parse(id));
     await auth?.signOut();
-    await store.clearAccount();
+    await store.clearAccount(reviewedIds);
     await copies.clear();
   });
   handle("readClipboard", 0, readClipboard);
