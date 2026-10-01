@@ -126,7 +126,11 @@ service cloud.firestore {
       allow get, list: if isOwner(uid);
       allow write: if false;
     }
-    // Server-only UUID markers prevent offline clients resurrecting removed
-    // contexts/items. The default deny leaves these unreadable and immutable to clients.
+    match /users/{uid}/deletedItems/{itemId} {
+      allow get, list: if isOwner(uid);
+      allow write: if false;
+    }
+    // UUID markers prevent offline clients resurrecting removed
+    // contexts/items. Only their owner can read markers; clients cannot change them.
   }
 }

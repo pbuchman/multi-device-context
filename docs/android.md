@@ -134,7 +134,9 @@ personal-device acceptance.
   This does not delete the durable queue. Reopen online to continue. Sign-out
   clears local account data after the app's pending-share confirmation.
 - Confirmed context deletion removes its associated draft and pending sends.
-  Failed refreshes and incomplete cached reads do not imply deletion.
+  Confirmed item deletion removes that item's pending send. Foreground catch-up
+  waits for both deletion streams and durable local cleanup before publishing
+  resumes. Failed refreshes and incomplete cached reads do not imply deletion.
 
 ## Cloud changes required before phone acceptance
 
@@ -157,9 +159,10 @@ applying; preserve unrelated resources and the desktop settings.
 3. Add `https://localhost` to the existing attachments bucket CORS origins,
    preserving the hosted origin and method/header restrictions.
 4. Deploy the server's narrow `/api/` CORS hook. It accepts only the configured
-   hosted origin and `https://localhost`, GET/POST/DELETE preflights, and the
-   Authorization/Content-Type headers. It does not use CORS cookies or remove
-   bearer authentication from actual requests.
+   hosted origin and `https://localhost`, GET/POST/PATCH/DELETE preflights, and
+   the Authorization/Content-Type headers. It exposes Retry-After for rate-limit
+   backoff, keeps preflights behind the existing request limits, and does not
+   use CORS cookies or remove bearer authentication from actual requests.
 
 Verify the deployed endpoint:
 

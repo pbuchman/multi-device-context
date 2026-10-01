@@ -36,3 +36,4 @@ apps/mobile/android/local.properties
 *.p12
 android-signing.json
 .env.android*
+apps/desktop/bundle/

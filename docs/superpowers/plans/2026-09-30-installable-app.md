@@ -1,3 +1,5 @@
+> Historical design/plan. Current behavior is documented in `docs/privacy.md`, `docs/agent-api.md` and `CHANGELOG.md`; later revisions supersede conflicting requirements here.
+
 # Installable App Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.

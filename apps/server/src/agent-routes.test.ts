@@ -41,11 +41,11 @@ describe("agent API trust boundaries", () => {
     expect(backend.deleteContext).toHaveBeenCalledWith("owner", id);
     expect((await app.inject({ url: "/api/agent/v1/contexts?limit=1000", headers })).statusCode).toBe(400);
   });
-  it("streams exact bytes and rejects further requests after the per-key rate limit", async () => {
+  it("streams exact bytes and rejects further requests after the per-owner rate limit across IPs", async () => {
     const { app } = fixture(); const headers = { authorization: "Bearer agent" }; const url = `/api/agent/v1/contexts/${id}/items/${itemId}/content`;
     const download = await app.inject({ url, headers }); expect(download.rawPayload).toEqual(Buffer.from([0, 255, 1]));
     expect((await app.inject({ url, method: "PUT", headers: { ...headers, "content-type": "application/octet-stream" }, payload: Buffer.from([0, 255, 1]) })).statusCode).toBe(204);
-    for (let i = 0; i < 118; i++) expect((await app.inject({ url: "/api/agent/v1/contexts", headers })).statusCode).toBe(200);
+    for (let i = 0; i < 118; i++) expect((await app.inject({ url: "/api/agent/v1/contexts", headers, remoteAddress: `192.0.2.${i + 1}` })).statusCode).toBe(200);
     const denied = await app.inject({ url: "/api/agent/v1/contexts", headers }); expect(denied.statusCode).toBe(429); expect(denied.headers["retry-after"]).toBeTruthy();
   });
 });

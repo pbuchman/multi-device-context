@@ -1,3 +1,5 @@
+import type { SettingsPort } from "./settings.js";
+import { diagnostic } from "./diagnostics.js";
 import { randomUUID } from "node:crypto";
 import { FieldValue, type Firestore, type DocumentReference } from "firebase-admin/firestore";
 import { ContentSchema, type Content } from "@mdc/contracts";
@@ -37,13 +39,13 @@ export class TitleWorker {
   private timer: NodeJS.Timeout | undefined;
   private running: Promise<void> | undefined;
   private unsubscribe: (() => void) | undefined;
-  constructor(private db: Firestore, private key: string | undefined, private model = "openai/gpt-4.1-nano") {}
+  constructor(private db: Firestore, private key: string | undefined, private model = "openai/gpt-4.1-nano", private settings?: SettingsPort) {}
   start() {
-    const run = () => { if (!this.running) this.running = this.pass().catch(() => {}).finally(() => { this.running = undefined; }); };
+    const run = () => { if (!this.running) this.running = this.pass().catch(() => diagnostic("ai-title", "pass-failed")).finally(() => { this.running = undefined; }); };
     this.timer = setInterval(run, 5000); this.timer.unref();
     // The durable pending field also recovers jobs after a process restart.
     this.unsubscribe = this.db.collectionGroup("contexts").where("titleState", "==", "pending")
-      .onSnapshot(run, () => {});
+      .onSnapshot(run, () => diagnostic("ai-title", "subscription-failed"));
     run();
   }
   async close() { if (this.timer) clearInterval(this.timer); this.unsubscribe?.(); await this.running; }
@@ -55,6 +57,11 @@ export class TitleWorker {
     }
   }
   async process(ref: DocumentReference) {
+    const uid = ref.path.split("/")[1]!;
+    if (!(await this.settings?.get(uid))?.aiTitlesEnabled) {
+      await this.db.runTransaction(async tx => { const doc = await tx.get(ref); if (doc.data()?.titleState === "pending") tx.update(ref, { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() }); });
+      return;
+    }
     const lease = randomUUID();
     const job = await this.db.runTransaction(async tx => {
       const doc = await tx.get(ref); const data = doc.data();
@@ -68,8 +75,11 @@ export class TitleWorker {
     });
     if (!job) return;
     let title: string | undefined; let retry = false;
+    if (!(await this.settings?.get(uid))?.aiTitlesEnabled) {
+      await this.db.runTransaction(async tx => { const current = (await tx.get(ref)).data(); if (current?.titleState === "pending" && current.titleLease === lease) tx.update(ref, { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() }); }); return;
+    }
     try { title = await generateTitle(this.key!, this.model, job.input); }
-    catch (error) { retry = error instanceof TitleFailure && error.retryable; }
+    catch (error) { retry = error instanceof TitleFailure && error.retryable; diagnostic("ai-title", retry ? "provider-retry" : "provider-rejected"); }
     await this.db.runTransaction(async tx => {
       const doc = await tx.get(ref); const data = doc.data();
       if (!data || data.deleting || data.titleState !== "pending" || data.titleLease !== lease) return;

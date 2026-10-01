@@ -273,6 +273,32 @@ describe("authenticated API", () => {
   });
 });
 
+describe("review security boundaries", () => {
+  it("R7: blocks current, historical and missing source map URLs before SPA fallback", async () => {
+    const { app } = server();
+    for (const url of ["/assets/index.js.map", "/old.js.map?cache=bypass", "/test.MAP"]) {
+      const response = await app.inject({ url }); expect(response.statusCode).toBe(404); expect(response.headers["content-type"]).toContain("application/json");
+    }
+  });
+  it("R9: settings use the authenticated owner and reject agent tokens or UID overrides", async () => {
+    const settings = { get: vi.fn(async () => ({ aiTitlesEnabled: false })), set: vi.fn(async (_uid: string, value: { aiTitlesEnabled: boolean }) => value) };
+    const app = buildServer({ publicConfig, verifier, backend: backend(), settings }); openServers.push(app);
+    expect((await app.inject({ url: "/api/settings", headers: { authorization: "Bearer agent" } })).statusCode).toBe(401);
+    const headers = { authorization: "Bearer valid-token" };
+    const get = await app.inject({ url: "/api/settings", headers }); expect(get.json()).toEqual({ aiTitlesEnabled: false }); expect(settings.get).toHaveBeenCalledWith("derived_uid");
+    expect((await app.inject({ method: "PATCH", url: "/api/settings", headers, payload: { aiTitlesEnabled: true, uid: "victim" } })).statusCode).toBe(400);
+    expect((await app.inject({ method: "PATCH", url: "/api/settings", headers, payload: { aiTitlesEnabled: true } })).statusCode).toBe(200);
+    expect(settings.set).toHaveBeenCalledWith("derived_uid", { aiTitlesEnabled: true });
+  });
+  it("R2: untrusted remote clients cannot bypass the IP limit with forwarded headers", async () => {
+    const { app } = server();
+    for (let i=0; i<65; i++) {
+      const response = await app.inject({ url: "/api/unknown", remoteAddress: "192.0.2.1", headers: { "x-forwarded-for": `198.51.100.${i+1}` } });
+      expect(response.statusCode).toBe(i < 60 ? 404 : 429);
+    }
+  });
+});
+
 describe('Android CORS', () => {
   it('answers allowed preflight without bypassing actual bearer validation', async () => {
     const { app } = server();
@@ -289,12 +315,40 @@ describe('Android CORS', () => {
     const { app } = server();
     for(const headers of [
       {origin:'https://localhost.evil.test','access-control-request-method':'POST'},
-      {origin:'https://localhost','access-control-request-method':'PATCH'},
+      {origin:'https://localhost','access-control-request-method':'PUT'},
       {origin:'https://localhost','access-control-request-method':'POST','access-control-request-headers':'x-secret'},
     ]) {
       const response=await app.inject({method:'OPTIONS',url:'/api/session',headers});
       expect(response.statusCode).toBe(403);
       expect(response.headers['access-control-allow-origin']).toBeUndefined();
     }
+  });
+});
+
+describe("Android deployed API integration", () => {
+  it("permits native settings PATCH while retaining bearer and owner validation", async () => {
+    const settings = { get: vi.fn(async () => ({ aiTitlesEnabled: false })), set: vi.fn(async (_uid: string, value: { aiTitlesEnabled: boolean }) => value) };
+    const app = buildServer({ publicConfig, verifier, backend: backend(), settings }); openServers.push(app);
+    const headers = { origin: "https://localhost", "access-control-request-method": "PATCH", "access-control-request-headers": "authorization,content-type" };
+    const preflight = await app.inject({ method: "OPTIONS", url: "/api/settings", headers });
+    expect(preflight.statusCode).toBe(204);
+    expect(preflight.headers["access-control-allow-methods"]).toContain("PATCH");
+    const unauthorized = await app.inject({ method: "PATCH", url: "/api/settings", headers: { origin: "https://localhost" }, payload: { aiTitlesEnabled: true } });
+    expect(unauthorized.statusCode).toBe(401);
+    const actual = await app.inject({ method: "PATCH", url: "/api/settings", headers: { origin: "https://localhost", authorization: "Bearer valid-token" }, payload: { aiTitlesEnabled: true } });
+    expect(actual.statusCode).toBe(200);
+    expect(actual.headers["access-control-allow-origin"]).toBe("https://localhost");
+    expect(settings.set).toHaveBeenCalledWith("derived_uid", { aiTitlesEnabled: true });
+  });
+
+  it("exposes rate-limit backoff to native clients and still limits preflights", async () => {
+    const { app } = server();
+    const headers = { origin: "https://localhost", "access-control-request-method": "POST" };
+    for (let i = 0; i < 60; i++) expect((await app.inject({ method: "OPTIONS", url: "/api/session", headers })).statusCode).toBe(204);
+    const response = await app.inject({ url: "/api/unknown", headers: { origin: "https://localhost" } });
+    expect(response.statusCode).toBe(429);
+    expect(response.headers["retry-after"]).toBeDefined();
+    expect(response.headers["access-control-allow-origin"]).toBe("https://localhost");
+    expect(response.headers["access-control-expose-headers"]).toBe("Retry-After");
   });
 });

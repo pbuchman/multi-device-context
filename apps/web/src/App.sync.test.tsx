@@ -187,3 +187,40 @@ it("backgrounding while durable cleanup is pending cancels publishing recovery",
  render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
  act(()=>activity(false));await act(async()=>removal.resolve());expect(t.value.resume).not.toHaveBeenCalled();
 });
+
+it("merged per-item tombstones wait for durable cleanup before Android publishing recovers", async () => {
+ const t=services(); const removal=deferred<void>(); const itemId="00000000-0000-4000-8000-000000000003";
+ t.value.platformKind="android"; t.value.activity={initialActive:true,subscribe:()=>()=>{}};
+ t.value.cloud.refreshContexts=async()=>snap(); t.value.cloud.refreshDeletedContexts=async()=>[];
+ const refreshDeletedItems=vi.fn(async()=>[{contextId:alpha,itemId}]);
+ Object.assign(t.value.cloud,{refreshDeletedItems});
+ t.value.outbox.removeItem=vi.fn(()=>removal.promise); t.value.resume=vi.fn();
+ render(createElement(ContextWorkspace,{services:t.value})); await act(async()=>{});
+ expect(refreshDeletedItems).toHaveBeenCalledTimes(1);
+ expect(t.value.outbox.removeItem).toHaveBeenCalledWith(alpha,itemId);
+ expect(t.value.resume).not.toHaveBeenCalled();
+ await act(async()=>removal.resolve()); expect(t.value.resume).toHaveBeenCalledTimes(1);
+});
+
+it("merged item deletion listener joins cleanup barrier and stops while Android is backgrounded", async () => {
+ const t=services(); const read=deferred<CloudSnapshot<ContextRecord>>(); const removal=deferred<void>();
+ const itemId="00000000-0000-4000-8000-000000000003"; let emit!:(items:{contextId:string;itemId:string}[])=>void; let activity!:(active:boolean)=>void;
+ const unsubscribe=vi.fn(); t.value.cloud.subscribeDeletedItems=listener=>{emit=listener;return unsubscribe;};
+ t.value.platformKind="android";t.value.activity={initialActive:true,subscribe:listener=>{activity=listener;return ()=>{};}};
+ t.value.cloud.refreshContexts=()=>read.promise;t.value.cloud.refreshDeletedContexts=async()=>[];
+ Object.assign(t.value.cloud,{refreshDeletedItems:async()=>[]});
+ t.value.outbox.removeItem=vi.fn(()=>removal.promise);t.value.resume=vi.fn();
+ render(createElement(ContextWorkspace,{services:t.value})); await act(async()=>{});
+ act(()=>emit([{contextId:alpha,itemId}]));await act(async()=>read.resolve(snap()));
+ expect(t.value.resume).not.toHaveBeenCalled();
+ act(()=>activity(false)); expect(unsubscribe).toHaveBeenCalledTimes(1);
+ await act(async()=>removal.resolve()); expect(t.value.resume).not.toHaveBeenCalled();
+});
+
+it("a failed merged item tombstone refresh blocks publishing and the Synced label", async () => {
+ const t=services();t.value.platformKind="android";t.value.activity={initialActive:true,subscribe:()=>()=>{}};
+ t.value.cloud.refreshContexts=async()=>snap();t.value.cloud.refreshDeletedContexts=async()=>[];
+ Object.assign(t.value.cloud,{refreshDeletedItems:async()=>{throw new Error("offline");}});t.value.resume=vi.fn();
+ render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>{});
+ expect(t.value.resume).not.toHaveBeenCalled();expect(screen.queryAllByText("Synced")).toHaveLength(0);
+});

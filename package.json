@@ -25,5 +25,14 @@
   },
   "dependencies": {
     "pm2": "7.0.4"
+  },
+  "license": "MIT",
+  "pnpm": {
+    "overrides": {
+      "js-yaml@>=4.0.0 <4.3.2": "4.3.2",
+      "@grpc/grpc-js@<1.13.6": "1.14.5",
+      "gaxios>uuid": "11.1.1",
+      "firebase-tools>@google-cloud/pubsub": "6.1.0"
+    }
   }
 }

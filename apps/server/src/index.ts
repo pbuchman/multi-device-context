@@ -1,3 +1,4 @@
+import { AccountSettings } from "./settings.js";
 import { pathToFileURL } from "node:url";
 
 import { applicationDefault, deleteApp, initializeApp } from "firebase-admin/app";
@@ -26,14 +27,16 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
     auth: getAuth(adminApp),
     dispose: () => deleteApp(adminApp),
   });
+  const settings = new AccountSettings(getFirestore(adminApp), env.MDC_AI_EXISTING_OWNER_UID);
   const server = buildServer({
+    settings,
     publicConfig: config.publicConfig,
     verifier: createAuthVerifier(config.publicConfig),
     backend,
     webDist: config.webDist,
     agents: new AgentStore(getFirestore(adminApp), getStorage(adminApp).bucket(), backend),
   });
-  const titles = new TitleWorker(getFirestore(adminApp), env.MDC_OPENROUTER_API_KEY, env.MDC_TITLE_MODEL);
+  const titles = new TitleWorker(getFirestore(adminApp), env.MDC_OPENROUTER_API_KEY, env.MDC_TITLE_MODEL, settings);
   server.addHook("preClose", async () => { await titles.close(); });
   try {
     await backend.startCleanup();

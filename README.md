@@ -44,3 +44,7 @@ pnpm --filter @mdc/server build
 Real rules tests use dedicated local Firebase emulators and Java 21+:
 `pnpm test:rules`. Native packaging and installed-app checks run on actual Windows
 x64 and macOS arm64 CI runners; Linux source tests do not replace those checks.
+
+## Self-hosting and data handling
+
+See [standalone setup](docs/self-hosting.md), [privacy/data flow](docs/privacy.md), [security reporting](SECURITY.md), [changelog](CHANGELOG.md) and [MIT license](LICENSE). Source publication does not grant access to the hosted personal instance.

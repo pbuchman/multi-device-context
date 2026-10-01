@@ -85,3 +85,9 @@ replay from resurrecting data; the owner's clients can read context markers to
 purge local drafts/outboxes. Firestore's unavoidable one-hour technical versions
 remain despite PITR being disabled. Storage soft delete is disabled. External
 copies saved by users or agents are independent files.
+
+## v0.3 limits and AI preference
+
+Requests are bounded before authentication (60/minute per IP, 600/minute globally) and after authentication (120/minute per owner across keys). HTTP 429 includes Retry-After; stop/pause until that interval expires. Key creation is limited to 5/minute and 10 active keys per owner. Existing excess keys are not revoked automatically.
+
+Google-only GET/PATCH `/api/settings` manages `{ "aiTitlesEnabled": boolean }`; unknown fields are rejected. Agent keys cannot change this preference. New accounts default off; the explicitly opted-in existing owner retains AI. Contexts created by agents use the same preference. See [data handling](privacy.md).

@@ -1,3 +1,5 @@
+> Historical design/plan. Current behavior is documented in `docs/privacy.md`, `docs/agent-api.md` and `CHANGELOG.md`; later revisions supersede conflicting requirements here.
+
 # Installable context sharing application
 
 ## Product and deployment

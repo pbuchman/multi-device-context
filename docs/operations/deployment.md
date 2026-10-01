@@ -240,3 +240,28 @@ delete via an agent key, verify isolation and revocation, observe automatic titl
 updates and bidirectional UI selection, then remove all synthetic content and
 keys. Check actual installed artifacts via the native workflow. An older native
 v0.1 client can still load the new UI; native reopen/link behavior requires v0.2.
+
+## v0.3 review remediation rollout
+
+Deploy new rules (owner-readable item markers) and ready indexes before new web
+clients. Set the existing opted-in owner's settings explicitly before starting
+the title worker; new/missing settings remain off. An optional private
+`MDC_AI_EXISTING_OWNER_UID` preserves that one account's default, never all users.
+Existing explicit preferences take precedence. Runtime package schema stays v1.
+
+Render/install the updated app Caddy fragment: only the local tunnel connector's
+CF-Connecting-IP is forwarded as client IP; other traffic uses its socket address.
+Verify the fragment with `caddy validate` and keep unrelated sites intact.
+The readiness worker samples dependencies every 30 seconds; stale (>45 seconds)
+or failed status returns 503 without cloud reads triggered by callers.
+
+Tell existing clients to reconnect and close older tabs for local migration.
+Do not roll back to a client that recreates persistent history after migration;
+prefer a forward fix. Server/rule rollback must retain owner item-marker reads
+and existing settings documents while v0.3 clients exist. Never restore context
+content as part of deployment recovery. Record code/config revisions and hashes.
+
+Verify known old `.map` URLs return 404 through both loopback and the CDN. Only
+purge app-specific cached map URLs if the CDN still serves them. Secrets/AI
+provider inputs do not belong in diagnostics. Run the full acceptance matrix in
+the remediation report before claiming all checkpoints complete.

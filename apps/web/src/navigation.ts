@@ -1,54 +1,68 @@
-import { contextIdFromPath, IdSchema, type Id } from "@mdc/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { contextIdFromPath, type Id } from "@mdc/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ContextRecord } from "./model.js";
+import { DraftStore, emptyDraft, type Draft } from "./drafts.js";
+import { subscribeLocal } from "./local-db.js";
 
-type Draft = { text: string; code: boolean; local: boolean; title: string; createdAt: number };
-const empty = (): Draft => ({ text: "", code: false, local: true, title: "New context", createdAt: Date.now() });
 export function useNavigation(namespace: string, initialId?: Id) {
-  const key = `mdc-drafts:${namespace}`;
-  const initial = useRef<{ id: Id; drafts: Record<string, Draft> } | undefined>(undefined);
-  if (!initial.current) {
-    let drafts: Record<string, Draft> = {};
-    try {
-      const raw = JSON.parse(localStorage.getItem(key) ?? "{}");
-      for (const [id, value] of Object.entries(raw)) {
-        const d = value as Draft;
-        if (IdSchema.safeParse(id).success && typeof d?.text === "string" && typeof d.code === "boolean" && typeof d.local === "boolean" && typeof d.title === "string" && typeof d.createdAt === "number") drafts[id] = d;
-      }
-    } catch { /* unavailable local storage */ }
+  const store = useMemo(() => new DraftStore(namespace), [namespace]);
+  const [issue, setIssue] = useState<string>();
+  const [state, setState] = useState(() => {
     const id = initialId ?? contextIdFromPath(location.pathname) ?? crypto.randomUUID();
-    drafts[id] ??= { ...empty(), local: !initialId && !contextIdFromPath(location.pathname) };
-    initial.current = { id, drafts };
-  }
-  const [state, setState] = useState(initial.current);
+    return { id, drafts: { [id]: { ...emptyDraft(), local: !initialId && !contextIdFromPath(location.pathname) } } as Record<string, Draft> };
+  });
   const latest = useRef(state); latest.current = state;
-  const update = useCallback((fn: (value: typeof state) => typeof state) => {
+  const chain = useRef<Promise<void>>(Promise.resolve());
+  const busy = useRef(0);
+  const failed = useRef<(() => Promise<unknown>)[]>([]);
+  const initialized = useRef(false);
+  const update = useCallback((fn: (s: typeof state) => typeof state) => {
     const next = fn(latest.current); latest.current = next; setState(next);
-    try { localStorage.setItem(key, JSON.stringify(next.drafts)); } catch { /* quota must not block navigation */ }
-  }, [key]);
+  }, []);
+  const reload = useCallback(async () => {
+    const drafts = await store.list();
+    const removed = await store.isRemoved(latest.current.id);
+    if (!busy.current && removed) {
+      const id = crypto.randomUUID(); update(() => ({ id, drafts: { ...drafts, [id]: emptyDraft() } })); history.replaceState({}, "", "/"); return;
+    }
+    if (!busy.current) update(s => ({ ...s, drafts: { ...(s.drafts[s.id] && !drafts[s.id] ? { [s.id]: s.drafts[s.id]! } : {}), ...drafts } }));
+  }, [store, update]);
+  const queue = useCallback((operation: () => Promise<unknown>) => {
+    busy.current++;
+    chain.current = chain.current.then(operation).then(() => {}).catch(() => { failed.current.push(operation); setIssue("Your draft could not be saved locally. Keep this tab open and retry."); }).finally(async () => {
+      busy.current--; if (!busy.current) await reload().catch(() => setIssue("Could not restore local drafts"));
+    });
+  }, [reload]);
+  useEffect(() => {
+    if (!initialized.current) { initialized.current = true; queue(async () => { await store.migrate(); }); }
+    return subscribeLocal(() => { if (!busy.current) void reload().catch(() => setIssue("Could not synchronize local drafts")); });
+  }, [store, queue, reload]);
+  const persist = useCallback((id: string, draft: Draft) => queue(async () => {
+    if (await store.save(id, draft)) setIssue("Concurrent changes were preserved in a Recovered draft.");
+  }), [store, queue]);
   const select = useCallback((id?: Id, replace = false) => {
     const nextId = id ?? crypto.randomUUID();
-    update(s => ({ id: nextId, drafts: { ...s.drafts, [nextId]: s.drafts[nextId] ?? { ...empty(), local: !id } } }));
-    const local = latest.current.drafts[nextId]?.local;
-    const path = local ? "/" : `/contexts/${nextId}`;
+    update(s => ({ id: nextId, drafts: { ...s.drafts, [nextId]: s.drafts[nextId] ?? { ...emptyDraft(), local: !id } } }));
+    const path = latest.current.drafts[nextId]?.local ? "/" : `/contexts/${nextId}`;
     if (location.pathname !== path) history[replace ? "replaceState" : "pushState"]({}, "", path);
   }, [update]);
-  const patch = useCallback((value: Partial<Draft>) => update(s => ({ ...s, drafts: { ...s.drafts, [s.id]: { ...(s.drafts[s.id] ?? empty()), ...value } } })), [update]);
-  const commit = useCallback((id: string, sentText?: string) => update(s => {
-    const draft = s.drafts[id];
-    if (!draft) return s;
-    return { ...s, drafts: { ...s.drafts, [id]: { ...draft, local: false, text: sentText !== undefined && draft.text === sentText ? "" : draft.text } } };
-  }), [update]);
-  const remove = useCallback((ids: string[]) => update(s => {
-    const drafts = { ...s.drafts }; for (const id of ids) delete drafts[id];
-    return { ...s, drafts };
-  }), [update]);
-  useEffect(() => {
-    const pop = () => select(contextIdFromPath(location.pathname), true);
-    window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop);
-  }, [select]);
-  const draft = state.drafts[state.id] ?? { ...empty(), local: false };
+  const patch = useCallback((value: Partial<Draft>) => {
+    const id = latest.current.id;
+    const next = { ...(latest.current.drafts[id] ?? emptyDraft()), ...value };
+    update(s => ({ ...s, drafts: { ...s.drafts, [id]: next } })); persist(id, next);
+  }, [update, persist]);
+  const commit = useCallback((id: string, sentText?: string) => {
+    const draft = latest.current.drafts[id]; if (!draft) return;
+    const next = { ...draft, local: false, text: sentText !== undefined && draft.text === sentText ? "" : draft.text };
+    update(s => ({ ...s, drafts: { ...s.drafts, [id]: next } })); persist(id, next);
+  }, [update, persist]);
+  const remove = useCallback((ids: string[]) => {
+    update(s => ({ ...s, drafts: Object.fromEntries(Object.entries(s.drafts).filter(([id]) => !ids.includes(id))) }));
+    queue(() => store.remove(ids));
+  }, [store, queue, update]);
+  useEffect(() => { const pop = () => select(contextIdFromPath(location.pathname), true); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [select]);
+  const draft = state.drafts[state.id] ?? { ...emptyDraft(), local: false };
   const localContexts: ContextRecord[] = Object.entries(state.drafts).filter(([id, d]) => d.local && (d.text || id === state.id)).map(([id, d]) => ({ id, title: d.title === "New context" && d.text ? "Draft · " + d.text.slice(0, 40) : d.title, createdAt: d.createdAt, updatedAt: d.createdAt, syncState: "pending" }));
-  return { selectedId: state.id, selectedRef: latest, select, patch, remove, commit, text: draft.text, codeMode: draft.code,
-    localContexts, draftContext: localContexts.find(c => c.id === state.id), clear: () => localStorage.removeItem(key) };
+  return { selectedId: state.id, selectedRef: latest, select, patch, remove, commit, text: draft.text, codeMode: draft.code, issue,
+    localContexts, draftContext: localContexts.find(c => c.id === state.id), retry: () => { setIssue(undefined); for (const operation of failed.current.splice(0)) queue(operation); }, clear: async () => { await chain.current; await store.clear(); } };
 }

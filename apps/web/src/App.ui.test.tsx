@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { DraftStore } from "./drafts.js";
 import { ContextWorkspace, sharePartsFromSnapshot, type WorkspaceServices } from "./App.js";
 import type { CloudSnapshot } from "./cloud.js";
 import type { ContextRecord, ItemRecord } from "./model.js";
@@ -44,7 +45,7 @@ function services(initialContexts = contexts) {
       attachmentBytes: vi.fn(async () => new Uint8Array()),
     },
     outbox: {
-      namespace: "project:user",
+      namespace: `project:user:${crypto.randomUUID()}`,
       enqueue: vi.fn(async () => undefined),
       count: vi.fn(async () => 0),
       clear: vi.fn(async () => undefined),
@@ -252,7 +253,8 @@ describe("ContextWorkspace", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open settings" })).toBeTruthy();
     expect(screen.queryByText("Launch at login")).toBeNull();
-    expect(screen.getByText("Pastes share immediately. For a typed note, tap Send.")).toBeTruthy();
+    expect(screen.getByText(/Pastes share immediately\. For a typed note, tap Send\./)).toBeTruthy();
+    expect(screen.getByText(/OpenRouter may receive the first text or filename/)).toBeTruthy();
     expect(screen.queryByText(/press Enter/)).toBeNull();
   });
 
@@ -453,7 +455,7 @@ describe("ContextWorkspace", () => {
     fireEvent.change(screen.getByLabelText("Paste to share instantly, or type a note"), { target: { value: "Remove this draft too" } });
     act(() => deleted?.([alpha]));
     expect(screen.getByRole("heading", { name: "New context" })).toBeTruthy();
-    expect(localStorage.getItem("mdc-drafts:project:user")).not.toContain("Remove this draft too");
+    await waitFor(async () => expect(JSON.stringify(await new DraftStore(test.value.outbox.namespace).list())).not.toContain("Remove this draft too"));
     expect(test.value.outbox.removeContext).toHaveBeenCalledWith(alpha);
   });
 
@@ -469,4 +471,26 @@ describe("ContextWorkspace", () => {
     expect(test.value.cloud.renameContext).not.toHaveBeenCalledWith(incoming.id, expect.anything());
   });
 
+});
+
+
+it("R4: Retry repeats the failed deletion instead of only draining shares", async () => {
+  const test = services(); vi.spyOn(window, "confirm").mockReturnValue(true);
+  vi.mocked(test.value.cloud.deleteContext).mockRejectedValueOnce(new TypeError("offline"));
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Delete context Alpha" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("not confirmed");
+  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(test.value.cloud.deleteContext).toHaveBeenCalledTimes(2));
+  vi.restoreAllMocks();
+});
+it("R5: removing an optimistic queued message removes the displayed content", async () => {
+  const test = services([]); test.value.outbox.removeItem = vi.fn(async () => {});
+  render(<ContextWorkspace services={test.value} />);
+  fireEvent.paste(screen.getByLabelText("Paste to share instantly, or type a note"), { clipboardData: { files: [], getData: () => "Queued synthetic text" } });
+  await waitFor(() => expect(test.value.outbox.enqueue).toHaveBeenCalledTimes(1));
+  const record = vi.mocked(test.value.outbox.enqueue).mock.calls[0]![0];
+  await userEvent.click(screen.getByRole("button", { name: "Delete item" }));
+  await waitFor(() => expect(screen.queryByText("Queued synthetic text")).toBeNull());
+  expect(test.value.outbox.removeItem).toHaveBeenCalledWith(record.contextId, record.itemId);
 });

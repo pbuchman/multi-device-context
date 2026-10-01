@@ -34,7 +34,15 @@ export class AgentStore {
     const id = randomUUID();
     const key = `mdc_${id}_${randomBytes(32).toString("base64url")}`;
     const createdAt = Date.now();
-    await this.db.doc(`agentKeys/${id}`).create({ uid, name, digest: hash(key).toString("hex"), createdAt, lastUsedAt: null });
+    await this.db.runTransaction(async tx => {
+      // Serialize concurrent creates for one owner, including the query of legacy keys.
+      const guard = this.db.doc(`internalAgentKeyOwners/${uid}`);
+      await tx.get(guard);
+      const existing = await tx.get(this.db.collection("agentKeys").where("uid", "==", uid).limit(10));
+      if (existing.size >= 10) throw Object.assign(new Error("Agent key limit reached"), { statusCode: 409 });
+      tx.set(guard, { updatedAt: FieldValue.serverTimestamp() });
+      tx.create(this.db.doc(`agentKeys/${id}`), { uid, name, digest: hash(key).toString("hex"), createdAt, lastUsedAt: null });
+    });
     return { id, name, createdAt, lastUsedAt: null, key };
   }
   async listKeys(uid: string): Promise<AgentKeyInfo[]> {
