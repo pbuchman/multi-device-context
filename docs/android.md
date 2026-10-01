@@ -143,6 +143,12 @@ personal-device acceptance.
 
 ## Cloud changes required before phone acceptance
 
+Home Dev status, 2026-10-01: the reviewed application revision `3b83a92` is
+deployed. The Android Auth0 callback, Firebase localhost domain/referrer, bucket
+CORS and server CORS below are applied and verified. Both Terraform stacks have
+no remaining changes. The signed private APK is ready; installed-phone acceptance
+still requires connecting the authorized phone.
+
 The source changes alone do not configure live infrastructure. Follow the
 [deployment procedure](operations/deployment.md) and
 [infrastructure guide](../infra/terraform/README.md) using the existing private
