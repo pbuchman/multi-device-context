@@ -244,7 +244,7 @@ it("serializes native foreground and event reads while preserving an existing dr
  t.value.drainNativeShares=vi.fn().mockImplementationOnce(()=>first.promise).mockResolvedValue(beta);
  render(createElement(ContextWorkspace,{services:t.value}));await act(async()=>activity(true));
  await userEvent.click(screen.getByRole("button",{name:"Alpha"}));
- const composer=screen.getByLabelText("Paste to share instantly, or type a note");
+ const composer=screen.getByLabelText("Message to yourself");
  await userEvent.type(composer,"Keep my draft");
  act(()=>{event();event();});
  expect(t.value.drainNativeShares).toHaveBeenCalledTimes(1);
@@ -350,7 +350,7 @@ it("a successful refresh preserves an unrelated native intake error", async () =
 it("consumes native Back only while Settings is open and preserves the draft", async () => {
  const t=services();t.value.platformKind="android";
  render(createElement(ContextWorkspace,{services:t.value}));
- const composer=screen.getByLabelText("Paste to share instantly, or type a note");await userEvent.type(composer,"Keep this draft");
+ const composer=screen.getByLabelText("Message to yourself");await userEvent.type(composer,"Keep this draft");
  const plain=new Event("mdc:back",{cancelable:true});act(()=>window.dispatchEvent(plain));expect(plain.defaultPrevented).toBe(false);
  await userEvent.click(screen.getByRole("button",{name:"Open settings"}));
  const open=new Event("mdc:back",{cancelable:true});act(()=>window.dispatchEvent(open));

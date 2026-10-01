@@ -17,7 +17,8 @@ export type ActiveSession = {
   uid: string;
   viewer: Viewer;
   accessToken(): Promise<string>;
-  signOut(): Promise<void>;
+  /** Local auth invalidation precedes account cleanup; browser navigation is last. */
+  signOut(cleanup?: () => Promise<void>, reviewedNativeIds?: readonly string[]): Promise<void>;
   platform: PlatformAdapter;
   bridge?: DesktopBridge;
 };
@@ -95,14 +96,21 @@ function viewerFromProfile(uid: string, profile: User | undefined, fallbackEmail
   return email ? { uid, name, email } : { uid, name };
 }
 
-async function disposeFirebase(app: FirebaseApp): Promise<void> {
-  const auth = getAuth(app);
-  await firebaseSignOut(auth);
-  const firestore = getFirestore(app);
-  await terminate(firestore);
-  try { await clearIndexedDbPersistence(firestore); } catch { /* another tab may own persistence */ }
-  await deleteApp(app);
+function firebaseDisposer(app: FirebaseApp): () => Promise<void> {
+  let signedOut = false, terminated = false, cleared = false, deleted = false;
+  let firestore: ReturnType<typeof getFirestore> | undefined;
+  return async () => {
+    if (!signedOut) { await firebaseSignOut(getAuth(app)); signedOut = true; }
+    firestore ??= getFirestore(app);
+    if (!terminated) { await terminate(firestore); terminated = true; }
+    if (!cleared) {
+      try { await clearIndexedDbPersistence(firestore); } catch { /* another tab may own persistence */ }
+      cleared = true;
+    }
+    if (!deleted) { await deleteApp(app); deleted = true; }
+  };
 }
+const disposeFirebase = (app: FirebaseApp): Promise<void> => firebaseDisposer(app)();
 
 export async function signOutSession(
   beforeDispose: (() => Promise<void>) | undefined,
@@ -123,9 +131,11 @@ export class SessionManager {
   #session: ActiveSession | undefined;
   #generation = 0;
   #disposed = false;
+  #signOutActive = false;
 
   constructor(private readonly fetcher: Fetcher = fetch, private readonly options: RuntimeLoadOptions & {
     platformFactory?: () => Promise<PlatformAdapter>;
+    navigateAfterSignOut?: (url: string) => void;
   } = {}) {}
 
   prepare(): Promise<RuntimeConfig> {
@@ -156,7 +166,9 @@ export class SessionManager {
   }
 
   async restore(): Promise<ActiveSession | undefined> {
+    if (this.#signOutActive) throw new Error("Finish signing out before restoring a session");
     await this.prepare();
+    if (this.#signOutActive) throw new Error("Finish signing out before restoring a session");
     if (this.#session) return this.#session;
     if (this.#platform!.native) {
       let token: string;
@@ -169,7 +181,9 @@ export class SessionManager {
   }
 
   async login(): Promise<ActiveSession | undefined> {
+    if (this.#signOutActive) throw new Error("Finish signing out before signing in");
     const config = await this.prepare();
+    if (this.#signOutActive) throw new Error("Finish signing out before signing in");
     if (this.#session) return this.#session;
     if (this.#platform!.native) return this.#establish(await this.#platform!.native.getAccessToken(true));
     if (!(await this.#auth0!.isAuthenticated())) {
@@ -180,6 +194,7 @@ export class SessionManager {
   }
 
   #establish(accessToken: string): Promise<ActiveSession> {
+    if (this.#signOutActive) return Promise.reject(new Error("Finish signing out before restoring a session"));
     if (this.#session) return Promise.resolve(this.#session);
     if (!this.#establishing) {
       const operation = this.#createSession(accessToken);
@@ -212,6 +227,10 @@ export class SessionManager {
       throw error;
     }
     let signingOut: Promise<void> | undefined;
+    let logoutGeneration: number | undefined;
+    let nativeSignedOut = false, browserSignedOut = false, cleanupDone = false, logoutDone = false;
+    let logoutUrl: string | undefined;
+    const disposeSessionFirebase = firebaseDisposer(firebaseApp);
     const session: ActiveSession = {
       config,
       firebaseApp,
@@ -225,17 +244,37 @@ export class SessionManager {
         current();
         return token;
       },
-      signOut: () => {
+      signOut: (cleanup, reviewedNativeIds = []) => {
         if (signingOut) return signingOut;
-        signingOut = signOutSession(
-          platform.native ? () => platform.native!.signOut() : undefined,
-          async () => {
-            this.#generation++; this.#session = undefined;
-            await disposeFirebase(firebaseApp);
-          },
-          platform.native ? undefined : () => this.#auth0!.logout({ logoutParams: { returnTo: config.appOrigin } }),
-        ).catch(error => { signingOut = undefined; throw error; });
-        return signingOut;
+        if (logoutDone) return Promise.resolve();
+        if (logoutGeneration === undefined) {
+          try { current(); platform.assertCanSignOut?.(); } catch (error) { return Promise.reject(error); }
+          this.#signOutActive = true;
+          logoutGeneration = ++this.#generation;
+          this.#session = undefined;
+        }
+        const logoutCurrent = () => {
+          if (this.#disposed || logoutGeneration !== this.#generation || this.#session) throw new Error("Your session has expired");
+        };
+        const operation = (async () => {
+          logoutCurrent();
+          if (platform.native && !nativeSignedOut) { await platform.native.signOut(reviewedNativeIds); nativeSignedOut = true; }
+          logoutCurrent();
+          await disposeSessionFirebase();
+          logoutCurrent();
+          if (!platform.native && !browserSignedOut) {
+            await this.#auth0!.logout({ logoutParams: { returnTo: config.appOrigin }, openUrl: async url => { logoutUrl = url; } });
+            browserSignedOut = true;
+          }
+          logoutCurrent();
+          if (!cleanupDone) { await cleanup?.(); cleanupDone = true; }
+          logoutCurrent();
+          if (logoutUrl) (this.options.navigateAfterSignOut ?? (url => window.location.assign(url)))(logoutUrl);
+          logoutDone = true; this.#signOutActive = false;
+        })();
+        signingOut = operation;
+        void operation.finally(() => { if (signingOut === operation) signingOut = undefined; }).catch(() => {});
+        return operation;
       },
       ...(platform.kind === "desktop" ? { bridge: platform.native as DesktopBridge } : {}),
     };

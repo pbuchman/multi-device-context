@@ -244,8 +244,10 @@ export class NativeStore {
       delete state.session;
     });
   }
-  async clearAccount(): Promise<void> {
+  async clearAccount(reviewedNativeIds?: readonly string[]): Promise<void> {
     await this.change((state) => {
+      if (reviewedNativeIds && state.pending.some(share => !reviewedNativeIds.includes(share.id)))
+        throw new Error("Incoming shares changed. Review pending shares and confirm sign-out again.");
       delete state.session;
       state.ownerUid = null;
       state.pending = [];

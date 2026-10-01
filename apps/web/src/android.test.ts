@@ -2,6 +2,16 @@ import { expect, it, vi } from "vitest";
 import { createAndroidAdapter, type AndroidDependencies, type MdcNativePlugin } from "./android.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
+it("binds native sign-out to explicit reviewed IDs even if an inbox read completes later", async () => {
+  let resolve!: (value: { requests: [] }) => void;
+  const f = fixture({ getPendingShares: vi.fn(() => new Promise<{ requests: [] }>(done => { resolve = done; })) });
+  const adapter = await createAndroidAdapter(f.dependencies);
+  const pending = adapter.native!.getPendingClipboardShares();
+  const rejected = expect(pending).rejects.toThrow();
+  await adapter.native!.signOut([id]); resolve({ requests: [] }); await rejected;
+  expect(f.plugin.signOut).toHaveBeenCalledWith({ reviewedNativeIds: [id] });
+  adapter.dispose();
+});
 function fixture(overrides: Partial<MdcNativePlugin> = {}) {
   const handles: Array<{ remove: ReturnType<typeof vi.fn> }> = [];
   const callbacks = new Map<string, (event: any) => void>();

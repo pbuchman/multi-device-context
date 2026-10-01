@@ -81,13 +81,13 @@ describe("ContextWorkspace", () => {
     test.value.cloud.refreshItems = vi.fn(async () => ({ records: [], fromCache: false, hasPendingWrites: false }));
     render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    await userEvent.type(screen.getByLabelText("Paste to share instantly, or type a note"), "keep me");
+    await userEvent.type(screen.getByLabelText("Message to yourself"), "keep me");
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(test.value.cloud.refreshItems).toHaveBeenCalledWith(alpha));
     expect(test.value.cloud.refreshContexts).toHaveBeenCalledTimes(1);
     expect(test.value.cloud.refreshDeletedContexts).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("heading", { name: "Alpha" })).toBeTruthy();
-    expect((screen.getByLabelText("Paste to share instantly, or type a note") as HTMLTextAreaElement).value).toBe("keep me");
+    expect((screen.getByLabelText("Message to yourself") as HTMLTextAreaElement).value).toBe("keep me");
   });
 
   it("invokes refresh methods with their cloud receiver", async () => {
@@ -249,12 +249,11 @@ describe("ContextWorkspace", () => {
     test.value.readClipboard = vi.fn(async () => ({ text: "native paste", files: [] }));
     test.value.shareFile = vi.fn(async () => true);
     render(<ContextWorkspace services={test.value} />);
-    expect(screen.getByRole("button", { name: "Paste" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Paste and send" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open settings" })).toBeTruthy();
     expect(screen.queryByText("Launch at login")).toBeNull();
-    expect(screen.getByText(/Pastes share immediately\. For a typed note, tap Send\./)).toBeTruthy();
-    expect(screen.getByText(/OpenRouter may receive the first text or filename/)).toBeTruthy();
+    expect(screen.getByText("Chat with yourself · Your devices")).toBeTruthy();
     expect(screen.queryByText(/press Enter/)).toBeNull();
   });
 
@@ -262,14 +261,15 @@ describe("ContextWorkspace", () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    await userEvent.click(screen.getByRole("button", { name: "New context" }));
-    fireEvent.paste(screen.getByLabelText("Paste to share instantly, or type a note"), {
+    await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+    fireEvent.paste(screen.getByLabelText("Message to yourself"), {
       clipboardData: { files: [], getData: () => "first share" },
     });
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(test.value.drain).toHaveBeenCalled());
     const draft = vi.mocked(test.value.outbox.enqueue).mock.calls[0]![0];
     expect(draft.createsContext).toBe(true);
-    expect(within(screen.getByLabelText("Shared items")).getByText("first share")).toBeTruthy();
+    expect(within(screen.getByLabelText("Messages to yourself")).getByText("first share")).toBeTruthy();
     expect(test.items.has(draft.contextId)).toBe(false);
 
     const pending: ContextRecord = { id: draft.contextId, title: draft.title, createdAt: 30, updatedAt: 30, syncState: "pending" };
@@ -282,7 +282,7 @@ describe("ContextWorkspace", () => {
       records: [{ id: draft.itemId, contextId: draft.contextId, content: draft.content, device: draft.device, createdAt: 30, ready: true, syncState: "synced" }],
       fromCache: false, hasPendingWrites: false,
     }));
-    expect(within(screen.getByLabelText("Shared items")).getAllByText("first share")).toHaveLength(1);
+    expect(within(screen.getByLabelText("Messages to yourself")).getAllByText("first share")).toHaveLength(1);
     expect(screen.queryByRole("alert")).toBeNull();
 
     const subscriptions = vi.mocked(test.value.cloud.subscribeItems).mock.calls.length;
@@ -319,10 +319,11 @@ describe("ContextWorkspace", () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    const composer = await screen.findByLabelText("Paste to share instantly, or type a note");
-    await userEvent.click(screen.getByRole("button", { name: "Share as code" }));
+    const composer = await screen.findByLabelText("Message to yourself");
+    await userEvent.click(screen.getByRole("button", { name: "Add files or code" }));
+    await userEvent.click(screen.getByRole("button", { name: "Code mode" }));
     fireEvent.change(composer, { target: { value: "  const x = 1;\n" } });
-    fireEvent.keyDown(composer, { key: "Enter", shiftKey: false, isComposing: false });
+    fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true, shiftKey: false, isComposing: false });
 
     await waitFor(() => expect(test.value.outbox.enqueue).toHaveBeenCalledTimes(1));
     expect(test.value.outbox.enqueue).toHaveBeenCalledWith(expect.objectContaining({
@@ -333,12 +334,13 @@ describe("ContextWorkspace", () => {
     expect(test.value.drain).toHaveBeenCalled();
   });
 
-  it("publishes pasted text immediately and updates to existing contexts never change selection or clipboard", async () => {
+  it("explicitly sends pasted text and updates to existing contexts never change selection or clipboard", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    const composer = await screen.findByLabelText("Paste to share instantly, or type a note");
+    const composer = await screen.findByLabelText("Message to yourself");
     fireEvent.paste(composer, { clipboardData: { files: [], getData: () => "pasted exactly" } });
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(test.value.outbox.enqueue).toHaveBeenCalled());
 
     test.emitContexts([
@@ -353,7 +355,7 @@ describe("ContextWorkspace", () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    const search = await screen.findByLabelText("Search contexts");
+    const search = await screen.findByLabelText("Search chat titles");
     await userEvent.type(search, "Beta");
     expect(screen.queryByRole("button", { name: /Alpha/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Beta" })).toBeTruthy();
@@ -372,8 +374,9 @@ describe("ContextWorkspace", () => {
     test.value.readClipboard = readClipboard;
     render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    const composer = await screen.findByLabelText("Paste to share instantly, or type a note");
+    const composer = await screen.findByLabelText("Message to yourself");
     fireEvent.paste(composer, { clipboardData: { files: [], getData: () => "file:///ignored.txt" } });
+    await userEvent.click(await screen.findByRole("button", { name: "Send files" }));
     await waitFor(() => expect(test.value.outbox.enqueue).toHaveBeenCalled());
     expect(readClipboard).toHaveBeenCalledTimes(1);
     expect(test.value.outbox.enqueue).toHaveBeenCalledWith(expect.objectContaining({
@@ -417,17 +420,18 @@ describe("ContextWorkspace", () => {
   it("opens a new context by default and preserves a draft across an immediate remote switch", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
-    expect(screen.getByRole("heading", { name: "New context" })).toBeTruthy();
-    const composer = screen.getByLabelText("Paste to share instantly, or type a note");
+    expect(screen.getByRole("heading", { name: "New chat" })).toBeTruthy();
+    const composer = screen.getByLabelText("Message to yourself");
     fireEvent.change(composer, { target: { value: "Unsent local work" } });
-    await userEvent.click(screen.getByRole("button", { name: "Share as code" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add files or code" }));
+    await userEvent.click(screen.getByRole("button", { name: "Code mode" }));
     const incoming = { id: "00000000-0000-4000-8000-000000000088", title: "Remote context", createdAt: 30, updatedAt: 30, syncState: "synced" as const, originDeviceId: beta };
     act(() => test.emitContexts([incoming, ...contexts]));
     expect(screen.getByRole("heading", { name: "Remote context" })).toBeTruthy();
     expect((composer as HTMLTextAreaElement).value).toBe("");
     await userEvent.click(screen.getByRole("button", { name: "Draft · Unsent local work" }));
     expect((composer as HTMLTextAreaElement).value).toBe("Unsent local work");
-    expect(screen.getByRole("button", { name: "Share as code" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Add files or code" }).getAttribute("aria-pressed")).toBe("true");
     act(() => test.emitContexts([{ ...incoming, title: "AI title" }, ...contexts]));
     expect((composer as HTMLTextAreaElement).value).toBe("Unsent local work");
     expect(test.value.copyText).not.toHaveBeenCalled();
@@ -452,9 +456,9 @@ describe("ContextWorkspace", () => {
     test.value.outbox.removeContext = vi.fn(async () => {});
     render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    fireEvent.change(screen.getByLabelText("Paste to share instantly, or type a note"), { target: { value: "Remove this draft too" } });
+    fireEvent.change(screen.getByLabelText("Message to yourself"), { target: { value: "Remove this draft too" } });
     act(() => deleted?.([alpha]));
-    expect(screen.getByRole("heading", { name: "New context" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "New chat" })).toBeTruthy();
     await waitFor(async () => expect(JSON.stringify(await new DraftStore(test.value.outbox.namespace).list())).not.toContain("Remove this draft too"));
     expect(test.value.outbox.removeContext).toHaveBeenCalledWith(alpha);
   });
@@ -462,9 +466,9 @@ describe("ContextWorkspace", () => {
   it("does not apply an interrupted rename to an incoming context", async () => {
     const test = services(); render(<ContextWorkspace services={test.value} />);
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
-    await userEvent.click(screen.getByRole("button", { name: "Context options" }));
-    await userEvent.click(screen.getByRole("button", { name: "Rename context" }));
-    fireEvent.change(screen.getByLabelText("Context name"), { target: { value: "My draft rename" } });
+    await userEvent.click(screen.getByRole("button", { name: "Chat options" }));
+    await userEvent.click(screen.getByRole("button", { name: "Rename chat" }));
+    fireEvent.change(screen.getByLabelText("Chat name"), { target: { value: "My draft rename" } });
     const incoming = { id: "00000000-0000-4000-8000-000000000088", title: "Remote", createdAt: 30, updatedAt: 30, syncState: "synced" as const };
     act(() => test.emitContexts([incoming, ...contexts]));
     expect(screen.getByRole("heading", { name: "Remote" })).toBeTruthy();
@@ -478,7 +482,9 @@ it("R4: Retry repeats the failed deletion instead of only draining shares", asyn
   const test = services(); vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.mocked(test.value.cloud.deleteContext).mockRejectedValueOnce(new TypeError("offline"));
   render(<ContextWorkspace services={test.value} />);
-  await userEvent.click(screen.getByRole("button", { name: "Delete context Alpha" }));
+  await userEvent.click(screen.getByRole("button", { name: "Options for Alpha" }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete chat…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
   expect((await screen.findByRole("alert")).textContent).toContain("not confirmed");
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   await waitFor(() => expect(test.value.cloud.deleteContext).toHaveBeenCalledTimes(2));
@@ -487,10 +493,13 @@ it("R4: Retry repeats the failed deletion instead of only draining shares", asyn
 it("R5: removing an optimistic queued message removes the displayed content", async () => {
   const test = services([]); test.value.outbox.removeItem = vi.fn(async () => {});
   render(<ContextWorkspace services={test.value} />);
-  fireEvent.paste(screen.getByLabelText("Paste to share instantly, or type a note"), { clipboardData: { files: [], getData: () => "Queued synthetic text" } });
+  fireEvent.paste(screen.getByLabelText("Message to yourself"), { clipboardData: { files: [], getData: () => "Queued synthetic text" } });
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(test.value.outbox.enqueue).toHaveBeenCalledTimes(1));
   const record = vi.mocked(test.value.outbox.enqueue).mock.calls[0]![0];
-  await userEvent.click(screen.getByRole("button", { name: "Delete item" }));
+  await userEvent.click(screen.getByRole("button", { name: "Message options" }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete message…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete message" }));
   await waitFor(() => expect(screen.queryByText("Queued synthetic text")).toBeNull());
   expect(test.value.outbox.removeItem).toHaveBeenCalledWith(record.contextId, record.itemId);
 });

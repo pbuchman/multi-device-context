@@ -11,8 +11,22 @@ it("keeps browser and desktop adapters independent of Android imports", async ()
   window.contextDesktop = bridge;
   const adapter = await createPlatformAdapter({ mobile: false, loadAndroid });
   expect(adapter.kind).toBe("desktop");
-  expect(adapter.native).toBe(bridge);
+  expect(adapter.native?.signOut).toBeTypeOf("function");
   expect(loadAndroid).not.toHaveBeenCalled();
+});
+it("refuses old desktop sign-out even when its current inbox is empty", async () => {
+  const signOut = vi.fn(async () => {});
+  window.contextDesktop = { version: 1, platform: "linux", signOut } as unknown as DesktopBridge;
+  const adapter = await createPlatformAdapter({ mobile: false });
+  await expect(adapter.native!.signOut([])).rejects.toThrow(/Update this desktop app/);
+  expect(signOut).not.toHaveBeenCalled();
+});
+it("passes the exact reviewed snapshot only to a compatible private desktop implementation", async () => {
+  const signOut = vi.fn(async () => {});
+  window.contextDesktop = { version: 1, platform: "linux", reviewedSignOut: true, signOut } as unknown as DesktopBridge;
+  const adapter = await createPlatformAdapter({ mobile: false });
+  await adapter.native!.signOut(["reviewed"]);
+  expect(signOut).toHaveBeenCalledWith(["reviewed"]);
 });
 it("rejects incompatible desktop bridges and loads Android only for mobile builds", async () => {
   window.contextDesktop = { version: 2 } as unknown as DesktopBridge;

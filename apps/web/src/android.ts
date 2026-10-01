@@ -11,7 +11,7 @@ type NativeRequest = NativeSnapshot & { id: string; capturedAt: number };
 export interface MdcNativePlugin {
   getDevice(): Promise<{ id: string; name: string }>;
   getAccessToken(options: { interactive: boolean }): Promise<{ accessToken: string }>;
-  signOut(): Promise<void>;
+  signOut(options: { reviewedNativeIds: readonly string[] }): Promise<void>;
   readClipboard(): Promise<NativeSnapshot>;
   copyText(options: { text: string }): Promise<void>;
   beginFile(options: { name: string; contentType: string }): Promise<{ id: string }>;
@@ -175,9 +175,9 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
         if (typeof result.accessToken !== "string" || !result.accessToken) throw new Error("Sign in again to continue");
         return result.accessToken;
       },
-      signOut: async () => {
+      signOut: async (reviewedNativeIds = []) => {
         ensureCurrent(); generation++; controller.abort(); controller = new AbortController(); pending = undefined;
-        await plugin.signOut();
+        await plugin.signOut({ reviewedNativeIds });
       },
       readClipboard: async () => { const expected = generation; ensureCurrent(expected); return snapshot(await plugin.readClipboard(), expected); },
       copyText: async text => { ensureCurrent(); validateText(text); await plugin.copyText({ text }); },

@@ -62,7 +62,11 @@ machine; CI registration is not evidence of a user logout/login cycle.
 2. Sign in using the same Google account on both computers. Allow the browser to
    return to Multi Device Context when prompted.
 3. Open or create a context. Paste text, a link, code, a screenshot or copied files.
-   Pasting shares immediately; typed text is shared with Enter.
+   Ordinary text paste edits the draft. Use **Send**, or Enter in desktop text
+   mode, to share. Desktop code mode and Android use Enter for a new line;
+   Ctrl/Cmd+Enter sends in either mode. Pasted files show a confirmation with
+   their captured target chat. **Paste and send** sends the current clipboard
+   immediately while preserving your typed draft.
 4. A newly shared context opens automatically on the other running computer.
    Unsent drafts are preserved. Choose **Copy** or **Save** on an item
    when you need it. Receiving an item never changes the clipboard automatically.
@@ -78,15 +82,20 @@ links to local files, empty files and unsupported application-specific clipboard
 formats produce an explanation. Rich content with a plain-text representation is
 shared as text. Files retain their original bytes.
 
+Below 840 CSS pixels, **Open chats menu** reveals the searchable chat list,
+**New chat**, refresh, and Settings. Wider windows keep that same sidebar open.
+Both refresh controls update chats, messages, and deletions. Message **Copy** and
+**Message options** remain reachable without hovering.
+
 ## Context links, names and agents
 
 Every manual opening starts a fresh context. Unsent drafts remain accessible in
 the sidebar. Existing contexts can be opened by their copied HTTPS link; the
-context menu also offers **Open in desktop app**. Sign-in preserves the target.
+context menu also offers **Open in app** in the browser. Sign-in preserves the target.
 
 Names appear automatically after the first share. Only bounded first text or file
 names/types are sent to the title model, never attachment bytes. Rename a context
-from its menu to choose your own title. Use the × beside a context to delete it
+from its menu to choose your own title. Use **Chat options → Delete chat** to delete it
 permanently after confirmation; there is no trash or restore.
 
 For agent access, open **Settings → Agent access**, create a named key and store
