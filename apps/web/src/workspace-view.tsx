@@ -78,7 +78,7 @@ export function ChatComposer({ text, code, android, nativeClipboard, blocked, se
   return <div className="composer-wrap"><div className={`composer ${code ? "code-mode" : ""}`}>
     {code ? <div className="code-indicator"><span>Code mode</span><button type="button" className="icon-button" aria-label="Turn off code mode" disabled={blocked} onClick={onCodeOff}><WorkspaceIcon name="close" /></button></div> : null}
     <textarea ref={textareaRef} rows={2} value={text} aria-label="Message to yourself" placeholder={code ? "Write or paste code…" : "Message yourself…"} disabled={blocked} onChange={event => onText(event.target.value)} onPaste={onPaste} onKeyDown={onKey} />
-    <div className="composer-tools"><button type="button" className="icon-button" aria-label="Add files or code" aria-pressed={code} disabled={blocked} onClick={onAdd}><WorkspaceIcon name="plus" /></button>
+    <div className="composer-tools"><button type="button" className="icon-button" aria-label="Add files or code" aria-haspopup="dialog" disabled={blocked} onClick={onAdd}><WorkspaceIcon name="plus" /></button>
       {nativeClipboard ? <button type="button" className="paste-send" disabled={blocked} onClick={onFastPaste}><WorkspaceIcon name="paste" />Paste and send</button> : null}
       <button type="button" className="send" aria-label="Send" title="Send message" disabled={blocked || sending || !text.length} onClick={onSend}><WorkspaceIcon name="send" /></button>
     </div>

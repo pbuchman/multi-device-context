@@ -177,3 +177,18 @@ it("freezes native lifecycle and external navigation after a failed auth invalid
   expect(t.services.outbox.clear).not.toHaveBeenCalled();
   expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
 });
+
+it("exposes Add files or code as a labeled dialog opener, leaving toggle semantics on Code mode", async () => {
+  const t = fixture("android"); render(<ContextWorkspace services={t.services} />);
+  const opener = screen.getByRole("button", { name: "Add files or code" });
+  expect(opener.hasAttribute("aria-pressed")).toBe(false);
+  expect(opener.getAttribute("aria-haspopup")).toBe("dialog");
+  await userEvent.click(opener);
+  const toggle = screen.getByRole("button", { name: "Code mode" });
+  expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  await userEvent.click(toggle);
+  expect(opener.hasAttribute("aria-pressed")).toBe(false);
+  expect(screen.getByRole("button", { name: "Turn off code mode" })).toBeTruthy();
+  await userEvent.click(opener);
+  expect(screen.getByRole("button", { name: "Code mode" }).getAttribute("aria-pressed")).toBe("true");
+});

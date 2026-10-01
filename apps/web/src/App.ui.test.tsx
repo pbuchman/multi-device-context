@@ -431,7 +431,7 @@ describe("ContextWorkspace", () => {
     expect((composer as HTMLTextAreaElement).value).toBe("");
     await userEvent.click(screen.getByRole("button", { name: "Draft · Unsent local work" }));
     expect((composer as HTMLTextAreaElement).value).toBe("Unsent local work");
-    expect(screen.getByRole("button", { name: "Add files or code" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Turn off code mode" })).toBeTruthy();
     act(() => test.emitContexts([{ ...incoming, title: "AI title" }, ...contexts]));
     expect((composer as HTMLTextAreaElement).value).toBe("Unsent local work");
     expect(test.value.copyText).not.toHaveBeenCalled();
