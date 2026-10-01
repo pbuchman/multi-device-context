@@ -4,21 +4,26 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import fastifyStatic from "@fastify/static";
-import { IdSchema, type RuntimeConfig } from "@mdc/contracts";
+import { DeviceCredentialSchema, DeviceEnrollmentSchema, IdSchema, type RuntimeConfig } from "@mdc/contracts";
+import { createHash } from "node:crypto";
+import { deviceIdentity, type DeviceAccessPort, type DeviceIdentity, type DevicePrincipal } from "./device-access.js";
+import type { AttachmentPort } from "./attachments.js";
+import type { AccessAdministrationPort } from "./access.js";
+import { registerAccessRoutes } from "./access-routes.js";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 
 import { registerAgentRoutes, type AgentPort } from "./agent-routes.js";
 
 import type { AuthVerifier, VerifiedIdentity } from "./auth.js";
 
-export class BackendNotFoundError extends Error {}
-export class BackendConflictError extends Error {}
+import { BackendNotFoundError, BackendConflictError } from "./backend-errors.js";
+export { BackendNotFoundError, BackendConflictError } from "./backend-errors.js";
 
 export interface Backend {
-  createCustomToken(uid: string): Promise<string>;
-  completeUpload(uid: string, contextId: string, itemId: string): Promise<void>;
-  deleteContext(uid: string, contextId: string): Promise<void>;
-  deleteItem(uid: string, contextId: string, itemId: string): Promise<void>;
+  createCustomToken(uid: string, deviceId: string): Promise<string>;
+  completeUpload(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void>;
+  deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void>;
+  deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void>;
   checkReady(): Promise<void>;
   close(): Promise<void>;
 }
@@ -30,6 +35,9 @@ export type BuildServerOptions = {
   webDist?: string;
   agents?: AgentPort;
   settings?: SettingsPort;
+  devices?: DeviceAccessPort;
+  attachments?: AttachmentPort;
+  access?: AccessAdministrationPort;
 };
 
 function hasNoBodyFields(body: unknown): boolean {
@@ -87,6 +95,14 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     if (identity) allowOwner(request, identity.uid);
     return identity;
   };
+  const authenticatedDevice = async (request: FastifyRequest): Promise<DevicePrincipal | undefined> => {
+    const token = /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1];
+    if (!token || !options.devices) return undefined;
+    let principal: DevicePrincipal;
+    try { principal = await options.devices.authenticate(token); } catch { return undefined; }
+    allowOwner(request, principal.uid);
+    return principal;
+  };
   const readiness = new Readiness(() => backend.checkReady());
   app.addHook("onReady", () => readiness.start());
   app.addHook("onRequest", async (request, reply) => {
@@ -104,12 +120,12 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     const method = request.headers["access-control-request-method"];
     const requested = String(request.headers["access-control-request-headers"] ?? "")
       .toLowerCase().split(",").map(header => header.trim()).filter(Boolean);
-    if (!permitted || !["GET", "POST", "PATCH", "DELETE"].includes(String(method))
+    if (!permitted || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(String(method))
       || requested.some(header => !["authorization", "content-type"].includes(header))) {
       return reply.code(403).send({ error: "Forbidden" });
     }
     reply.header("access-control-allow-origin", origin!);
-    reply.header("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    reply.header("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     reply.header("access-control-allow-headers", "Authorization, Content-Type");
     reply.header("access-control-max-age", "600");
     return reply.code(204).send();
@@ -142,7 +158,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       typeof error === "object" && error !== null && "statusCode" in error
         ? (error as { statusCode?: unknown }).statusCode
         : undefined;
-    const status = typeof candidate === "number" && candidate >= 400 && candidate < 500 ? candidate : 500;
+    const status = error instanceof BackendNotFoundError ? 404 : error instanceof BackendConflictError ? 409
+      : typeof candidate === "number" && candidate >= 400 && candidate < 500 ? candidate : 500;
     const labels: Record<number, string> = {
       400: "Bad Request",
       401: "Unauthorized",
@@ -165,6 +182,26 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     return publicConfig;
   });
 
+  const enrollmentAttempts = new WindowLimit(5);
+  const cookieName = (uid: string) => `__Host-mdc-installation-${createHash("sha256").update(uid).digest("hex").slice(0, 16)}`;
+  app.post("/api/devices/enroll", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    const identity = await authenticated(request, verifier);
+    if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+    const parsed = DeviceEnrollmentSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Bad Request" });
+    const browser = parsed.data.platform === "browser";
+    if (browser && request.headers.origin !== publicConfig.appOrigin) return reply.code(403).send({ error: "Forbidden" });
+    const retry = enrollmentAttempts.take(identity.uid);
+    if (retry) return reply.header("retry-after", retry).code(429).send({ error: "Too Many Requests" });
+    if (!options.devices) return reply.code(503).send({ error: "Unavailable" });
+    const enrolled = await options.devices.enroll(identity.uid, parsed.data);
+    if (browser) {
+      reply.header("set-cookie", `${cookieName(identity.uid)}=${enrolled.device.id}.${enrolled.credential}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=31536000`);
+      return reply.code(201).send({ device: enrolled.device });
+    }
+    return reply.code(201).send(enrolled);
+  });
   app.post("/api/session", async (request, reply) => {
     reply.header("cache-control", "no-store");
     if (sessionAttempts.take(request.ip)) {
@@ -172,45 +209,71 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     }
     const identity = await authenticated(request, verifier);
     if (!identity) return reply.code(401).send({ error: "Unauthorized" });
-    if (!hasNoBodyFields(request.body)) return reply.code(400).send({ error: "Bad Request" });
+    let proof: { deviceId: string; credential: string } | undefined;
+    if (!hasNoBodyFields(request.body)) {
+      const parsed = DeviceCredentialSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: "Bad Request" });
+      proof = parsed.data;
+    } else if (request.headers.origin === publicConfig.appOrigin) {
+      const cookie = request.headers.cookie?.split(";").map(value => value.trim()).find(value => value.startsWith(`${cookieName(identity.uid)}=`));
+      if (cookie) {
+        const [deviceId, credential] = cookie.slice(cookie.indexOf("=") + 1).split(".");
+        const parsed = DeviceCredentialSchema.safeParse({ deviceId, credential });
+        if (!parsed.success) return reply.code(403).send({ error: "Forbidden" });
+        proof = parsed.data;
+      }
+    }
+    if (!proof) return reply.code(428).send({ error: "device_enrollment_required" });
+    if (!options.devices) return reply.code(503).send({ error: "Unavailable" });
+    let device;
+    try { device = await options.devices.exchange(identity.uid, proof.deviceId, proof.credential); }
+    catch { return reply.code(403).send({ error: "Forbidden" }); }
     try {
-      const customToken = await backend.createCustomToken(identity.uid);
-      return { uid: identity.uid, customToken };
+      const customToken = await backend.createCustomToken(identity.uid, device.id);
+      return { uid: identity.uid, customToken, device };
     } catch {
       return reply.code(500).send({ error: "Internal Server Error" });
     }
   });
+  app.get("/api/device", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    const identity = await authenticatedDevice(request);
+    if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+    return identity.device;
+  });
 
   if (options.settings) {
     app.get("/api/settings", async (request, reply) => {
-      const identity = await authenticated(request, verifier);
+      const identity = await authenticatedDevice(request);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       reply.header("cache-control", "no-store");
       return options.settings!.get(identity.uid);
     });
     app.patch("/api/settings", async (request, reply) => {
-      const identity = await authenticated(request, verifier);
+      const identity = await authenticatedDevice(request);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+      if (identity.device.mode !== "all") return reply.code(403).send({ error: "Forbidden" });
       const body = request.body as { aiTitlesEnabled?: unknown } | undefined;
       if (!body || typeof body !== "object" || Object.keys(body).length !== 1 || typeof body.aiTitlesEnabled !== "boolean") return reply.code(400).send({ error: "Bad Request" });
       reply.header("cache-control", "no-store");
-      return options.settings!.set(identity.uid, { aiTitlesEnabled: body.aiTitlesEnabled });
+      return options.settings!.set(identity.uid, { aiTitlesEnabled: body.aiTitlesEnabled }, deviceIdentity(identity));
     });
   }
 
   app.post<{ Params: { contextId: string; itemId: string } }>(
     "/api/contexts/:contextId/items/:itemId/complete",
     async (request, reply) => {
-      const identity = await authenticated(request, verifier);
+      const identity = await authenticatedDevice(request);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       if (!hasNoBodyFields(request.body)) return reply.code(400).send({ error: "Bad Request" });
       const contextId = parseId(request.params.contextId);
       const itemId = parseId(request.params.itemId);
       if (!contextId || !itemId) return reply.code(400).send({ error: "Bad Request" });
       try {
-        await backend.completeUpload(identity.uid, contextId, itemId);
+        await backend.completeUpload(identity.uid, contextId, itemId, deviceIdentity(identity));
         return reply.code(204).send();
       } catch (error) {
+        if (error && typeof error === "object" && "statusCode" in error) throw error;
         if (error instanceof BackendNotFoundError) return reply.code(404).send({ error: "Not Found" });
         if (error instanceof BackendConflictError) return reply.code(409).send({ error: "Conflict" });
         return reply.code(500).send({ error: "Internal Server Error" });
@@ -221,14 +284,15 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.delete<{ Params: { contextId: string } }>(
     "/api/contexts/:contextId",
     async (request, reply) => {
-      const identity = await authenticated(request, verifier);
+      const identity = await authenticatedDevice(request);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       const contextId = parseId(request.params.contextId);
       if (!contextId) return reply.code(400).send({ error: "Bad Request" });
       try {
-        await backend.deleteContext(identity.uid, contextId);
+        await backend.deleteContext(identity.uid, contextId, deviceIdentity(identity));
         return reply.code(204).send();
-      } catch {
+      } catch (error) {
+        if (error && typeof error === "object" && "statusCode" in error) throw error;
         return reply.code(500).send({ error: "Internal Server Error" });
       }
     },
@@ -237,20 +301,50 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.delete<{ Params: { contextId: string; itemId: string } }>(
     "/api/contexts/:contextId/items/:itemId",
     async (request, reply) => {
-      const identity = await authenticated(request, verifier);
+      const identity = await authenticatedDevice(request);
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       const contextId = parseId(request.params.contextId);
       const itemId = parseId(request.params.itemId);
       if (!contextId || !itemId) return reply.code(400).send({ error: "Bad Request" });
       try {
-        await backend.deleteItem(identity.uid, contextId, itemId);
+        await backend.deleteItem(identity.uid, contextId, itemId, deviceIdentity(identity));
         return reply.code(204).send();
-      } catch {
+      } catch (error) {
+        if (error && typeof error === "object" && "statusCode" in error) throw error;
         return reply.code(500).send({ error: "Internal Server Error" });
       }
     },
   );
 
+  if (options.attachments) void app.register(async files => {
+    files.addHook("onRequest", async (request, reply) => {
+      const principal = await authenticatedDevice(request);
+      if (!principal) return reply.code(401).send({ error: "Unauthorized" });
+      (request as FastifyRequest & { device: DevicePrincipal }).device = principal;
+      reply.header("cache-control", "no-store");
+    });
+    files.addContentTypeParser("application/octet-stream", (_request, payload, done) => done(null, payload));
+    const params = (request: FastifyRequest<{ Params: { contextId: string; itemId: string } }>) => {
+      const context = parseId(request.params.contextId), item = parseId(request.params.itemId);
+      if (!context || !item) throw Object.assign(new Error("Bad Request"), { statusCode: 400 });
+      const principal = (request as FastifyRequest & { device: DevicePrincipal }).device;
+      return { context, item, principal };
+    };
+    const path = "/api/contexts/:contextId/items/:itemId/content";
+    files.get<{ Params: { contextId: string; itemId: string } }>(path, async (request, reply) => {
+      const { context, item, principal } = params(request);
+      const file = await options.attachments!.download(principal.uid, context, item, deviceIdentity(principal));
+      return reply.type(file.contentType).header("content-length", file.size)
+        .header("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`).send(file.stream);
+    });
+    files.put<{ Params: { contextId: string; itemId: string } }>(path, async (request, reply) => {
+      if (request.headers["content-type"] !== "application/octet-stream") return reply.code(415).send({ error: "Unsupported Media Type" });
+      const { context, item, principal } = params(request);
+      await options.attachments!.upload(principal.uid, context, item, request.body as import("node:stream").Readable, deviceIdentity(principal));
+      return reply.code(204).send();
+    });
+  });
+  if (options.access) registerAccessRoutes(app, { verifier, access: options.access, origin: publicConfig.appOrigin, allowOwner });
   if (options.agents) registerAgentRoutes(app, options.agents, verifier, backend, allowOwner);
 
   const webDist = options.webDist;

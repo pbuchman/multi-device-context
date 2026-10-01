@@ -90,6 +90,13 @@ generate configuration, build bundled web assets, run Capacitor sync and invoke
 Gradle. `build` only builds the mobile web assets; `sync` only synchronizes the
 already-built assets with Android.
 
+The device-access branch prepares version 0.5.0/code 7 as an **uninstalled release
+candidate**. The last documented phone build is code 6, but its actual installed
+code must be checked again before installation. This candidate needs the reviewed
+device-access backend and rules deployment, plus the controlled phone update in
+[the rollout guide](operations/device-access.md); building it alone does not
+change the running service or complete a Google Password Manager passkey ceremony.
+
 ## Install on an authorized USB phone
 
 Enable USB debugging on the intended phone, connect it and approve its computer

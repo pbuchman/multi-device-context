@@ -1,3 +1,4 @@
+import { exchangeInstallationSession, accessPanelUrl } from "./installation.js";
 import {
   app,
   BrowserWindow,
@@ -337,9 +338,13 @@ async function pruneCopiedFiles(): Promise<void> {
     /* A later explicit copy/startup retries bounded app-only pruning. */
   }
 }
+let transferGeneration = 0;
+let installationExchange: Promise<unknown> | undefined;
 async function copyFile(file: NativeFile): Promise<void> {
+  const generation = transferGeneration;
   await pruneCopiedFiles();
   const path = await copies.write(file);
+  if (generation !== transferGeneration) { await copies.clear(); throw new Error("Access changed."); }
   await clipboard.write([
     new ClipboardItem(fileClipboardRepresentations(file, path, process.platform)),
   ]);
@@ -365,6 +370,14 @@ function wireBridge(): void {
         return { ok: false, message: errorMessage(error) };
       }
     });
+  handle("exchangeInstallationSession", 1, async (token) => {
+    if (typeof token !== "string") throw new Error("Invalid sign-in token.");
+    if (installationExchange) throw new Error("Session exchange already running.");
+    installationExchange = exchangeInstallationSession(store, MDC_APP_ORIGIN, token);
+    try { return await installationExchange; } finally { installationExchange = undefined; }
+  });
+  handle("openAccessPanel", 1, id => shell.openExternal(accessPanelUrl(MDC_APP_ORIGIN, IdSchema.parse(id))));
+  handle("invalidateTransfers", 0, async () => { transferGeneration++; await copies.clear(); });
   handle("takeNavigation", 0, () => { const value = pendingNavigation; pendingNavigation = undefined; return value; });
   handle("getDevice", 0, () => store.device());
   handle("getAccessToken", 1, (interactive) => {
@@ -376,8 +389,11 @@ function wireBridge(): void {
   handle("signOut", 1, async (reviewed) => {
     if (!Array.isArray(reviewed) || reviewed.length > 256) throw new Error("Invalid sign-out review.");
     const reviewedIds = reviewed.map(id => IdSchema.parse(id));
+    store.invalidateInstallationSessions();
+    transferGeneration++;
     await auth?.signOut();
     await store.clearAccount(reviewedIds);
+    transferGeneration++;
     await copies.clear();
   });
   handle("readClipboard", 0, readClipboard);
@@ -393,11 +409,12 @@ function wireBridge(): void {
   handle("copyFile", 1, (value) => copyFile(validateNativeFile(value)));
   handle("saveFile", 1, async (value) => {
     const file = validateNativeFile(value);
+    const generation = transferGeneration;
     const result = await dialog.showSaveDialog(window!, {
       defaultPath: safeFilename(file.name),
       title: "Save shared file",
     });
-    if (result.canceled || !result.filePath) return false;
+    if (result.canceled || !result.filePath || generation !== transferGeneration) return false;
     await writeFile(result.filePath, file.bytes);
     return true;
   });

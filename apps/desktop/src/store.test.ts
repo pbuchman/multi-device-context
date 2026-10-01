@@ -153,3 +153,14 @@ describe("durable native clipboard queue", () => {
     ).rejects.toThrow(/encryption/);
   });
 });
+
+it("keeps installation proofs encrypted across sign-out and rejects late writes", async () => {
+ const {path,store}=await open();
+ const proof={deviceId:"00000000-0000-4000-8000-000000000001",secret:"secret-installation-proof"};
+ await store.writeInstallation("google-oauth2|one",proof,store.accountGeneration());
+ expect(store.readInstallation("google-oauth2|two")).toBeUndefined();
+ const generation=store.accountGeneration(); await store.clearAccount([]);
+ expect(store.readInstallation("google-oauth2|one")).toEqual(proof);
+ await expect(store.writeInstallation("google-oauth2|two",proof,generation)).rejects.toThrow();
+ expect((await readFile(join(path,"private-state.bin"))).includes(Buffer.from(proof.secret))).toBe(false);
+});

@@ -6,6 +6,21 @@ and original attachments are stored in the deployment's Firestore database and
 private Cloud Storage bucket. Other accounts cannot access them. This is **not
 end-to-end encryption**: the operator and infrastructure providers process data.
 
+New installations default to their own contexts, including replies added there
+by other devices. Full access is an explicit per-installation grant. The server,
+Firestore rules and authenticated attachment API enforce the current grant;
+changing a local device name or ID does not grant access. The separate `/access`
+panel requires an action-bound passkey with user verification for either grant
+change. Native installation credentials stay in protected native storage; browser
+installation credentials use a Secure, HttpOnly, SameSite cookie. Credential
+hashes and passkey public keys are stored server-side, not private passkeys.
+
+Turning full access off removes foreign unsent drafts, queued files/messages and
+unfinished operations when the device receives the policy change, after an
+explicit warning. It does not delete synchronized cloud contexts. Initial
+registration preserves existing unknown local drafts for the controlled phone
+update. Already exported files and offline copies cannot be remotely recalled.
+
 ## Optional AI titles
 
 New accounts default to AI titles off. The existing owner explicitly requested
@@ -60,12 +75,16 @@ clipboard or remove files saved to a user-selected destination.
 ## Agent access and diagnostics
 
 An agent key grants full access to its owner's data, including permanent deletion.
-Only its hash is stored server-side. Google sign-in is required to manage keys or
-AI preferences. Keep keys in private configuration; revocation is effective on
+Only its hash is stored server-side. Google sign-in and a separate passkey
+confirmation are required to create or revoke keys. An ordinary restricted
+installation cannot mint a broad agent key. Changing account-wide AI preferences
+requires an installation with full access. Keep keys in private configuration; revocation is effective on
 subsequent API authentication. `watch` observes newly created contexts, not edits
 to existing contexts, and runs only when explicitly started.
 
 Diagnostics contain enumerated operation/reason codes and timestamps, without
 message text, filenames, prompts, credentials or raw provider errors. Rate limits
 bound anonymous API work. They are not a hard total billing/storage cap: approved
-users can also write directly through Firebase, protected by owner-scoped rules.
+users can also write messages directly through Firebase, protected by account
+and installation rules. Attachment bytes use the authenticated streaming API;
+direct client access to Cloud Storage is denied.

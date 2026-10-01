@@ -15,7 +15,7 @@ function fixture() {
     listItems: vi.fn(async () => ({ records: [], cursor: null, hasMore: false })),
     writeItem: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })), getContext: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })), rename: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })),
     listKeys: vi.fn(async () => []), createKey: vi.fn(async () => ({ id, key: "one-time-key", name: "Test", createdAt: 1, lastUsedAt: null })), revokeKey: vi.fn(async () => {}),
-    download: vi.fn(async () => ({ stream: Readable.from([Buffer.from([0, 255, 1])]), size: 3, name: "data.bin" })),
+    download: vi.fn(async () => ({ stream: Readable.from([Buffer.from([0, 255, 1])]), size: 3, name: "data.bin", contentType: "application/octet-stream" })),
     upload: vi.fn(async (_uid, _context, _item, stream: Readable) => { const chunks = []; for await (const chunk of stream) chunks.push(chunk); expect(Buffer.concat(chunks)).toEqual(Buffer.from([0, 255, 1])); }),
   } satisfies AgentPort;
   const backend: Backend = { createCustomToken: vi.fn(async () => "firebase-token"), completeUpload: vi.fn(async () => {}), deleteContext: vi.fn(async () => {}), deleteItem: vi.fn(async () => {}), close: async () => {}, checkReady: async () => {} };

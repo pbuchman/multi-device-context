@@ -358,3 +358,19 @@ it("consumes native Back only while Settings is open and preserves the draft", a
  expect((composer as HTMLTextAreaElement).value).toBe("Keep this draft");
  const closed=new Event("mdc:back",{cancelable:true});act(()=>window.dispatchEvent(closed));expect(closed.defaultPrevented).toBe(false);
 });
+
+it("verifies installation access before a manual read and keeps publishing paused when verification fails", async () => {
+ const t=services(); const check=deferred<void>(); t.value.checkAccess=vi.fn(()=>check.promise); t.value.pause=vi.fn(); t.value.resume=vi.fn();
+ t.value.cloud.refreshContexts=vi.fn(async()=>snap()); t.value.cloud.refreshDeletedContexts=async()=>[];
+ render(createElement(ContextWorkspace,{services:t.value}));
+ await userEvent.click(screen.getByRole("button",{name:"Refresh"}));
+ expect(t.value.pause).toHaveBeenCalled(); expect(t.value.checkAccess).toHaveBeenCalled(); expect(t.value.cloud.refreshContexts).not.toHaveBeenCalled();
+ await act(async()=>check.resolve()); expect(t.value.cloud.refreshContexts).toHaveBeenCalled(); expect(t.value.resume).toHaveBeenCalled();
+});
+it("cannot resume or apply a late refresh after the installation policy was invalidated", async () => {
+ const t=services(); let active=true; t.value.accessActive=()=>active; t.value.checkAccess=async()=>{}; t.value.resume=vi.fn(); t.value.pause=vi.fn();
+ const read=deferred<CloudSnapshot<ContextRecord>>(); t.value.cloud.refreshContexts=()=>read.promise; t.value.cloud.refreshDeletedContexts=async()=>[];
+ render(createElement(ContextWorkspace,{services:t.value})); await userEvent.click(screen.getByRole("button",{name:"Refresh"})); active=false;
+ await act(async()=>read.resolve(snap([{...contexts[0]!,title:"Revoked content"}])));
+ expect(screen.queryByRole("button",{name:"Revoked content"})).toBeNull(); expect(t.value.resume).not.toHaveBeenCalled();
+});

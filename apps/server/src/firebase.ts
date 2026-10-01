@@ -1,10 +1,12 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { diagnostic } from "./diagnostics.js";
+import { assertDeviceContext, type DeviceIdentity } from "./device-access.js";
 import type { Auth } from "firebase-admin/auth";
 import type { Firestore } from "firebase-admin/firestore";
 import type { Storage } from "firebase-admin/storage";
 
-import { BackendConflictError, BackendNotFoundError, type Backend } from "./server.js";
+import type { Backend } from "./server.js";
+import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
 
 type Bucket = ReturnType<Storage["bucket"]>;
 
@@ -84,17 +86,18 @@ export class FirebaseBackend implements Backend {
     this.dispose = dependencies.dispose;
   }
 
-  async createCustomToken(uid: string): Promise<string> {
-    return this.auth.createCustomToken(uid);
+  async createCustomToken(uid: string, deviceId: string): Promise<string> {
+    return this.auth.createCustomToken(uid, { mdcDeviceId: deviceId });
   }
 
-  async completeUpload(uid: string, contextId: string, itemId: string): Promise<void> {
+  async completeUpload(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void> {
     const contextRef = this.firestore.doc(contextPath(uid, contextId));
     const itemRef = this.firestore.doc(itemPath(uid, contextId, itemId));
     const [contextSnapshot, itemSnapshot] = await Promise.all([contextRef.get(), itemRef.get()]);
     if (!contextSnapshot.exists || !itemSnapshot.exists) throw new BackendNotFoundError();
 
     const context = contextSnapshot.data() as ContextRecord;
+    if (device) await assertDeviceContext(this.firestore, device, contextSnapshot.data());
     const item = itemSnapshot.data() as ItemRecord;
     this.assertCompletable(context, item);
     if (item.ready === true) return;
@@ -137,6 +140,7 @@ export class FirebaseBackend implements Backend {
         throw new BackendNotFoundError();
       }
       const currentContext = currentContextSnapshot.data() as ContextRecord;
+      if (device) await assertDeviceContext(this.firestore, device, currentContextSnapshot.data(), transaction);
       const currentItem = currentItemSnapshot.data() as ItemRecord;
       this.assertCompletable(currentContext, currentItem);
       if (currentItem.ready === true) return;
@@ -163,12 +167,15 @@ export class FirebaseBackend implements Backend {
     }
   }
 
-  async deleteItem(uid: string, contextId: string, itemId: string): Promise<void> {
+  async deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void> {
     const reference = this.firestore.doc(itemPath(uid, contextId, itemId));
     const deletionMarker = this.firestore.doc(`users/${uid}/deletedItems/${contextId}_${itemId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
-      const snapshot = await transaction.get(reference);
-      transaction.set(deletionMarker, { deleted: true });
+      const [snapshot, parent, previousMarker] = await Promise.all([transaction.get(reference), transaction.get(this.firestore.doc(contextPath(uid, contextId))), transaction.get(deletionMarker)]);
+      const access = parent.data() ?? previousMarker.data();
+      if (device) await assertDeviceContext(this.firestore, device, access, transaction);
+      const originDeviceId = access?.originDeviceId;
+      transaction.set(deletionMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
       if (!snapshot.exists) return false;
       const record = snapshot.data() as ItemRecord;
       if (record.deleting !== true) transaction.update(reference, { deleting: true });
@@ -193,14 +200,17 @@ export class FirebaseBackend implements Backend {
     });
   }
 
-  async deleteContext(uid: string, contextId: string): Promise<void> {
+  async deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void> {
     const reference = this.firestore.doc(contextPath(uid, contextId));
     const deletionMarker = this.firestore.doc(`users/${uid}/deletedContexts/${contextId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
-      const snapshot = await transaction.get(reference);
+      const [snapshot, previousMarker] = await Promise.all([transaction.get(reference), transaction.get(deletionMarker)]);
+      const access = snapshot.data() ?? previousMarker.data();
+      if (device) await assertDeviceContext(this.firestore, device, access, transaction);
       // Retain only the deleted UUID, so a disconnected client's original
       // create cannot resurrect content after the cleanup removes this parent.
-      transaction.set(deletionMarker, { deleted: true });
+      const originDeviceId = access?.originDeviceId;
+      transaction.set(deletionMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
       if (!snapshot.exists) return false;
       const record = snapshot.data() as ContextRecord;
       if (record.deleting !== true) transaction.update(reference, { deleting: true });

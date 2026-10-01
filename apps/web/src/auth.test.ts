@@ -56,15 +56,16 @@ describe("authentication boundary", () => {
     await expect(loadRuntimeConfig(fetcher, { mobile: true, appOrigin: "https://elsewhere.test" })).rejects.toThrow();
   });
 
-  it("posts an access token without persisting it and validates the session payload", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ uid: "derived_uid", customToken: "custom" }), {
+  it("posts browser installation proof through the same-origin cookie and validates the verified device", async () => {
+    const device = { id: "11111111-1111-4111-8111-111111111111", name: "Browser", platform: "browser", mode: "own", version: 1, createdAt: 1, updatedAt: 1 };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ uid: "derived_uid", customToken: "custom", device }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
-    await expect(exchangeSession("access-token", fetcher)).resolves.toEqual({ uid: "derived_uid", customToken: "custom" });
+    await expect(exchangeSession("access-token", fetcher)).resolves.toEqual({ uid: "derived_uid", customToken: "custom", device });
     expect(fetcher).toHaveBeenCalledWith("/api/session", expect.objectContaining({
       method: "POST",
-      headers: { authorization: "Bearer access-token" },
+      headers: { authorization: "Bearer access-token", "content-type": "application/json" }, credentials: "same-origin", body: "{}",
     }));
   });
 
@@ -75,4 +76,12 @@ describe("authentication boundary", () => {
     await expect(signOutSession(native, dispose)).rejects.toThrow("cancelled");
     expect(events).toEqual(["native"]);
   });
+});
+
+it("enrolls a missing browser installation once but never reenrolls rejected proof", async () => {
+ const device = { id: "11111111-1111-4111-8111-111111111111", name: "Browser", platform: "browser", mode: "own", version: 1, createdAt: 1, updatedAt: 1 };
+ const fetcher=vi.fn().mockResolvedValueOnce(new Response("{}",{status:428})).mockResolvedValueOnce(new Response("{}"))
+ .mockResolvedValueOnce(new Response(JSON.stringify({uid:"uid",customToken:"custom",device})));
+ expect((await exchangeSession("auth0",fetcher)).device).toEqual(device); expect(fetcher).toHaveBeenCalledTimes(3);
+ const rejected=vi.fn(async()=>new Response("{}",{status:403})); await expect(exchangeSession("auth0",rejected)).rejects.toThrow(/installation/); expect(rejected).toHaveBeenCalledOnce();
 });

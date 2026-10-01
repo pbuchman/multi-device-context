@@ -21,7 +21,9 @@ type StoredSnapshot = {
   text?: string;
   files: { name: string; contentType: string; base64: string }[];
 };
+export type InstallationProof = { deviceId: string; secret: string };
 type State = {
+  installations?: Record<string, InstallationProof>;
   version: 1;
   scope: string;
   device: Device;
@@ -98,6 +100,10 @@ function validateState(value: State, scope: string): State {
     if (value.session.uid !== value.ownerUid)
       throw new Error("Stored account identity mismatch.");
   }
+  for (const [subject, proof] of Object.entries(value.installations ?? {})) {
+    if (!subject.startsWith("google-oauth2|") || typeof proof.secret !== "string" || !proof.secret || proof.secret.length > 4096) throw new Error("Invalid installation proof.");
+    IdSchema.parse(proof.deviceId);
+  }
   let bytes = 0;
   const ids = new Set<string>();
   for (const share of value.pending) {
@@ -119,6 +125,9 @@ function validateState(value: State, scope: string): State {
   return value;
 }
 export class NativeStore {
+  private installationEpoch = 0;
+  invalidateInstallationSessions(): void { this.installationEpoch++; }
+  installationGeneration(): number { return this.installationEpoch; }
   private pendingWrite: Promise<void> = Promise.resolve();
   private constructor(
     private readonly directory: string,
@@ -213,6 +222,15 @@ export class NativeStore {
     });
     this.pendingWrite = next.catch(() => {});
     await next;
+  }
+  readInstallation(subject: string): InstallationProof | undefined {
+    const value = this.state.installations?.[subject]; return value ? {...value} : undefined;
+  }
+  async writeInstallation(subject: string, proof: InstallationProof, generation: number, installationGeneration = this.installationEpoch): Promise<void> {
+    await this.change(state => {
+      if (state.accountGeneration !== generation || installationGeneration !== this.installationEpoch) throw new Error("Account changed during installation enrollment.");
+      state.installations = {...state.installations, [subject]: {...proof}};
+    });
   }
   device(): Device {
     return { ...this.state.device };

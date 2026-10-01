@@ -1,13 +1,12 @@
 import { apiUrl } from "./api.js";
 import { liveDocumentQuery } from "./queries.js";
-import { ContentSchema, DeviceSchema, attachmentPath, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
+import { ContentSchema, DeviceSchema, AccessDeviceSchema, type AccessDevice, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
 import type { FirebaseApp } from "firebase/app";
 import {
   collection,
   disableNetwork,
   doc,
   enableNetwork,
-  getDocs,
   getDocsFromServer,
   initializeFirestore,
   onSnapshot,
@@ -22,7 +21,6 @@ import {
   type QueryDocumentSnapshot,
   type Unsubscribe,
 } from "firebase/firestore";
-import { getBlob, getStorage, ref, uploadBytes, type FirebaseStorage } from "firebase/storage";
 
 import type { ContextRecord, ItemRecord } from "./model.js";
 import { PublishFailure, type QueuedShare } from "./outbox.js";
@@ -146,7 +144,8 @@ function sorted<T extends { id: Id; createdAt: number }>(records: T[], descendin
 
 export class FirebaseCloud {
   readonly #firestore: Firestore;
-  readonly #storage: FirebaseStorage;
+  #active = true;
+  readonly #listeners = new Set<Unsubscribe>();
   #networkEnabled = true;
   #networkTransition: Promise<void> = Promise.resolve();
 
@@ -154,18 +153,41 @@ export class FirebaseCloud {
     app: FirebaseApp,
     readonly uid: string,
     private readonly accessToken: () => Promise<string>,
+    readonly device: AccessDevice,
   ) {
     this.#firestore = initializeFirestore(app, {
       localCache: memoryLocalCache(),
     });
-    this.#storage = getStorage(app);
+
+  }
+
+  invalidate(): void { this.#active = false; for (const stop of this.#listeners) stop(); this.#listeners.clear(); }
+  #current(): void { if (!this.#active) throw new Error("Device access changed. Refresh to continue."); }
+  #scope() { return this.device.mode === "own" ? [where("originDeviceId", "==", this.device.id)] : []; }
+  #contexts(id?: Id) {
+    this.#current();
+    const contexts = collection(this.#firestore, `users/${this.uid}/contexts`);
+    return id ? query(liveDocumentQuery(contexts, id), ...this.#scope()) : query(contexts, where("deleting", "==", false), ...this.#scope());
+  }
+  #markers(name: "deletedContexts" | "deletedItems") { this.#current(); return query(collection(this.#firestore, `users/${this.uid}/${name}`), ...this.#scope()); }
+  async refreshDevice(): Promise<AccessDevice> { return AccessDeviceSchema.parse(await (await this.#api("/api/device", "GET")).json()); }
+  subscribeDevice(emit: (device: AccessDevice) => void, fail: (error: Error) => void): Unsubscribe {
+    this.#current();
+    const stop = onSnapshot(doc(this.#firestore, `users/${this.uid}/devices/${this.device.id}`), snapshot => {
+      if (!this.#active || snapshot.metadata.fromCache) return;
+      if (!snapshot.exists()) { fail(new Error("This installation is no longer registered")); return; }
+      const value = snapshot.data();
+      const device = AccessDeviceSchema.safeParse({ id: snapshot.id, name: value.name, platform: value.platform, mode: value.mode, version: value.version, createdAt: timestampMillis(value.createdAt), updatedAt: timestampMillis(value.updatedAt) });
+      if (device.success) emit(device.data); else fail(new Error("Device access settings are invalid"));
+    }, fail);
+    this.#listeners.add(stop); return () => { this.#listeners.delete(stop); stop(); };
   }
 
   subscribeContexts(
     emit: (snapshot: CloudSnapshot<ContextRecord>) => void,
     fail: (error: Error) => void,
   ): Unsubscribe {
-    const live = query(collection(this.#firestore, `users/${this.uid}/contexts`), where("deleting", "==", false));
+    const live = this.#contexts();
     return onSnapshot(live, { includeMetadataChanges: true }, (snapshot) => {
       const records = snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value));
       records.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
@@ -174,8 +196,10 @@ export class FirebaseCloud {
   }
 
   async refreshContexts(): Promise<CloudSnapshot<ContextRecord>> {
-    const live = query(collection(this.#firestore, `users/${this.uid}/contexts`), where("deleting", "==", false));
+    const live = this.#contexts();
+    this.#current();
     const snapshot = await getDocsFromServer(live);
+    this.#current();
     const records = snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value));
     records.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
     return { records, fromCache: false, hasPendingWrites: snapshot.metadata.hasPendingWrites };
@@ -197,7 +221,8 @@ export class FirebaseCloud {
       emit({ records: sorted(records, false), fromCache: snapshot.metadata.fromCache, hasPendingWrites: snapshot.metadata.hasPendingWrites });
     }, (error) => {
       void isDeletedContextError(error, async () => {
-        const contexts = await getDocsFromServer(liveDocumentQuery(collection(this.#firestore, `users/${this.uid}/contexts`), contextId));
+        const contexts = await getDocsFromServer(this.#contexts(contextId));
+        this.#current();
         return contexts.docs.some(context => context.id === contextId);
       }).then(deleted => {
         if (!active) return;
@@ -210,7 +235,9 @@ export class FirebaseCloud {
 
   async refreshItems(contextId: Id): Promise<CloudSnapshot<ItemRecord>> {
     const live = query(collection(this.#firestore, `users/${this.uid}/contexts/${contextId}/items`), where("deleting", "==", false));
+    this.#current();
     const snapshot = await getDocsFromServer(live);
+    this.#current();
     const records = snapshot.docs.map(entry => itemFromDocument(contextId, entry))
       .filter((value): value is ItemRecord => Boolean(value));
     return { records: sorted(records, false), fromCache: false, hasPendingWrites: snapshot.metadata.hasPendingWrites };
@@ -218,6 +245,7 @@ export class FirebaseCloud {
 
   async publish(record: QueuedShare): Promise<void> {
     try {
+      this.#current();
       await publishQueuedShare(record, this.#writePort());
     } catch (error) {
       throw cloudFailure(error);
@@ -225,6 +253,7 @@ export class FirebaseCloud {
   }
 
   async renameContext(contextId: Id, title: string): Promise<void> {
+    this.#current();
     await updateDoc(doc(this.#firestore, `users/${this.uid}/contexts/${contextId}`), {
       title,
       titleState: "manual",
@@ -233,11 +262,11 @@ export class FirebaseCloud {
   }
 
   subscribeDeletedContexts(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe {
-    return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedContexts`), snapshot => emit(snapshot.docs.map(d => d.id)), fail);
+    return onSnapshot(this.#markers("deletedContexts"), snapshot => emit(snapshot.docs.map(d => d.id)), fail);
   }
 
   async refreshDeletedContexts(): Promise<Id[]> {
-    const snapshot = await getDocsFromServer(collection(this.#firestore, `users/${this.uid}/deletedContexts`));
+    const snapshot = await getDocsFromServer(this.#markers("deletedContexts"));
     return snapshot.docs.map(document => document.id as Id);
   }
 
@@ -254,19 +283,19 @@ export class FirebaseCloud {
   }
 
   subscribeDeletedItems(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe {
-    return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedItems`), snapshot => emit(snapshot.docs.map(d => {
+    return onSnapshot(this.#markers("deletedItems"), snapshot => emit(snapshot.docs.map(d => {
       const [contextId, itemId] = d.id.split("_"); return { contextId: contextId!, itemId: itemId! };
     })), fail);
   }
   async refreshDeletedItems(): Promise<{ contextId: Id; itemId: Id }[]> {
-    const snapshot = await getDocsFromServer(collection(this.#firestore, `users/${this.uid}/deletedItems`));
+    const snapshot = await getDocsFromServer(this.#markers("deletedItems"));
     return snapshot.docs.map(document => {
       const [contextId, itemId] = document.id.split("_");
       return { contextId: contextId!, itemId: itemId! };
     });
   }
   async deletionMarkers() {
-    const [contexts, items] = await Promise.all(["deletedContexts", "deletedItems"].map(name => getDocsFromServer(collection(this.#firestore, `users/${this.uid}/${name}`))));
+    const [contexts, items] = await Promise.all((["deletedContexts", "deletedItems"] as const).map(name => getDocsFromServer(this.#markers(name))));
     return { contexts: contexts!.docs.map(d => d.id), items: items!.docs.map(d => { const [contextId, itemId] = d.id.split("_"); return { contextId: contextId!, itemId: itemId! }; }) };
   }
 
@@ -285,7 +314,9 @@ export class FirebaseCloud {
   }
 
   async attachmentBytes(contextId: Id, itemId: Id, content: Extract<Content, { kind: "attachment" }>): Promise<Uint8Array> {
-    const blob = await getBlob(ref(this.#storage, attachmentPath(this.uid, contextId, itemId)), content.size);
+    const response = await this.#api(`/api/contexts/${contextId}/items/${itemId}/content`, "GET");
+    const blob = await response.blob();
+    this.#current();
     if (blob.size !== content.size || (blob.type && blob.type !== content.contentType)) {
       throw new Error("Downloaded file metadata does not match the shared item");
     }
@@ -293,11 +324,15 @@ export class FirebaseCloud {
   }
 
   async #api(path: string, method: "GET" | "POST" | "DELETE" | "PATCH", body?: unknown): Promise<Response> {
+    this.#current();
+    const token = await this.accessToken();
+    this.#current();
     const response = await fetch(apiUrl(path), {
       method,
-      headers: { authorization: `Bearer ${await this.accessToken()}`, ...(body ? { "content-type": "application/json" } : {}) },
+      headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    this.#current();
     if (!response.ok) throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "Cloud request failed", response.status >= 500 || response.status === 429, Math.min(3600, Math.max(0, Number(response.headers.get("retry-after")) || 0)) * 1000);
     return response;
   }
@@ -306,11 +341,14 @@ export class FirebaseCloud {
     const contextsPath = `users/${this.uid}/contexts`;
     const itemsPath = (contextId: Id) => `${contextsPath}/${contextId}/items`;
     const findContext = async (contextId: Id) => {
-      const snapshot = await getDocs(liveDocumentQuery(collection(this.#firestore, contextsPath), contextId));
+      const snapshot = await getDocsFromServer(this.#contexts(contextId));
+      this.#current();
       return snapshot.docs.some((entry) => entry.id === contextId) ? { id: contextId } : undefined;
     };
     const findItem = async (contextId: Id, itemId: Id): Promise<ExistingItem | undefined> => {
-      const snapshot = await getDocs(liveDocumentQuery(collection(this.#firestore, itemsPath(contextId)), itemId));
+      this.#current();
+      const snapshot = await getDocsFromServer(liveDocumentQuery(collection(this.#firestore, itemsPath(contextId)), itemId));
+      this.#current();
       const found = snapshot.docs.find((entry) => entry.id === itemId);
       if (!found) return undefined;
       const data = found.data();
@@ -332,6 +370,7 @@ export class FirebaseCloud {
       findContext,
       findItem,
       createInitial: async (record) => {
+        this.#current();
         const batch = writeBatch(this.#firestore);
         const timestamp = serverTimestamp();
         batch.set(doc(this.#firestore, contextsPath, record.contextId), {
@@ -342,26 +381,29 @@ export class FirebaseCloud {
         await batch.commit();
       },
       append: async (record) => {
+        this.#current();
         const batch = writeBatch(this.#firestore);
         batch.set(doc(this.#firestore, itemsPath(record.contextId), record.itemId), itemData(record));
         batch.update(doc(this.#firestore, contextsPath, record.contextId), { updatedAt: serverTimestamp() });
         await batch.commit();
       },
       completeAttachment: async (record) => {
-        const response = await fetch(apiUrl(`/api/contexts/${record.contextId}/items/${record.itemId}/complete`), {
-          method: "POST",
-          headers: { authorization: `Bearer ${await this.accessToken()}` },
-        });
+        this.#current();
+        const token = await this.accessToken(); this.#current();
+        const response = await fetch(apiUrl(`/api/contexts/${record.contextId}/items/${record.itemId}/complete`), { method: "POST", headers: { authorization: `Bearer ${token}` } });
+        this.#current();
         if (response.ok) return "complete";
         if (response.status === 404) return "missing";
         throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "File completion failed", response.status >= 500 || response.status === 429, Math.min(3600, Math.max(0, Number(response.headers.get("retry-after")) || 0)) * 1000);
       },
       upload: async (record, bytes) => {
-        await uploadBytes(
-          ref(this.#storage, attachmentPath(this.uid, record.contextId, record.itemId)),
-          bytes,
-          { contentType: record.content.kind === "attachment" ? record.content.contentType : "application/octet-stream" },
-        );
+        this.#current();
+        const token = await this.accessToken(); this.#current();
+        const response = await fetch(apiUrl(`/api/contexts/${record.contextId}/items/${record.itemId}/content`), {
+          method: "PUT", headers: { authorization: `Bearer ${token}`, "content-type": "application/octet-stream" }, body: bytes.slice().buffer,
+        });
+        this.#current();
+        if (!response.ok) throw new PublishFailure("File upload failed", response.status >= 500 || response.status === 429);
       },
     };
   }

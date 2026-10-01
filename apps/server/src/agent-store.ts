@@ -1,10 +1,10 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { AttachmentStore } from "./attachments.js";
 import { FieldPath, FieldValue, Timestamp, type Firestore, type Query } from "firebase-admin/firestore";
 import type { Storage } from "firebase-admin/storage";
 import { type AgentItemInput, type AgentKeyInfo, IdSchema, attachmentPath } from "@mdc/contracts";
-import { BackendConflictError, BackendNotFoundError, type Backend } from "./server.js";
+import type { Backend } from "./server.js";
+import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
 
 type Bucket = ReturnType<Storage["bucket"]>;
 const agentDevice = { id: "00000000-0000-4000-8000-000000000002", name: "Agent" };
@@ -28,8 +28,7 @@ export function decodeCursor(value: string): [Timestamp, string] {
     return [new Timestamp(v[0], v[1]), v[2]];
   } catch { throw new BadInputError(); }
 }
-export class AgentStore {
-  constructor(readonly db: Firestore, readonly bucket: Bucket, readonly backend: Backend) {}
+export class AgentStore extends AttachmentStore {
   async createKey(uid: string, name: string): Promise<AgentKeyInfo & { key: string }> {
     const id = randomUUID();
     const key = `mdc_${id}_${randomBytes(32).toString("base64url")}`;
@@ -121,7 +120,7 @@ export class AgentStore {
       if (!context.exists) tx.create(parent, {
         title: (input.content.kind === "attachment" ? input.content.name : input.content.text.split(/\r?\n/)[0]?.trim() || "Shared note").slice(0, 160),
         createdAt: timestamp, updatedAt: timestamp, deleting: false,
-        originDeviceId: device.id, firstItemId: input.id, ready: input.content.kind !== "attachment", titleState: "pending",
+        originDeviceId: agentDevice.id, firstItemId: input.id, ready: input.content.kind !== "attachment", titleState: "pending",
       });
       else tx.update(parent, { updatedAt: timestamp });
       tx.create(itemRef, { content: input.content, device, createdAt: timestamp, deleting: false, ready: input.content.kind !== "attachment" });
@@ -136,44 +135,5 @@ export class AgentStore {
       tx.update(ref, { title, titleState: "manual", updatedAt: FieldValue.serverTimestamp() });
     });
     return this.getContext(uid, id);
-  }
-  async attachment(uid: string, id: string, itemId: string) {
-    await this.getContext(uid, id);
-    const item = await this.context(uid, id).collection("items").doc(itemId).get();
-    const data = item.data();
-    if (!data || data.deleting !== false || data.content?.kind !== "attachment") throw new BackendNotFoundError();
-    return data;
-  }
-  async download(uid: string, id: string, itemId: string): Promise<{ stream: Readable; name: string; size: number }> {
-    const data = await this.attachment(uid, id, itemId);
-    if (!data.ready) throw new BackendConflictError();
-    return { stream: this.bucket.file(attachmentPath(uid, id, itemId)).createReadStream(), name: data.content.name, size: data.content.size };
-  }
-  async upload(uid: string, id: string, itemId: string, stream: Readable): Promise<void> {
-    const data = await this.attachment(uid, id, itemId);
-    if (data.ready) throw new BackendConflictError();
-    const file = this.bucket.file(attachmentPath(uid, id, itemId));
-    let size = 0;
-    const validate = new Transform({ transform(chunk: Buffer, _encoding, callback) {
-      size += chunk.length;
-      callback(size > data.content.size ? new BadInputError() : null, chunk);
-    }, flush(callback) { callback(size === data.content.size ? null : new BadInputError()); } });
-    let uploaded = false;
-    try {
-      await pipeline(stream, validate, file.createWriteStream({ resumable: false, preconditionOpts: { ifGenerationMatch: 0 }, metadata: { contentType: data.content.contentType } }));
-      uploaded = true;
-      await this.backend.completeUpload(uid, id, itemId);
-    } catch (error) {
-      if (uploaded) {
-        // Only clean our upload after deletion; never remove a successfully finalized retry.
-        const current = await this.context(uid, id).collection("items").doc(itemId).get();
-        if (!current.exists || current.data()?.deleting) await file.delete({ ignoreNotFound: true });
-      }
-      if ((error as { code?: number }).code === 412) {
-        await this.backend.completeUpload(uid, id, itemId);
-        return;
-      }
-      throw error;
-    }
   }
 }

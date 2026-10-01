@@ -1,6 +1,7 @@
+import { auth0ClientOptions } from "./browser-identity.js";
 import { apiUrl, createApiUrl, mobileBuild } from "./api.js";
-import { createAuth0Client, type Auth0Client, type Auth0ClientOptions, type User } from "@auth0/auth0-spa-js";
-import { contextIdFromPath, RuntimeConfigSchema, type DesktopBridge, type RuntimeConfig } from "@mdc/contracts";
+import { createAuth0Client, type Auth0Client, type User } from "@auth0/auth0-spa-js";
+import { contextIdFromPath, RuntimeConfigSchema, DeviceSessionSchema, type DeviceSession, type AccessDevice, type DesktopBridge, type RuntimeConfig } from "@mdc/contracts";
 import { deleteApp, initializeApp, type FirebaseApp } from "firebase/app";
 import { getAuth, initializeAuth, inMemoryPersistence, signInWithCustomToken, signOut as firebaseSignOut } from "firebase/auth";
 import { clearIndexedDbPersistence, getFirestore, terminate } from "firebase/firestore";
@@ -9,12 +10,15 @@ import { createPlatformAdapter, type PlatformAdapter } from "./platform.js";
 import type { Viewer } from "./model.js";
 
 type Fetcher = typeof fetch;
-type SessionResponse = { uid: string; customToken: string };
+type SessionResponse = DeviceSession;
 
 export type ActiveSession = {
   config: RuntimeConfig;
   firebaseApp: FirebaseApp;
   uid: string;
+  device: AccessDevice;
+  /** Dispose only the data session when the device policy changes. */
+  disposeData(): Promise<void>;
   viewer: Viewer;
   accessToken(): Promise<string>;
   /** Local auth invalidation precedes account cleanup; browser navigation is last. */
@@ -25,20 +29,7 @@ export type ActiveSession = {
 
 export { DesktopUpdateRequiredError } from "./platform.js";
 
-export function auth0ClientOptions(config: RuntimeConfig): Auth0ClientOptions & { refreshTokenMode: "offline" } {
-  return {
-    domain: config.auth0.domain,
-    clientId: config.auth0.webClientId,
-    cacheLocation: "memory",
-    useRefreshTokens: false,
-    refreshTokenMode: "offline",
-    authorizationParams: {
-      audience: config.auth0.audience,
-      connection: config.auth0.connection,
-      redirect_uri: `${config.appOrigin}/auth/callback`,
-    },
-  };
-}
+export { auth0ClientOptions } from "./browser-identity.js";
 
 async function browserToken(auth0: Auth0Client): Promise<string> {
   const token = await auth0.getTokenSilently();
@@ -78,16 +69,24 @@ export async function exchangeSession(
   fetcher: Fetcher = fetch,
   resolveApi: (path: string) => string = apiUrl,
 ): Promise<SessionResponse> {
-  const response = await fetcher(resolveApi("/api/session"), {
-    method: "POST",
-    headers: { authorization: `Bearer ${accessToken}` },
+  const request = () => fetcher(resolveApi("/api/session"), {
+    method: "POST", credentials: "same-origin",
+    headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" }, body: "{}",
   });
-  if (!response.ok) throw new Error(response.status === 401 ? "Your session has expired" : "Sign in failed");
-  const candidate = await response.json() as Partial<SessionResponse>;
-  if (typeof candidate.uid !== "string" || !candidate.uid || typeof candidate.customToken !== "string" || !candidate.customToken) {
-    throw new Error("The session response is invalid");
+  let response = await request();
+  if (response.status === 428) {
+    const enrolled = await fetcher(resolveApi("/api/devices/enroll"), {
+      method: "POST", credentials: "same-origin",
+      headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "Browser", platform: "browser" }),
+    });
+    if (!enrolled.ok) throw new Error("Could not register this browser installation");
+    response = await request();
   }
-  return { uid: candidate.uid, customToken: candidate.customToken };
+  if (!response.ok) throw new Error(response.status === 401 ? "Your session has expired" : "This installation could not be verified. Sign in with its original account.");
+  const parsed = DeviceSessionSchema.safeParse(await response.json());
+  if (!parsed.success) throw new Error("The session response is invalid");
+  return parsed.data;
 }
 
 function viewerFromProfile(uid: string, profile: User | undefined, fallbackEmail?: string | null): Viewer {
@@ -210,13 +209,16 @@ export class SessionManager {
     const generation = this.#generation;
     const current = () => { if (this.#disposed || generation !== this.#generation) throw new Error("Your session has expired"); };
     current();
-    const exchanged = await exchangeSession(accessToken, this.fetcher, createApiUrl(platform.kind === "android" ? config.appOrigin : undefined));
+    if (platform.kind !== "browser" && !platform.exchangeSession) throw new Error("Update this app to enable device authorization.");
+    const exchanged = platform.exchangeSession
+      ? DeviceSessionSchema.parse(await platform.exchangeSession(accessToken))
+      : await exchangeSession(accessToken, this.fetcher);
     current();
     const firebaseApp = initializeApp(config.firebase, `mdc-${config.firebase.projectId}`);
     let credential;
     let profile: User | undefined;
     try {
-      const auth = platform.kind === "android" ? initializeAuth(firebaseApp, { persistence: inMemoryPersistence }) : getAuth(firebaseApp);
+      const auth = initializeAuth(firebaseApp, { persistence: inMemoryPersistence });
       credential = await signInWithCustomToken(auth, exchanged.customToken);
       current();
       if (credential.user.uid !== exchanged.uid) throw new Error("Authenticated account mismatch");
@@ -235,12 +237,14 @@ export class SessionManager {
       config,
       firebaseApp,
       uid: exchanged.uid,
+      device: exchanged.device,
+      disposeData: disposeSessionFirebase,
       viewer: viewerFromProfile(exchanged.uid, profile, credential.user.email),
       platform,
       accessToken: async () => {
         current();
         if (signingOut) throw new Error("Your session has expired");
-        const token = platform.native ? await platform.native.getAccessToken(false) : await browserToken(this.#auth0!);
+        const token = await credential.user.getIdToken();
         current();
         return token;
       },
@@ -280,6 +284,17 @@ export class SessionManager {
     };
     this.#session = session;
     return session;
+  }
+
+  async restartDataSession(): Promise<ActiveSession> {
+    if (this.#disposed || this.#signOutActive) throw new Error("Your session has expired");
+    const old = this.#session;
+    this.#generation++;
+    this.#session = undefined;
+    await old?.disposeData();
+    const restored = await this.restore();
+    if (!restored) throw new Error("Sign in again to continue");
+    return restored;
   }
 
   dispose(): void { this.#disposed = true; this.#generation++; this.#platform?.dispose(); }

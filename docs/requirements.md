@@ -19,8 +19,10 @@ phase, with compact-chat behavior updated on 1 October 2026. Architecture propos
   immediately shares the clipboard contents there.
 - Incoming items appear in their context. They enter the receiving computer's
   clipboard only when the user explicitly chooses **Copy**.
-- Synchronize in both directions. Contexts belong to the account, so the same
-  Google login provides access from every signed-in device.
+- Contexts belong to the account. A new installation can initially use only
+  contexts it created, including replies from other devices in those contexts.
+  Full access across devices can be enabled or disabled only after an explicit
+  passkey confirmation in the separate access management panel.
 - Use Google authentication through the existing Auth0 tenant, following the
   established applications' authentication patterns.
 - Restrict each user to their own contexts and attachments.

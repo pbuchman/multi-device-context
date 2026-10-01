@@ -9,8 +9,11 @@ async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
   return result.value;
 }
 if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
-  const bridge: DesktopBridge & { readonly reviewedSignOut: true } = {
+  const bridge: DesktopBridge & { readonly reviewedSignOut: true; exchangeInstallationSession(accessToken:string):Promise<unknown>; openAccessPanel(deviceId:string):Promise<void>; invalidateTransfers():Promise<void> } = {
     version: 1,
+    exchangeInstallationSession: accessToken => invoke("exchangeInstallationSession", accessToken),
+    openAccessPanel: deviceId => invoke("openAccessPanel", deviceId),
+    invalidateTransfers: () => invoke("invalidateTransfers"),
     reviewedSignOut: true,
     platform: process.platform as DesktopBridge["platform"],
     getDevice: () => invoke("getDevice"),

@@ -3,7 +3,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { AgentContextInputSchema, AgentItemInputSchema, AgentKeyNameSchema, IdSchema, RenameContextSchema } from "@mdc/contracts";
 import { type AgentStore, BadInputError } from "./agent-store.js";
 import type { AuthVerifier } from "./auth.js";
-import { BackendConflictError, BackendNotFoundError, type Backend } from "./server.js";
+import type { Backend } from "./server.js";
+import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
 
 export type AgentPort = Pick<AgentStore, "createKey" | "listKeys" | "revokeKey" | "authenticate" | "getContext" | "listContexts" | "listItems" | "writeItem" | "rename" | "download" | "upload">;
 function bearer(request: FastifyRequest): string {
@@ -40,16 +41,7 @@ export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, veri
     });
     const owner = (r: FastifyRequest) => (r as FastifyRequest & { ownerUid: string }).ownerUid;
     admin.get("/api/agent-keys", r => store.listKeys(owner(r)));
-    admin.post("/api/agent-keys", async (r, reply) => {
-      const retry = keyCreation.take(owner(r));
-      if (retry) return reply.header("retry-after", retry).code(429).send({ error: "Too Many Requests" });
-      const value = parse(AgentKeyNameSchema, r.body);
-      return reply.code(201).send(await store.createKey(owner(r), value.name));
-    });
-    admin.delete<{ Params: { id: string } }>("/api/agent-keys/:id", async (r, reply) => {
-      await store.revokeKey(owner(r), id(r.params.id));
-      return reply.code(204).send();
-    });
+    // Mutations are available only through action-bound passkey ceremonies.
   });
   void app.register(async api => {
     api.decorateRequest("ownerUid", "");
