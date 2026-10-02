@@ -106,5 +106,5 @@ is required before claiming Google-only login.
 Preserve the private state files and provider lockfiles. After a partial apply,
 refresh and review a new plan from the same state; do not create a replacement
 project. Keep deletion protection enabled. Infrastructure changes do not replace
-the application deployment and native acceptance checks described in the main
-implementation plan.
+the application deployment procedure or target-device checks described in the
+[operator guide](../../docs/operations/deployment.md).

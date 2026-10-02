@@ -40,8 +40,10 @@ An incomplete migration is reported rather than claimed successful.
 
 A local cancellation removes queued text/file bytes and records only IDs needed
 to retry deletion. The UI does not claim server completion before confirmation.
-Server-side markers prevent delayed clients recreating a deleted item/context;
-cleanup removes records and original object generations. No trash, application
+Server-managed markers contain deleted context and item IDs only and prevent
+delayed clients recreating data. Current clients can read only their owner's
+markers; they cannot create or modify them directly. Cleanup removes records and
+original object generations. No trash, application
 backup or restore function is provided. An offline device reconciles deletion
 markers before replaying its queue once it reconnects. A disconnected or older,
 unupdated client cannot be remotely scrubbed instantly.
@@ -66,6 +68,10 @@ subsequent API authentication. `watch` observes newly created contexts, not edit
 to existing contexts, and runs only when explicitly started.
 
 Diagnostics contain enumerated operation/reason codes and timestamps, without
-message text, filenames, prompts, credentials or raw provider errors. Rate limits
-bound anonymous API work. They are not a hard total billing/storage cap: approved
-users can also write directly through Firebase, protected by owner-scoped rules.
+message text, filenames, prompts, credentials or raw provider errors. API limits
+are 60 pre-authentication requests per minute per IP, 600 requests per minute
+globally, and 120 authenticated requests per minute per owner. Agent key creation
+is limited to five per minute and ten active keys per owner. HTTP 429 responses
+include `Retry-After`. These limits are not a hard total billing or storage cap:
+approved users can also write directly through Firebase, protected by owner-scoped
+rules.

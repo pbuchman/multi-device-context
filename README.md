@@ -1,41 +1,41 @@
 # Multi Device Context
 
-A simple application for sharing personal contexts across Android, Windows, macOS, and the web.
-Each context contains text, code, links, screenshots, and file attachments.
-Signing in with the same Google account makes the same content available on
-every device.
+Multi Device Context shares personal text, code, links, screenshots, and file
+attachments across Android, Windows, macOS, and the web. Sign in with the same
+Google account to use the same private contexts on each device.
 
-The application is deployed on home-dev. The v0.3 private installers target
-Windows x64 and Apple Silicon macOS 13+, with hosted native CI checks passed.
-Windows builds are unsigned; Mac builds are ad-hoc signed and not notarized.
-See the [acceptance record](docs/verification/v0.3.0.md) for completed
-checks and the remaining first-launch and sign-in checks on the target machines.
+## Choose how to run it
 
-- [Download private preview v0.3.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.3.0)
-- [Agent API, CLI and portable skill](docs/agent-api.md)
-- [Installation and sharing](docs/installation.md)
-- [Private Android build, USB installation and verification](docs/android.md)
-- [Home-dev deployment, updates and recovery](docs/operations/deployment.md)
-- [Requirements and initial design](docs/requirements.md)
-- [Architecture and implementation scope](docs/superpowers/specs/2026-09-30-installable-app-design.md)
+- Download the published private-preview Windows x64 and Apple Silicon macOS
+  installers from [v0.3.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.3.0).
+  Windows builds are unsigned. macOS builds are ad-hoc signed, require macOS 13
+  or later, and are not notarized. Follow the [installation guide](docs/installation.md).
+- Android is a private, locally signed APK rather than a store release. Follow
+  the [Android build, install, and device guide](docs/android.md).
+- The current source can run as a web service or produce newer local artifacts;
+  it may include changes newer than the v0.3.0 preview. Start with the
+  [self-hosting guide](docs/self-hosting.md) and [deployment procedure](docs/operations/deployment.md).
 
-The compact chat interface uses a hidden chats drawer below 840 CSS pixels,
-including narrow desktop windows. Ordinary text paste edits your draft; **Send**
-publishes it. Pasted files require confirmation. **Paste and send** and
-**Choose and send files** provide explicit immediate sharing. **Share clipboard**
-in the tray/menu bar captures the current clipboard into a new context. Incoming
-contexts open automatically on your other running devices while preserving drafts.
-Incoming items leave the receiving clipboard unchanged until you choose **Copy**.
-Contexts have optional short AI titles, direct links, and permanent deletion.
-New accounts start with AI titles off; the setting is shared across devices.
+The compact chat interface preserves drafts while contexts synchronize. Ordinary
+text paste edits the draft; explicit send actions publish content. Incoming items
+never replace the receiving clipboard automatically. Permanent deletion has no
+trash or restore. Optional AI-generated titles require the account-level **AI
+context titles** setting; when it is disabled, no title-provider request is made.
 
-The shared web interface and small API run on home-dev. Google-only Auth0 login
-identifies users; Firestore synchronizes their contexts and private GCP storage
-holds attachments. Deployment credentials and configuration remain outside Git.
-The companion `pbuchman-dev` repository contains the host setup and routing
-procedure, referring to this repository's canonical deployment scripts.
+## Architecture
 
-For source checks, use Node.js 22.12+ and pnpm 10.29.3:
+The React interface is shared by the web, Electron desktop, and Capacitor Android
+clients. Auth0 provides Google sign-in. The Fastify server exposes session,
+settings, upload, deletion, and owner-scoped [agent API](docs/agent-api.md)
+endpoints. Firestore synchronizes context metadata and items, while a private
+Cloud Storage bucket stores attachments. Current clients can read their owner's
+server-managed, ID-only deletion markers so offline queues cannot recreate
+deleted data. The service is not end-to-end encrypted; see [data handling and
+privacy](docs/privacy.md).
+
+## Development
+
+Use Node.js 22.12 or newer, pnpm 10.29.3, and Java 21 for Firebase rules tests:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -43,12 +43,26 @@ pnpm test
 pnpm typecheck
 pnpm build:web
 pnpm --filter @mdc/server build
+pnpm test:rules
 ```
 
-Real rules tests use dedicated local Firebase emulators and Java 21+:
-`pnpm test:rules`. Native packaging and installed-app checks run on actual Windows
-x64 and macOS arm64 CI runners; Linux source tests do not replace those checks.
+The repository automation is visible on the live
+[GitHub Actions page](https://github.com/pbuchman/multi-device-context/actions):
 
-## Self-hosting and data handling
+- `quality.yml` runs source tests, type checks, web/server builds, rules tests,
+  audits, secret scans, browser migration checks, and the desktop package boundary.
+- `native-installers.yml` builds and exercises Windows x64 and macOS arm64
+  installers on their target runners and publishes checksums and test artifacts.
+- `android.yml` builds a synthetic-config debug APK and runs shared tests,
+  Android unit tests, release-policy guards, and lint without production secrets.
+- Dependabot checks npm and GitHub Actions dependencies weekly, with up to five
+  npm pull requests open at once.
 
-See [standalone setup](docs/self-hosting.md), [privacy/data flow](docs/privacy.md), [security reporting](SECURITY.md), [changelog](CHANGELOG.md) and [MIT license](LICENSE). Source publication does not grant access to the hosted personal instance.
+Operational limits are 60 pre-authentication requests per minute per IP, 600
+requests per minute globally, and 120 authenticated requests per minute per
+owner. Agent key creation is limited to five per minute and ten active keys per
+owner. Rate-limited responses include `Retry-After`.
+
+See [security policy and reporting](SECURITY.md), [changelog](CHANGELOG.md), and
+the [MIT license](LICENSE). Source availability does not grant access to the
+maintainer's hosted instance.

@@ -58,6 +58,11 @@ For an existing deployment's previously opted-in owner, set the private optional
 `MDC_AI_EXISTING_OWNER_UID` or seed that owner's settings document explicitly.
 Never enable AI by scanning for every new account or by making the default true.
 
+The server enforces 60 pre-authentication requests per minute per IP, 600 requests
+per minute globally, and 120 authenticated requests per minute per owner. Agent
+key creation is limited to five per minute and ten active keys per owner. Preserve
+the `Retry-After` header through any reverse proxy so clients can back off.
+
 The production runtime never uses the demo fixture, emulator tokens or local
 emulator endpoints. Public binary distribution requires a separate signing and
 notarization setup; current build targets intentionally remain unsigned/ad-hoc.

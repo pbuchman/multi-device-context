@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Private Android support with bundled Capacitor assets, system sharing, durable
+  native intake, secure authentication storage, and signed local APK builds.
+- Compact chat navigation and responsive controls for narrow windows and phones.
+- Dependency updates plus expanded quality, native-installer, and Android CI
+  maintenance.
+
 ## 0.3.0 — review remediation (2026-10-01)
 
 - Memory-only synchronized history with migration of existing persistent caches.
@@ -10,9 +18,6 @@
 - Account-scoped AI title preferences and in-product data-processing disclosure.
 - Production source-map denial, full PR/main CI and dependency/security checks.
 - Isolated desktop packaging, patched dependencies and MIT license.
-
-Deployment, CI and device evidence are recorded separately in the remediation
-report; this list is not a claim of target-device acceptance or code signing.
 
 ## 0.2.0 — 2026-09-30
 

@@ -13,11 +13,9 @@ the same reads without changing the selected context or unsent drafts, except
 when the server confirms that the context was deleted. Desktop background
 behavior is unchanged.
 
-The implementation has local source and build checks. An authorized phone is
-still required for installed-app acceptance, Google login and an in-place
-upgrade test. DUDU7 acceptance is deferred until after the phone check. CI debug
-APKs use synthetic configuration and a generic test key and are not installation
-or upgrade artifacts for personal devices.
+CI debug APKs use synthetic configuration and a generic test key; they are not
+installation or upgrade artifacts for personal devices. Device-specific coverage
+that remains necessary is listed under [Device support boundaries](#device-support-boundaries).
 
 ## Build tools
 
@@ -37,19 +35,16 @@ adb version
 pnpm install --frozen-lockfile
 ```
 
-The prepared home-dev toolchain is under `~/.local/share/mdc-android`: JDK
-`jdk-21.0.12.1+1` and SDK `sdk`. Toolchain files remain outside the repository.
-
 ## Real configuration and signing
 
-Set `MDC_APP_ORIGIN` to the trusted deployment, currently
-`https://context.intexuraos.cloud`. The build fetches `/api/config` from that exact
-HTTPS origin, rejects redirects and mismatched configuration, and embeds only
-the public runtime configuration. Native assets are bundled and served from
-`https://localhost`; the app does not load a remote website as its application.
+Set `MDC_APP_ORIGIN` to the trusted deployment. The build fetches `/api/config`
+from that exact HTTPS origin, rejects redirects and mismatched configuration,
+and embeds only the public runtime configuration. Native assets are bundled and
+served from `https://localhost`; the app does not load a remote website as its
+application.
 
 ```sh
-export MDC_APP_ORIGIN=https://context.intexuraos.cloud
+export MDC_APP_ORIGIN=https://context.example.com
 pnpm --filter @mdc/mobile config
 ```
 
@@ -60,9 +55,8 @@ client, system browser and PKCE. Secure native storage holds credentials; the
 JavaScript interface receives an access token rather than a refresh token.
 
 The local Gradle build automatically reads
-`~/.config/multi-device-context/android-signing.json`. The provisioned key is
-`~/.config/multi-device-context/android-signing/private-mdc.p12`. The JSON object
-contains `keystore` (absolute path), `alias`, `storePassword` and `keyPassword`.
+`~/.config/multi-device-context/android-signing.json`. The JSON object contains
+`keystore` (absolute path), `alias`, `storePassword` and `keyPassword`.
 Keep the directory private (0700), both files private (0600), and an encrypted
 backup of the original key and passwords outside Git. Do not print the JSON or
 pass its passwords as command-line arguments.
@@ -145,13 +139,7 @@ personal-device acceptance.
   A failed context or item refresh keeps synchronization incomplete until that
   stream receives a fresh server result.
 
-## Cloud changes required before phone acceptance
-
-Home Dev status, 2026-10-01: the reviewed application revision `3b83a92` is
-deployed. The Android Auth0 callback, Firebase localhost domain/referrer, bucket
-CORS and server CORS below are applied and verified. Both Terraform stacks have
-no remaining changes. The signed private APK is ready; installed-phone acceptance
-still requires connecting the authorized phone.
+## Production configuration prerequisites
 
 The source changes alone do not configure live infrastructure. Follow the
 [deployment procedure](operations/deployment.md) and
@@ -219,8 +207,16 @@ builds reject private signing. For local reproduction of CI only, set
 `MDC_ANDROID_SIGNING_CONFIG` to a nonexistent file before running `android:debug`;
 unset those overrides for every personal-device build.
 
-Phone acceptance must cover Google login; text/code/link/files in both directions;
-share intents before and after login; background/resume; airplane-mode queueing
-and process restart; deletion during pending sends; keyboard, rotation and Back;
-and a signed in-place upgrade retaining drafts, pending content and session.
-Record the exact APK hash, versionCode, device and results. DUDU7 follows later.
+## Device support boundaries
+
+The following behavior depends on real devices or external applications and is
+not established by source, unit, lint, or synthetic CI checks alone:
+
+- fresh Google login and real-account sign-out on Android;
+- rotation, Back/keyboard behavior, and process recreation with drafts, queued
+  content, and the authenticated session;
+- Android external-share delivery and delivery to a second signed-in device;
+- signed in-place upgrades and offline recovery on the intended phone;
+- first launch, login launch, and sharing on the intended Windows and macOS
+  target machines; and
+- DUDU 7 installation and behavior.
