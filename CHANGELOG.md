@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.2 — Android and compact chat (2026-10-02)
+
 - Private Android support with bundled Capacitor assets, system sharing, durable
   native intake, secure authentication storage, and signed local APK builds.
 - Compact chat navigation and responsive controls for narrow windows and phones.
