@@ -1,26 +1,21 @@
 # Installing Multi Device Context
 
-Version 0.3.0 fixes local history deletion, draft conflicts, retry/cancellation,
-media downloads and packaging, and adds account-level AI title preferences.
-See [the acceptance record](verification/v0.3.0.md) for CI, deployment evidence
-and the remaining checks on your own machines.
-
 After updating, reconnect and close older app tabs to complete the one-time local
 history migration. Unsent drafts and the outbox are preserved. Synchronized
 history is now memory-only and requires a connection after restarting the app.
 
 ## Choose your installer
 
-| Computer | Artifact | Compatibility target |
+| Platform | Artifact | Compatibility target |
 | --- | --- | --- |
-| Dell Pro 14 Plus PB14250 | `Multi-Device-Context-VERSION-win-x64.exe` | Windows 11 Enterprise 25H2, x64 (user reported) |
-| MacBook Pro M2 | `Multi-Device-Context-VERSION-mac-arm64.dmg` | Apple Silicon; user reports macOS 27.0.1 (26A434), minimum 13 |
+| Windows | `Multi-Device-Context-VERSION-win-x64.exe` | x64 |
+| macOS | `Multi-Device-Context-VERSION-mac-arm64.dmg` | Apple Silicon, macOS 13+ |
 
 Download the installer from the versioned release in the private
 [pbuchman/multi-device-context repository](https://github.com/pbuchman/multi-device-context/releases).
 The release also contains `SHA256SUMS.txt`. Compare the installer checksum before
 running it if the file was copied between machines. No developer tools or manual
-application configuration are required to use an accepted release.
+application configuration are required to use a published release.
 
 The Windows installer has no code-signing identity. The macOS application has an
 ad-hoc signature required for its Apple Silicon package; it is not Developer ID
@@ -53,8 +48,7 @@ exception; a device-management policy can disallow it. See
 
 The app remains in the menu bar when the window closes. Check **Launch at login**
 in the app's tray menu or settings, and verify the actual login launch on your
-Mac. The unsigned release's login registration must be confirmed on the target
-machine; CI registration is not evidence of a user logout/login cycle.
+Mac. Confirm login launch on the target Mac after a real logout/login cycle.
 
 ## Sign in and share
 
@@ -93,9 +87,11 @@ Every manual opening starts a fresh context. Unsent drafts remain accessible in
 the sidebar. Existing contexts can be opened by their copied HTTPS link; the
 context menu also offers **Open in app** in the browser. Sign-in preserves the target.
 
-Names appear automatically after the first share. Only bounded first text or file
-names/types are sent to the title model, never attachment bytes. Rename a context
-from its menu to choose your own title. Use **Chat options → Delete chat** to delete it
+Every context starts with a fallback name. AI-generated names require the
+account-level **Settings → AI context titles** setting and are not requested when
+that setting is disabled. When enabled, only bounded first text or file names and
+types are sent to the title model, never attachment bytes. Rename a context from
+its menu to choose your own title. Use **Chat options → Delete chat** to delete it
 permanently after confirmation; there is no trash or restore.
 
 For agent access, open **Settings → Agent access**, create a named key and store
@@ -122,7 +118,9 @@ turn off **Launch at login**, and quit. Use Windows Installed Apps to uninstall,
 or move the macOS application from Applications to Trash. Uninstalling the app
 does not delete contexts stored in your account. Delete unwanted contexts inside
 the app first. Deletion removes the content and attachments; a small server-managed
-record containing only deleted IDs remains to block old offline uploads from restoring them.
+record containing only deleted IDs remains to block old offline uploads from
+restoring them. Those markers stay server-managed and are readable only by the
+owner's current clients; clients cannot create or modify them directly.
 The Windows uninstaller retains app data for a later reinstall;
 signing out clears the account's local data while the app is running.
 

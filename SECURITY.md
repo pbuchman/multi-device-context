@@ -23,5 +23,5 @@ The current installers are Windows unsigned and macOS ad-hoc signed, without
 notarization. Public signed distribution requires separately provisioned signing
 identities. This is not equivalent to a failure of application authentication.
 
-See [data handling](docs/privacy.md), [self-hosting](docs/self-hosting.md) and the
-[review/remediation record](docs/reviews/2026-10-01-remediation.md).
+See [data handling](docs/privacy.md), [self-hosting](docs/self-hosting.md), and the
+[deployment procedure](docs/operations/deployment.md).

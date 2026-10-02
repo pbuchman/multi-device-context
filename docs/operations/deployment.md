@@ -1,21 +1,22 @@
-# Home Dev deployment
+# Deployment
 
-Status: the home-dev deployment is live and its host checks pass. Installed native
-CI checks and the user’s Google browser login also passed; consult the
-[acceptance record](../verification/release-acceptance.md) for dated evidence.
+This procedure deploys the current server and shared interface to a Linux host.
+The server listens on loopback, its dedicated PM2 instance is owned by
+`multi-device-context.service`, and Caddy imports only the generated application
+fragment. Firestore and the private attachment bucket live in a dedicated GCP
+project. Keep any shared tunnel, unrelated Caddy sites, and other services outside
+this deployment's ownership.
 
-The server hosts the shared interface on loopback. Its dedicated PM2 instance is
-owned by `multi-device-context.service`; it does not use another app's PM2 home.
-Caddy imports only the generated app fragment. The existing Cloudflare tunnel
-publishes the app hostname. Firestore and attachments live in a dedicated project.
-The companion Home Dev inventory and routing procedure live in
-`pbuchman-dev/machine-setup/multi-device-context.md`.
+## Prepare private configuration
 
-## Private runtime package
+Provision the cloud resources with the [infrastructure guide](../../infra/terraform/README.md).
+Keep Terraform state, plans, provisioning tokens, service-account credentials,
+runtime packages, and command logs outside the repository in private directories.
 
-Provision the resources using [the infrastructure guide](../../infra/terraform/README.md).
-The Secret Manager secret contains one JSON package with `schemaVersion: 1`,
-`environment` and `serviceAccount`. The environment has exactly these string keys:
+The Secret Manager secret contains one JSON object with exactly the top-level
+fields `schemaVersion`, `environment`, and `serviceAccount`.
+`schemaVersion` is `1`; `serviceAccount` contains the runtime identity credential
+JSON. The `environment` object requires these string keys:
 
 ```text
 MDC_APP_ORIGIN
@@ -31,13 +32,17 @@ MDC_HOST
 MDC_PORT
 ```
 
-`MDC_HOST` must be `127.0.0.1`. `serviceAccount` is the dedicated runtime identity's
-credential JSON. Generate and publish it privately outside Terraform and source
-control. The bootstrap identity can access this secret only; the server never
-receives its key or environment. Management API tokens are provisioning-only.
+`MDC_HOST` must be `127.0.0.1`. The optional private keys are
+`MDC_OPENROUTER_API_KEY`, `MDC_TITLE_MODEL`, and `MDC_AI_EXISTING_OWNER_UID`.
+Provision `MDC_OPENROUTER_API_KEY` as a dedicated inference key rather than an
+OpenRouter management key, with `limit: 1`, `limit_reset: monthly`, and
+`include_byok_in_limit: true`. The title worker limits attempts but does not
+enforce provider spending, so the provider-side USD 1 monthly cap is required.
+New or missing account settings keep AI titles disabled; the existing-owner
+variable may preserve one previously opted-in account and must never enable every
+account.
 
-Create a mode-0600 bootstrap JSON file in a mode-0700 private directory. Its exact
-shape is illustrated below; replace every example privately on the host:
+Create a mode-0600 bootstrap file in a mode-0700 directory:
 
 ```json
 {
@@ -47,23 +52,25 @@ shape is illustrated below; replace every example privately on the host:
   "secretVersion": "1",
   "bootstrapCredentialFile": "/private/bootstrap-key.json",
   "runtimeDirectory": "/private/mdc-runtime",
-  "runtimeServiceAccount": "mdc-home-runtime@example-mdc-project.iam.gserviceaccount.com"
+  "runtimeServiceAccount": "mdc-runtime@example-mdc-project.iam.gserviceaccount.com"
 }
 ```
 
-Use a pinned positive version, never `latest`. Record the previous version for
-recovery. `scripts/runtime/package.mjs` retrieves that exact package with an
-explicit Google credential override, validates it, and atomically writes one
-mode-0600 `runtime-key.json`. Rotation replaces that file instead of accumulating
-keys. The bootstrap credential file must also be an owned mode-0600 regular file.
+Pin a positive secret version; never use `latest`. The bootstrap identity may
+read only this secret. Its owned mode-0600 credential file does not enter the
+server environment. `scripts/runtime/package.mjs` retrieves the pinned package,
+validates its exact shape and project identities, and atomically replaces the
+runtime directory's mode-0600 `runtime-key.json`.
 
 ## Build and preflight
 
-Use Node >=22.12.0, pnpm 10.29.3, the locked dependencies, Google Cloud CLI, and a
-reviewed application revision. Keep the source checkout separate from the deploy
-checkout. Choose the app port after checking the companion host inventory.
+Use Node.js 22.12 or newer, pnpm 10.29.3, Java 21 for rules tests, the Google
+Cloud CLI, and a clean deployment checkout. Record the currently deployed source
+revision and pinned secret version before an update. Do not reset, overwrite, or
+deploy from a dirty checkout.
 
-Set these non-secret shell variables to the actual absolute paths/revision:
+Set non-secret shell variables to the intended absolute paths and reviewed source
+revision:
 
 ```sh
 MDC_DEPLOY=/absolute/deploy/multi-device-context
@@ -72,35 +79,40 @@ MDC_HOST_FILES=/absolute/private/new-host-files
 MDC_REVISION=reviewed-commit-sha
 ```
 
-Clone the private repository into `MDC_DEPLOY` if it does not exist. For an update,
-require a clean deploy checkout and record its existing SHA and package version
-before switching revisions. Do not reset or overwrite a dirty checkout.
-
 ```sh
 git -C "$MDC_DEPLOY" status --porcelain
 git -C "$MDC_DEPLOY" fetch origin
 git -C "$MDC_DEPLOY" checkout --detach "$MDC_REVISION"
 cd "$MDC_DEPLOY"
 pnpm install --frozen-lockfile
-pnpm --filter @mdc/server build
-pnpm --filter @mdc/web build
 pnpm test
 pnpm typecheck
+pnpm test:rules
+pnpm --filter @mdc/web build
+pnpm --filter @mdc/server build
 MDC_BOOTSTRAP_FILE="$MDC_BOOTSTRAP" node scripts/runtime/start.mjs --check-config
 node scripts/runtime/render-host.mjs "$MDC_BOOTSTRAP" "$MDC_DEPLOY" "$MDC_HOST_FILES"
 ```
 
-The last two commands require the actual built interface and server. The renderer
-also requires the pinned local PM2 dependency. It writes only to a new private
-output directory and does not install or reload anything. Review the two generated
-files before the root installation step.
+The renderer writes a new private output directory and does not install or reload
+anything. Review the generated systemd unit and Caddy fragment. Confirm the unit
+uses the dedicated runtime directory and PM2 home, the server binds only to
+loopback, and Caddy forwards `CF-Connecting-IP` only from the local tunnel
+connector. The production web and desktop builds must contain no source maps.
 
-Deploy the reviewed Firebase rules and indexes with the provisioning identity,
-not the runtime key. The attachments bucket is custom-named; the emulator's
-default Storage configuration must not select a different live bucket. Set
-`MDC_PROJECT`, `MDC_BUCKET`, `MDC_GOOGLE_ACCOUNT` and `MDC_RULES_WORK` privately.
-The last variable names a new absolute directory outside Git. Run this from the
-deploy checkout with those variables exported:
+## Deploy rules and indexes first
+
+Deploy `infra/firestore.rules`, `infra/firestore.indexes.json`, and
+`infra/storage.rules` with an authorized provisioning identity before installing
+the new server or UI. This order ensures current clients can read their own
+server-managed context and item deletion markers, settings remain server-only,
+and the cleanup worker's indexes are ready before it starts. Do not use the
+runtime service-account key for provisioning.
+
+The bucket may have a custom name, so generate a private Firebase configuration
+that names it explicitly. Set `MDC_PROJECT`, `MDC_BUCKET`, `MDC_GOOGLE_ACCOUNT`,
+and a new absolute `MDC_RULES_WORK` directory outside Git, then run from the
+deployment checkout:
 
 ```sh
 python3 - <<'PY'
@@ -108,7 +120,6 @@ import json, os, pathlib, subprocess
 work = pathlib.Path(os.environ['MDC_RULES_WORK'])
 work.mkdir(mode=0o700)
 repo = pathlib.Path.cwd()
-project = os.environ['MDC_PROJECT']
 config = {
   'firestore': {'rules': str(repo / 'infra/firestore.rules'),
                 'indexes': str(repo / 'infra/firestore.indexes.json')},
@@ -124,144 +135,102 @@ env['FIREBASE_TOKEN'] = subprocess.check_output([
   'gcloud', 'auth', 'print-access-token',
   '--account=' + os.environ['MDC_GOOGLE_ACCOUNT']
 ], text=True).strip()
-env['GOOGLE_CLOUD_QUOTA_PROJECT'] = project
+env['GOOGLE_CLOUD_QUOTA_PROJECT'] = os.environ['MDC_PROJECT']
 log = work / 'firebase-deploy.log'
 with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as f:
     result = subprocess.run([
       'node', str(repo / 'node_modules/firebase-tools/lib/bin/firebase.js'),
       '--config', str(path), 'deploy', '--only',
-      'firestore:rules,firestore:indexes,storage', '--project', project,
-      '--non-interactive'
+      'firestore:rules,firestore:indexes,storage',
+      '--project', os.environ['MDC_PROJECT'], '--non-interactive'
     ], cwd=work, env=env, stdout=f, stderr=subprocess.STDOUT)
 print('Firebase deployment exit:', result.returncode, 'Private log:', log)
 raise SystemExit(result.returncode)
 PY
 ```
 
-The pinned Firebase CLI accepts this short-lived user token but emits a
-`FIREBASE_TOKEN` deprecation warning. No token is passed as a command argument,
-printed, or saved in the repository. Keep CLI diagnostics private: SDK exception
-objects can contain authorization headers. When this CLI authentication path is
-removed, migrate the provisioning command before upgrading its pinned version.
+The pinned Firebase CLI may warn that `FIREBASE_TOKEN` is deprecated. The token
+remains short-lived, absent from command arguments, and confined to the child
+process. Keep diagnostics private because SDK errors can contain authorization
+headers. Verify owner access, cross-owner denial, deletion behavior, and index
+readiness against the deployed project; emulator results do not prove production
+index readiness.
 
-Verify owner access, cross-user denial, missing-parent and deletion behavior
-against the live rules. Emulator success alone does not prove production index
-readiness. Wait for required indexes to become ready before starting the app's
-cleanup worker.
+## Install the service and route
 
-## Install the app's host files
-
-After completing the build, rules and configuration preflight:
+After the build, configuration, rules, and indexes pass preflight:
 
 ```sh
 sudo bash "$MDC_DEPLOY/scripts/runtime/install-host.sh" "$MDC_HOST_FILES"
 ```
 
-This validates the existing Caddy configuration, backs up only the app's existing
-unit/fragment, installs their reviewed replacements, enables/restarts only the app,
-checks loopback readiness, reloads Caddy and verifies the host route. On failure it
-attempts to restore the previous host files and service state. It reports any
-failed recovery steps explicitly and preserves a nonzero exit status.
-Application-code rollback is separate below.
-The backup path is printed; it contains host configuration, not runtime secrets.
+The installer validates the complete Caddy configuration, backs up only this
+application's existing unit and fragment, installs the replacements, enables and
+restarts only `multi-device-context.service`, checks loopback readiness, reloads
+Caddy, and verifies the host route. If a step fails, inspect every reported
+recovery action and the printed app-specific backup path before making another
+host change. Never run global `pm2 save` or `pm2 kill`, restart another app, or
+replace the shared Caddyfile or tunnel configuration.
 
-The systemd cgroup limits total app memory to 768 MiB, including PM2 and the server.
-Logs are under the dedicated runtime directory's `pm2` directory and the app's
-systemd journal. Do not run global `pm2 save`, `pm2 kill`, or another app's restart.
+Publish or update the hostname through the separately managed tunnel only after
+the local Caddy origin is healthy. Preserve all unrelated routes and access
+policies.
 
-Publish the hostname using the companion's reviewed Cloudflare procedure only
-after the local Caddy origin is healthy. Keep the shared tunnel and all unrelated
-routes/Access policies unchanged. Do not confuse a narrow app-route addition with
-a full Terraform reconciliation or an IntexuraOS retirement operation.
+## Verify the deployment
 
-## Verify deployment
-
-Use the configured hostname/port; the actual values stay in private host inputs.
+Set verification variables to the private configured hostname and port. Any `.map`
+path is denied; use a path from a previously deployed bundle when checking an
+intermediary cache.
 
 ```sh
+MDC_VERIFY_PORT=3000
+MDC_VERIFY_HOSTNAME=context.example.com
+MDC_OLD_MAP_PATH=/assets/known-old-bundle.js.map
 systemctl is-active multi-device-context.service
 systemctl is-enabled multi-device-context.service
-curl --fail "http://127.0.0.1:APP_PORT/health/live"
-curl --fail "http://127.0.0.1:APP_PORT/health/ready"
-curl --fail "https://APP_HOSTNAME/health/ready"
-curl -i -X POST "https://APP_HOSTNAME/api/session"
+curl --fail "http://127.0.0.1:$MDC_VERIFY_PORT/health/live"
+curl --fail "http://127.0.0.1:$MDC_VERIFY_PORT/health/ready"
+curl --fail "https://$MDC_VERIFY_HOSTNAME/health/ready"
+curl -i -X POST "https://$MDC_VERIFY_HOSTNAME/api/session"
+curl -i "http://127.0.0.1:$MDC_VERIFY_PORT$MDC_OLD_MAP_PATH"
+curl -i "https://$MDC_VERIFY_HOSTNAME$MDC_OLD_MAP_PATH"
 ```
 
-Expected: active/enabled, health HTTP200 with `status: ok`, and unauthenticated
-session HTTP401. Verify the actual interface, public config shape, loopback-only
-listener, app restart, and representative existing services. Then perform Google
-login and the Windows/macOS sharing checks in the release acceptance record.
-Record the deployed SHA, pinned package version, app unit, route verification and
-results without credential values.
+The unit must be active and enabled, health endpoints must return HTTP 200 with
+`status: ok`, an unauthenticated session request must return HTTP 401, and known
+old `.map` paths must return HTTP 404 through loopback and the public route. Purge
+only application-specific cached map URLs if an intermediary still serves them.
+Confirm the public runtime configuration, Google login, owner isolation, context
+and item deletion, attachment upload/download, agent-key revocation, and the
+60/minute per-IP pre-authentication, 600/minute global, and 120/minute per-owner
+authenticated limits. Agent key creation is limited to five per minute and ten
+active keys; preserve `Retry-After` through Caddy.
 
-## Update and recovery
+Existing clients migrating away from persistent synchronized history must
+reconnect and close older tabs. Wait for the migration to acknowledge existing
+SDK writes before the old cache is removed. Do not interpret a blocked or
+incomplete migration as success, and do not roll back to a client that recreates
+the persistent history cache after migration.
 
-Before every update, retain the current revision and pinned package version.
-Build/check the next revision in the clean deploy checkout, render fresh host files
-if paths/origin/port change, and restart only `multi-device-context.service`.
-Verify local/public readiness and the interface before declaring success.
+## Update, rollback, and credential rotation
 
-If an update fails, restore the recorded revision in the clean deploy checkout,
-run its locked dependency install and both builds, restore the known-good pinned
-bootstrap version, and restart the app-specific unit. If the host-file installer
-failed, inspect its recovery result and printed backup. Resolve every reported
-incomplete recovery step before further host changes. Never restore a whole shared Caddyfile or tunnel
-configuration over newer unrelated changes.
+For an update, repeat the clean build and preflight, deploy rules and indexes
+before server/UI changes, render fresh host files when paths, origin, or port
+change, and restart only the application service. Recheck local and public
+readiness, source-map denial, login, synchronization, and deletion behavior.
 
-For credential rotation, publish a new pinned package containing the replacement
-runtime key, restart and verify the app, then revoke the old key and disable old
-secret versions according to the chosen rollback window. A compromised bootstrap
-key also requires replacement because it can retrieve the runtime package. Do not
-claim a disabled key's package remains a usable recovery version.
+Prefer a forward fix after current clients have used owner-readable item markers
+or account settings. Any server or rules rollback must retain those marker reads
+and existing settings documents. Never restore deleted context or attachment data
+as a deployment rollback. Restore only the recorded clean application revision,
+its locked dependencies, the known-good pinned runtime package, and the
+application-specific host files. Do not overwrite newer unrelated Caddy or tunnel
+changes. A disabled secret version or revoked credential is not a usable rollback
+artifact.
 
-## v0.2 title worker and agent access
-
-The schemaVersion-1 package now accepts two optional private environment keys:
-`MDC_OPENROUTER_API_KEY` (a dedicated inference key, never a management key) and
-`MDC_TITLE_MODEL` (default `openai/gpt-4.1-nano`). Existing packages remain valid.
-Provision the inference key with `limit: 1`, `limit_reset: monthly` and
-`include_byok_in_limit: true`. Publish a new Secret Manager package and pin its
-positive version in the bootstrap configuration. Never commit either key.
-
-Deploy the v0.2 rules/indexes before the server/UI: the context `titleState`
-collection-group index drives durable jobs; composite `deleting,createdAt`
-indexes support API pagination. Wait until the indexes are READY. Clients may
-read only their own ID-only deletion markers. Agent keys are server-only hashed
-records; their administration requires Google login.
-
-The title worker starts with the service, uses a persisted lease and at most
-three attempts, and falls back without interrupting sharing. Its outgoing
-OpenRouter requests require ZDR. Configuration without an inference key keeps
-fallback titles. Install the portable skill folder on the host; configure each
-agent privately using the instructions in [agent-api.md](../agent-api.md).
-
-For acceptance, test a synthetic account: create/paginate/read/upload/download/
-delete via an agent key, verify isolation and revocation, observe automatic title
-updates and bidirectional UI selection, then remove all synthetic content and
-keys. Check actual installed artifacts via the native workflow. An older native
-v0.1 client can still load the new UI; native reopen/link behavior requires v0.2.
-
-## v0.3 review remediation rollout
-
-Deploy new rules (owner-readable item markers) and ready indexes before new web
-clients. Set the existing opted-in owner's settings explicitly before starting
-the title worker; new/missing settings remain off. An optional private
-`MDC_AI_EXISTING_OWNER_UID` preserves that one account's default, never all users.
-Existing explicit preferences take precedence. Runtime package schema stays v1.
-
-Render/install the updated app Caddy fragment: only the local tunnel connector's
-CF-Connecting-IP is forwarded as client IP; other traffic uses its socket address.
-Verify the fragment with `caddy validate` and keep unrelated sites intact.
-The readiness worker samples dependencies every 30 seconds; stale (>45 seconds)
-or failed status returns 503 without cloud reads triggered by callers.
-
-Tell existing clients to reconnect and close older tabs for local migration.
-Do not roll back to a client that recreates persistent history after migration;
-prefer a forward fix. Server/rule rollback must retain owner item-marker reads
-and existing settings documents while v0.3 clients exist. Never restore context
-content as part of deployment recovery. Record code/config revisions and hashes.
-
-Verify known old `.map` URLs return 404 through both loopback and the CDN. Only
-purge app-specific cached map URLs if the CDN still serves them. Secrets/AI
-provider inputs do not belong in diagnostics. Run the full acceptance matrix in
-the remediation report before claiming all checkpoints complete.
+To rotate credentials, create the replacement runtime identity key or inference
+key, publish a new pinned runtime-package version, restart and verify the service,
+then revoke the old key and disable obsolete secret versions according to the
+chosen rollback window. If the bootstrap credential is compromised, replace it
+as well because it can retrieve the runtime package. Never print credentials or
+place them in source, diagnostics, shell arguments, or deployment reports.
