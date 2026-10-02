@@ -1,3 +1,4 @@
+import { assertLocalAccess, transactionAccess, allowedByLocalPolicy } from "./local-access.js";
 import { openLocalDatabase, changed } from "./local-db.js";
 import type { Id } from "@mdc/contracts";
 
@@ -71,6 +72,7 @@ export class DurableOutbox {
     const store = transaction.objectStore(STORE_NAME);
     try {
       for (const draft of drafts) {
+        await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
         if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) throw new PublishFailure("This context or item was deleted", false);
         store.put({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
       }
@@ -84,30 +86,21 @@ export class DurableOutbox {
   async enqueueNativeRequest(requestId: Id, drafts: ShareDraft[]): Promise<boolean> {
     const database = await this.#db();
     const transaction = database.transaction(STORE_NAME, "readwrite");
-    const store = transaction.objectStore(STORE_NAME);
-    const markerKey = `native:${this.namespace}:${requestId}`;
-    const marker = await requestResult(store.get(markerKey) as IDBRequest<StoredRecord | undefined>);
-    if (marker) {
-      transaction.abort();
-      try { await transactionDone(transaction); } catch { /* expected abort */ }
-      return false;
+    const complete = transactionDone(transaction), store = transaction.objectStore(STORE_NAME);
+    try {
+      const markerKey = `native:${this.namespace}:${requestId}`;
+      if (await requestResult(store.get(markerKey))) { await complete; return false; }
+      store.add({ key: markerKey, kind: "native", namespace: this.namespace, requestId } satisfies NativeMarker);
+      for (const draft of drafts) {
+        await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
+        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) continue;
+        store.add({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
+      }
+      await complete; changed(); return true;
+    } catch (error) {
+      try { transaction.abort(); } catch { /* already aborted */ }
+      await complete.catch(() => {}); throw error;
     }
-    store.add({ key: markerKey, kind: "native", namespace: this.namespace, requestId } satisfies NativeMarker);
-    for (const draft of drafts) {
-      if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) continue;
-      store.add({
-        ...draft,
-        key: `action:${this.namespace}:${draft.itemId}`,
-        kind: "action",
-        namespace: this.namespace,
-        attempts: 0,
-        queuedAt: Date.now(),
-        nextAttemptAt: 0,
-        status: "pending",
-      } satisfies StoredAction);
-    }
-    await transactionDone(transaction);
-    return true;
   }
 
   async hasNativeRequest(requestId: Id): Promise<boolean> {
@@ -130,13 +123,14 @@ export class DurableOutbox {
   async list(): Promise<QueuedShare[]> {
     const database = await this.#db();
     const transaction = database.transaction(STORE_NAME, "readonly");
+    const policy = await transactionAccess(transaction.objectStore(STORE_NAME), this.namespace);
     const records = await requestResult(
       transaction.objectStore(STORE_NAME).index("namespace").getAll(this.namespace),
     ) as StoredRecord[];
     await transactionDone(transaction);
     const groups = new Map<string, StoredAction[]>();
     for (const record of records) {
-      if (record.kind !== "action" || records.some(r => r.kind === "deletion" && r.contextId === record.contextId)) continue;
+      if (record.kind !== "action" || !allowedByLocalPolicy(policy, record.contextId) || records.some(r => r.kind === "deletion" && r.contextId === record.contextId)) continue;
       const group = groups.get(record.contextId) ?? [];
       group.push(record);
       groups.set(record.contextId, group);
@@ -162,6 +156,7 @@ export class DurableOutbox {
     const db = await this.#db();
     const tx = db.transaction([STORE_NAME, "drafts"], "readwrite"); const complete = transactionDone(tx);
     const store = tx.objectStore(STORE_NAME);
+    if (request) await assertLocalAccess(store, this.namespace, contextId);
     const records = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
     const actions = records.filter((r): r is StoredAction => r.kind === "action" && r.contextId === contextId);
     const removed = actions.filter(r => !itemId || r.itemId === itemId);
@@ -188,7 +183,8 @@ export class DurableOutbox {
   async deletions(): Promise<Deletion[]> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
     const records = await requestResult(tx.objectStore(STORE_NAME).index("namespace").getAll(this.namespace)) as StoredRecord[];
-    return records.filter((r): r is Deletion => r.kind === "deletion");
+    const policy = await transactionAccess(tx.objectStore(STORE_NAME), this.namespace);
+    return records.filter((r): r is Deletion => r.kind === "deletion" && allowedByLocalPolicy(policy, r.contextId));
   }
   async failDeletion(record: Deletion, paused: boolean, retryAfterMs = 0) {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readwrite");

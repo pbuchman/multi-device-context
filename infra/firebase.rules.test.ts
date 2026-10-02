@@ -27,10 +27,11 @@ import {
   ref,
   uploadBytes,
 } from "firebase/storage";
-import { afterAll, afterEach, beforeAll, describe, it, expect } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "vitest";
 
 const PROJECT_ID = "demo-mdc";
 const OWNER = "owner_uid";
+const DEVICE = "00000000-0000-4000-8000-000000000010";
 const OTHER = "other_uid";
 const CONTEXT_ID = "00000000-0000-4000-8000-000000000001";
 const SECOND_CONTEXT_ID = "00000000-0000-4000-8000-000000000003";
@@ -54,6 +55,7 @@ function objectPath(uid = OWNER, contextId = CONTEXT_ID, itemId = ITEM_ID) {
 function contextRecord(overrides: Record<string, unknown> = {}) {
   return {
     title: "Shared context",
+    originDeviceId: DEVICE,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     deleting: false,
@@ -118,6 +120,8 @@ beforeAll(async () => {
   });
 });
 
+beforeEach(async () => { await seed(`users/${OWNER}/devices/${DEVICE}`, { mode: "all", version: 1 }); });
+
 afterEach(async () => {
   await environment.clearFirestore();
   await environment.clearStorage();
@@ -127,9 +131,9 @@ afterAll(async () => environment.cleanup());
 
 describe("Firestore owner isolation and context validation", () => {
   it("allows v0.2 context metadata and manual titles but keeps job leases server-only", async () => {
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     const batch = writeBatch(owner);
-    batch.set(doc(owner, contextPath()), { ...contextRecord(), originDeviceId: CONTEXT_ID, firstItemId: ITEM_ID, ready: true, titleState: "pending" });
+    batch.set(doc(owner, contextPath()), { ...contextRecord(), originDeviceId: DEVICE, firstItemId: ITEM_ID, ready: true, titleState: "pending" });
     batch.set(doc(owner, itemPath()), textItem());
     await assertSucceeds(batch.commit());
     await assertSucceeds(updateDoc(doc(owner, contextPath()), { title: "Manual context title", titleState: "manual", updatedAt: serverTimestamp() }));
@@ -139,7 +143,7 @@ describe("Firestore owner isolation and context validation", () => {
   });
 
   it("R6: bounded existence reads handle absent, existing, deleting and foreign records", async () => {
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     const contexts = collection(owner, `users/${OWNER}/contexts`);
     const find = () => getDocs(liveDocumentQuery(contexts, CONTEXT_ID));
     expect((await assertSucceeds(find())).empty).toBe(true);
@@ -157,7 +161,7 @@ describe("Firestore owner isolation and context validation", () => {
   it("prevents old outboxes recreating deleted contexts while allowing new IDs", async () => {
     const marker = `users/${OWNER}/deletedContexts/${CONTEXT_ID}`;
     await seed(marker, { deleted: true });
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     await assertSucceeds(getDoc(doc(owner, marker)));
     await assertFails(getDoc(doc(environment.authenticatedContext(OTHER).firestore(), marker)));
     await assertFails(deleteDoc(doc(owner, marker)));
@@ -169,7 +173,7 @@ describe("Firestore owner isolation and context validation", () => {
     await assertSucceeds(setDoc(doc(owner, contextPath(OWNER, SECOND_CONTEXT_ID)), contextRecord()));
   });
   it("allows owner create/get/list/update and denies unauthenticated or cross-user access", async () => {
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     const other = environment.authenticatedContext(OTHER).firestore();
     const anonymous = environment.unauthenticatedContext().firestore();
     const reference = doc(owner, contextPath());
@@ -193,7 +197,7 @@ describe("Firestore owner isolation and context validation", () => {
   });
 
   it("rejects invalid, unknown, immutable, and client deletion fields", async () => {
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     const reference = doc(owner, contextPath());
     await assertFails(setDoc(reference, contextRecord({ title: "   " })));
     await assertFails(setDoc(reference, contextRecord({ title: "x".repeat(161) })));
@@ -208,7 +212,7 @@ describe("Firestore owner isolation and context validation", () => {
   it("makes deleting contexts unavailable and requires live-only list queries", async () => {
     await seed(contextPath(), { title: "Deleting", deleting: true });
     await seed(contextPath(OWNER, SECOND_CONTEXT_ID), { title: "Live", deleting: false });
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     await assertFails(getDoc(doc(owner, contextPath())));
     await assertFails(getDocs(collection(owner, `users/${OWNER}/contexts`)));
     await assertSucceeds(
@@ -222,7 +226,7 @@ describe("Firestore item validation and lifecycle", () => {
     await seed(contextPath(), { title: "Context", deleting: false });
     const marker = `users/${OWNER}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`;
     await seed(marker, { deleted: true });
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     await assertSucceeds(getDoc(doc(owner, marker)));
     await assertFails(getDoc(doc(environment.authenticatedContext(OTHER).firestore(), marker)));
     await assertFails(deleteDoc(doc(owner, marker)));
@@ -231,7 +235,7 @@ describe("Firestore item validation and lifecycle", () => {
     await assertSucceeds(setDoc(doc(owner, itemPath(OWNER, CONTEXT_ID, SECOND_CONTEXT_ID)), textItem()));
   });
   it("supports atomic parent/item creation with getAfter and rejects missing or deleting parents", async () => {
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     const batch = writeBatch(owner);
     batch.set(doc(owner, contextPath()), contextRecord());
     batch.set(doc(owner, itemPath()), textItem());
@@ -247,7 +251,7 @@ describe("Firestore item validation and lifecycle", () => {
 
   it("allows owner get/list/create while denying cross-user, mutation, and deletion", async () => {
     await seed(contextPath(), { title: "Context", deleting: false });
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     const other = environment.authenticatedContext(OTHER).firestore();
     const anonymous = environment.unauthenticatedContext().firestore();
     const reference = doc(owner, itemPath());
@@ -269,7 +273,7 @@ describe("Firestore item validation and lifecycle", () => {
 
   it("enforces exact fields, variants, device metadata, and ready state", async () => {
     await seed(contextPath(), { title: "Context", deleting: false });
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     const reference = doc(owner, itemPath());
     await assertFails(setDoc(reference, textItem({ extra: true })));
     await assertFails(setDoc(reference, textItem({ ready: false })));
@@ -292,7 +296,7 @@ describe("Firestore item validation and lifecycle", () => {
 
   it("enforces the UTF-8 byte boundary for non-ASCII text", async () => {
     await seed(contextPath(), { title: "Context", deleting: false });
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     await assertSucceeds(
       setDoc(doc(owner, itemPath()), textItem({ content: { kind: "text", text: "é".repeat(131_072) } })),
     );
@@ -307,7 +311,7 @@ describe("Firestore item validation and lifecycle", () => {
   it("makes items unavailable when the item or its parent is deleting", async () => {
     await seed(contextPath(), { title: "Context", deleting: false });
     await seed(itemPath(), { ...textItem(), createdAt: Timestamp.now(), deleting: true });
-    const owner = environment.authenticatedContext(OWNER).firestore();
+    const owner = environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }).firestore();
     await assertFails(getDoc(doc(owner, itemPath())));
 
     await seed(itemPath(), { ...textItem(), createdAt: Timestamp.now(), deleting: false });
@@ -317,85 +321,18 @@ describe("Firestore item validation and lifecycle", () => {
   });
 });
 
-describe("Storage attachment lifecycle", () => {
-  async function seedPending(size = 4, contentType = "text/plain") {
-    await seed(contextPath(), { title: "Context", deleting: false });
-    await seed(itemPath(), {
-      ...attachmentItem(size, contentType),
-      createdAt: Timestamp.now(),
-    });
-  }
-
-  it("allows create-only owner upload, then only authenticated ready reads", async () => {
-    await seedPending();
-    const owner = environment.authenticatedContext(OWNER).storage();
-    const other = environment.authenticatedContext(OTHER).storage();
-    const anonymous = environment.unauthenticatedContext().storage();
-    const reference = ref(owner, objectPath());
-    await assertFails(
-      uploadBytes(ref(other, objectPath()), new TextEncoder().encode("data"), { contentType: "text/plain" }),
-    );
-    await assertSucceeds(uploadBytes(reference, new TextEncoder().encode("data"), { contentType: "text/plain" }));
-    await assertFails(getBytes(reference));
-    await seed(itemPath(), {
-      ...attachmentItem(4, "text/plain", { ready: true }),
-      createdAt: Timestamp.now(),
-    });
-    await assertSucceeds(getBytes(reference));
-    await assertFails(getBytes(ref(other, objectPath())));
-    await assertFails(getBytes(ref(anonymous, objectPath())));
-    await assertFails(uploadBytes(reference, new TextEncoder().encode("data"), { contentType: "text/plain" }));
-    await assertFails(deleteObject(reference));
-  });
-
-  it("accepts Firebase upload token metadata while keeping pending authenticated reads blocked", async () => {
-    const tokenItem = "00000000-0000-4000-8000-000000000099";
-    await seed(contextPath(), { title: "Context", deleting: false });
-    await seed(itemPath(OWNER, CONTEXT_ID, tokenItem), { ...attachmentItem(), createdAt: Timestamp.now() });
-    const owner = environment.authenticatedContext(OWNER).storage();
-    const reference = ref(owner, objectPath(OWNER, CONTEXT_ID, tokenItem));
-    await assertSucceeds(uploadBytes(reference, new TextEncoder().encode("data"), {
-      contentType: "text/plain",
-      customMetadata: { firebaseStorageDownloadTokens: "synthetic-upload-token" },
-    }));
-    await assertFails(getBytes(reference));
-    await assertFails(uploadBytes(reference, new TextEncoder().encode("data"), { contentType: "text/plain" }));
-  });
-
-  it("denies mismatched metadata, wrong paths, deleting records, and over-limit bytes", async () => {
-    await seedPending();
-    const owner = environment.authenticatedContext(OWNER).storage();
-    await assertFails(
-      uploadBytes(ref(owner, objectPath()), new TextEncoder().encode("bad"), { contentType: "text/plain" }),
-    );
-    await assertFails(
-      uploadBytes(ref(owner, objectPath()), new TextEncoder().encode("data"), {
-        contentType: "application/octet-stream",
-      }),
-    );
-    await assertFails(
-      uploadBytes(ref(owner, `${itemPath()}/preview`), new TextEncoder().encode("data"), {
-        contentType: "text/plain",
-      }),
-    );
-
-    await seed(itemPath(), {
-      ...attachmentItem(4, "text/plain", { deleting: true }),
-      createdAt: Timestamp.now(),
-    });
-    await assertFails(
-      uploadBytes(ref(owner, objectPath()), new TextEncoder().encode("data"), { contentType: "text/plain" }),
-    );
-
-    await seed(contextPath(), { title: "Context", deleting: false });
-    await seed(itemPath(), {
-      ...attachmentItem(MAX_ATTACHMENT_BYTES + 1, "application/octet-stream"),
-      createdAt: Timestamp.now(),
-    });
-    await assertFails(
-      uploadBytes(ref(owner, objectPath()), new Uint8Array(MAX_ATTACHMENT_BYTES + 1), {
-        contentType: "application/octet-stream",
-      }),
-    );
+describe("Storage direct-client denial", () => {
+  it("never grants direct upload/read to full-device or legacy owner sessions", async () => {
+    await seed(contextPath(), { title: "Context", deleting: false, originDeviceId: DEVICE });
+    await seed(itemPath(), { ...attachmentItem(), createdAt: Timestamp.now() });
+    for (const context of [environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }), environment.authenticatedContext(OWNER), environment.unauthenticatedContext()]) {
+      await assertFails(uploadBytes(ref(context.storage(), objectPath()), new TextEncoder().encode("data"), { contentType: "text/plain" }));
+    }
+    await environment.withSecurityRulesDisabled(async context => uploadBytes(ref(context.storage(), objectPath()), new TextEncoder().encode("data"), { contentType: "text/plain" }));
+    await seed(itemPath(), { ...attachmentItem(4, "text/plain", { ready: true }), createdAt: Timestamp.now() });
+    for (const context of [environment.authenticatedContext(OWNER, { mdcDeviceId: DEVICE }), environment.authenticatedContext(OWNER), environment.unauthenticatedContext()]) {
+      await assertFails(getBytes(ref(context.storage(), objectPath())));
+      await assertFails(deleteObject(ref(context.storage(), objectPath())));
+    }
   });
 });

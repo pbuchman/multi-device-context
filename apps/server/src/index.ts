@@ -12,6 +12,9 @@ import { TitleWorker } from "./titles.js";
 import { createAuthVerifier } from "./auth.js";
 import { readServerConfig } from "./config.js";
 import { FirebaseBackend } from "./firebase.js";
+import { DeviceAccessStore } from "./device-access.js";
+import { FirestoreAccessAdministration } from "./access.js";
+import { AttachmentStore } from "./attachments.js";
 import { buildServer } from "./server.js";
 
 export async function startServer(env: NodeJS.ProcessEnv = process.env) {
@@ -33,6 +36,9 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
     publicConfig: config.publicConfig,
     verifier: createAuthVerifier(config.publicConfig),
     backend,
+    devices: new DeviceAccessStore(getFirestore(adminApp), getAuth(adminApp)),
+    access: new FirestoreAccessAdministration(getFirestore(adminApp), { origin: config.publicConfig.appOrigin }),
+    attachments: new AttachmentStore(getFirestore(adminApp), getStorage(adminApp).bucket(), backend),
     webDist: config.webDist,
     agents: new AgentStore(getFirestore(adminApp), getStorage(adminApp).bucket(), backend),
   });

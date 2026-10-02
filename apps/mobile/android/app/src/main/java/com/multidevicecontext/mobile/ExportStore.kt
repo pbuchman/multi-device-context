@@ -32,5 +32,6 @@ class ExportStore(private val root:File) {
  }
  @Synchronized fun discard(id:String) { handles.remove(id)?.file?.delete() }
  @Synchronized fun clearStaging() { handles.clear();staging.listFiles()?.forEach { it.delete() } }
+ @Synchronized fun invalidate() { clearStaging();exports.listFiles()?.forEach {it.deleteRecursively()} }
  fun cleanup() { exports.listFiles()?.filter { System.currentTimeMillis()-it.lastModified()>24*60*60*1000L }?.forEach { it.deleteRecursively() } }
 }

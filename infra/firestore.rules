@@ -17,6 +17,23 @@ service cloud.firestore {
         && title.matches('.*\\S.*');
     }
 
+    function device(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)/devices/$(request.auth.token.mdcDeviceId));
+    }
+
+    function registered(uid) {
+      return isOwner(uid)
+        && 'mdcDeviceId' in request.auth.token
+        && isUuid(request.auth.token.mdcDeviceId)
+        && device(uid).data.mode in ['own', 'all'];
+    }
+
+    function canAccess(uid, data) {
+      return registered(uid)
+        && (device(uid).data.mode == 'all'
+          || ('originDeviceId' in data && data.originDeviceId == request.auth.token.mdcDeviceId));
+    }
+
     function validContext(data) {
       return data.keys().hasOnly(['title', 'createdAt', 'updatedAt', 'deleting', 'originDeviceId', 'firstItemId', 'ready', 'titleState', 'titleLease', 'titleLeaseUntil', 'titleAttempts'])
         && (!('originDeviceId' in data) || isUuid(data.originDeviceId))
@@ -73,26 +90,27 @@ service cloud.firestore {
 
     function liveParentAfter(uid, contextId) {
       let parent = /databases/$(database)/documents/users/$(uid)/contexts/$(contextId);
-      return existsAfter(parent) && getAfter(parent).data.deleting == false;
+      return existsAfter(parent) && getAfter(parent).data.deleting == false && canAccess(uid, getAfter(parent).data);
     }
 
     function liveParent(uid, contextId) {
       let parent = /databases/$(database)/documents/users/$(uid)/contexts/$(contextId);
-      return exists(parent) && get(parent).data.deleting == false;
+      return exists(parent) && get(parent).data.deleting == false && canAccess(uid, get(parent).data);
     }
 
     match /users/{uid}/contexts/{contextId} {
-      allow get, list: if isOwner(uid) && resource.data.deleting == false;
-      allow create: if isOwner(uid)
+      allow get, list: if canAccess(uid, resource.data) && resource.data.deleting == false;
+      allow create: if registered(uid)
         && isUuid(contextId)
         && !exists(/databases/$(database)/documents/users/$(uid)/deletedContexts/$(contextId))
         && validContext(request.resource.data)
+        && request.resource.data.originDeviceId == request.auth.token.mdcDeviceId
         && !request.resource.data.keys().hasAny(['titleLease', 'titleLeaseUntil', 'titleAttempts'])
         && (!('titleState' in request.resource.data) || request.resource.data.titleState in ['pending', 'manual'])
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time
         && request.resource.data.deleting == false;
-      allow update: if isOwner(uid)
+      allow update: if canAccess(uid, resource.data)
         && validContext(request.resource.data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt', 'titleState'])
         && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['titleState']) || request.resource.data.titleState == 'manual')
@@ -102,15 +120,16 @@ service cloud.firestore {
       allow delete: if false;
 
       match /items/{itemId} {
-        allow get, list: if isOwner(uid)
+        allow get, list: if registered(uid)
           && resource.data.deleting == false
           && liveParent(uid, contextId);
-        allow create: if isOwner(uid)
+        allow create: if registered(uid)
           && isUuid(contextId)
           && isUuid(itemId)
           && !exists(/databases/$(database)/documents/users/$(uid)/deletedItems/$(contextId + '_' + itemId))
           && liveParentAfter(uid, contextId)
           && validItem(request.resource.data)
+          && request.resource.data.device.id == request.auth.token.mdcDeviceId
           && request.resource.data.createdAt == request.time
           && request.resource.data.deleting == false
           && (
@@ -123,12 +142,17 @@ service cloud.firestore {
       }
     }
     match /users/{uid}/deletedContexts/{contextId} {
-      allow get, list: if isOwner(uid);
+      allow get, list: if canAccess(uid, resource.data);
       allow write: if false;
     }
     match /users/{uid}/deletedItems/{itemId} {
-      allow get, list: if isOwner(uid);
+      allow get, list: if canAccess(uid, resource.data);
       allow write: if false;
+    }
+    match /users/{uid}/devices/{deviceId} {
+      // Public self-policy only: no secrets live here. Management uses the API.
+      allow get: if isOwner(uid) && request.auth.token.mdcDeviceId == deviceId;
+      allow list, write: if false;
     }
     // UUID markers prevent offline clients resurrecting removed
     // contexts/items. Only their owner can read markers; clients cannot change them.

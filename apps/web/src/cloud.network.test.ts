@@ -14,7 +14,7 @@ vi.mock("firebase/storage", async importOriginal => ({
   getStorage: vi.fn(() => ({})),
 }));
 beforeEach(() => { vi.clearAllMocks(); });
-const cloud = () => new FirebaseCloud({} as FirebaseApp, "user", async () => "unused");
+const cloud = () => new FirebaseCloud({} as FirebaseApp, "user", async () => "unused", { id: "11111111-1111-4111-8111-111111111111", name: "Test", platform: "browser", mode: "all", version: 1, createdAt: 1, updatedAt: 1 });
 
 it("does not re-enable the already-enabled startup connection with active listen targets", async () => {
   const instance = cloud();

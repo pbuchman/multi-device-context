@@ -8,10 +8,12 @@ object NativeRuntime {
  lateinit var inbox:ShareInbox;private set
  lateinit var clipboard:ShareInbox;private set
  lateinit var exports:ExportStore;private set
+ lateinit var installation:NativeInstallation;private set
  lateinit var auth:NativeAuth;private set
  @Synchronized fun attach(activity:Activity) {
   if(!::inbox.isInitialized) {
    inbox=ShareInbox(File(activity.filesDir,"inbox"));clipboard=ShareInbox(File(activity.filesDir,"clipboard"))
+   installation=NativeInstallation(activity.applicationContext)
    exports=ExportStore(File(activity.filesDir,"transfers"));auth=NativeAuth(activity)
   } else auth.attach(activity)
  }

@@ -2,18 +2,20 @@
 
 Multi Device Context shares personal text, code, links, screenshots, and file
 attachments across Android, Windows, macOS, and the web. Sign in with the same
-Google account to use the same private contexts on each device.
+Google account on each device. A new installation initially sees the contexts it
+creates. The owner can grant or revoke access to all account contexts after a
+passkey confirmation.
 
 ## Choose how to run it
 
 - Download the published private-preview Windows x64 and Apple Silicon macOS
-  installers from [v0.4.2](https://github.com/pbuchman/multi-device-context/releases/tag/v0.4.2).
+  installers from [v0.5.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.0).
   Windows builds are unsigned. macOS builds are ad-hoc signed, require macOS 13
   or later, and are not notarized. Follow the [installation guide](docs/installation.md).
 - Android is a private, locally signed APK rather than a store release. Follow
   the [Android build, install, and device guide](docs/android.md).
 - The current source can run as a web service or produce newer local artifacts;
-  it may include changes newer than the v0.4.2 preview. Start with the
+  it may include changes newer than the v0.5.0 preview. Start with the
   [self-hosting guide](docs/self-hosting.md) and [deployment procedure](docs/operations/deployment.md).
 
 The compact chat interface preserves drafts while contexts synchronize. Ordinary
@@ -21,14 +23,18 @@ text paste edits the draft; explicit send actions publish content. Incoming item
 never replace the receiving clipboard automatically. Permanent deletion has no
 trash or restore. Optional AI-generated titles require the account-level **AI
 context titles** setting; when it is disabled, no title-provider request is made.
+See [device access](docs/operations/device-access.md) for passkey authorization,
+revocation behavior, and existing-installation migration.
 
 ## Architecture
 
 The React interface is shared by the web, Electron desktop, and Capacitor Android
 clients. Auth0 provides Google sign-in. The Fastify server exposes session,
 settings, upload, deletion, and owner-scoped [agent API](docs/agent-api.md)
-endpoints. Firestore synchronizes context metadata and items, while a private
-Cloud Storage bucket stores attachments. Current clients can read their owner's
+endpoints. The server and Firebase rules enforce each installation's current
+access grant, and attachment bytes pass through the authenticated server API.
+Firestore synchronizes context metadata and items, while a private Cloud Storage
+bucket stores attachments. Current clients can read their owner's
 server-managed, ID-only deletion markers so offline queues cannot recreate
 deleted data. The service is not end-to-end encrypted; see [data handling and
 privacy](docs/privacy.md).

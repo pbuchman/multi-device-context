@@ -208,6 +208,44 @@ function paths() {
 
 afterEach(() => vi.restoreAllMocks());
 
+describe("FirebaseBackend device authorization", () => {
+  const deviceId = "00000000-0000-4000-8000-000000000010";
+  const device = { uid: UID, deviceId };
+  const grant = (mode: "own" | "all") => ({ name: "Phone", platform: "android", mode, version: 1, createdAt: 1, updatedAt: 1 });
+  it("issues only an installation-bound custom token", async () => {
+    const { backend, auth } = fixture();
+    await backend.createCustomToken(UID, deviceId);
+    expect(auth.createCustomToken).toHaveBeenCalledWith(UID, { mdcDeviceId: deviceId });
+  });
+  it("rejects own-mode foreign deletion before creating any tombstone; own deletion retains marker origin", async () => {
+    const { backend, firestore } = fixture(); const { context } = paths();
+    firestore.documents.set(`users/${UID}/devices/${deviceId}`, grant("own"));
+    firestore.documents.set(context, { deleting: false, originDeviceId: ITEM_ID });
+    await expect(backend.deleteContext(UID, CONTEXT_ID, device)).rejects.toMatchObject({ statusCode: 404 });
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(false);
+    firestore.documents.set(context, { deleting: false, originDeviceId: deviceId });
+    await backend.deleteContext(UID, CONTEXT_ID, device);
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true, originDeviceId: deviceId });
+    await expect(backend.deleteContext(UID, CONTEXT_ID, device)).resolves.toBeUndefined();
+  });
+  it("rechecks a downgrade inside upload finalization instead of trusting earlier authorization", async () => {
+    const { backend, firestore, bucket } = fixture(); const { context, item, object } = paths();
+    const policy = `users/${UID}/devices/${deviceId}`;
+    firestore.documents.set(policy, grant("all"));
+    firestore.documents.set(context, { deleting: false, originDeviceId: ITEM_ID });
+    firestore.documents.set(item, { content: { kind: "attachment", name: "file.txt", contentType: "text/plain", size: 4 }, ready: false, deleting: false });
+    bucket.objects.set(object, { size: 4, contentType: "text/plain", generation: "1" });
+    const original = bucket.file.bind(bucket);
+    vi.spyOn(bucket, "file").mockImplementation(name => {
+      const file = original(name), read = file.getMetadata.bind(file);
+      file.getMetadata = async () => { const data = await read(); firestore.documents.set(policy, grant("own")); return data; };
+      return file;
+    });
+    await expect(backend.completeUpload(UID, CONTEXT_ID, ITEM_ID, device)).rejects.toMatchObject({ statusCode: 404 });
+    expect(firestore.documents.get(item)?.ready).toBe(false);
+  });
+});
+
 describe("FirebaseBackend upload completion", () => {
   it("verifies exact immutable attachment metadata and completes idempotently", async () => {
     const { backend, firestore, bucket } = fixture();

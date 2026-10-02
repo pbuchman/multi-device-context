@@ -10,6 +10,9 @@ type NativeSnapshot = { text?: string; files: NativeFileRef[] };
 type NativeRequest = NativeSnapshot & { id: string; capturedAt: number };
 export interface MdcNativePlugin {
   getDevice(): Promise<{ id: string; name: string }>;
+  exchangeInstallationSession(options: { accessToken: string }): Promise<unknown>;
+  openAccessPanel(options: { deviceId: string }): Promise<void>;
+  invalidateTransfers(): Promise<void>;
   getAccessToken(options: { interactive: boolean }): Promise<{ accessToken: string }>;
   signOut(options: { reviewedNativeIds: readonly string[] }): Promise<void>;
   readClipboard(): Promise<NativeSnapshot>;
@@ -164,6 +167,9 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
   }
   return {
     kind: "android", dispose,
+    exchangeSession: async accessToken => { const expected = generation; ensureCurrent(expected); const value = await plugin.exchangeInstallationSession({ accessToken }); ensureCurrent(expected); return value; },
+    openAccessPanel: async deviceId => { ensureCurrent(); await plugin.openAccessPanel({ deviceId: IdSchema.parse(deviceId) }); },
+    invalidateTransfers: async () => { ensureCurrent(); generation++; controller.abort(); controller = new AbortController(); pending = undefined; await plugin.invalidateTransfers(); },
     activity: { get initialActive() { return active; }, subscribe: listener => subscribe(activityListeners, listener) },
     shareFile: file => exportFile(file, "share"),
     native: {

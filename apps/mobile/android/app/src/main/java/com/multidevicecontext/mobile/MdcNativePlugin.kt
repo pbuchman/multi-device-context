@@ -32,29 +32,46 @@ class MdcNativePlugin:Plugin() {
  private lateinit var exports:ExportStore
  private lateinit var auth:NativeAuth
  private val prefs by lazy { context.getSharedPreferences("mdc-native",Context.MODE_PRIVATE) }
- private val saves=mutableMapOf<String,ExportedFile>()
+ @Volatile private var transferGeneration=0L
+ private val saves=mutableMapOf<String,Pair<ExportedFile,Long>>()
  override fun load() {
   NativeRuntime.attach(activity);inbox=NativeRuntime.inbox;clipboardFiles=NativeRuntime.clipboard
   exports=NativeRuntime.exports;auth=NativeRuntime.auth
   receive(activity.intent)
  }
  private fun background(call:PluginCall,block:()->Unit) { worker.execute { try { block() } catch(_:Exception) { call.reject("Native operation failed or exceeds limits") } } }
+ @PluginMethod fun exchangeInstallationSession(call:PluginCall) = background(call) {
+  val result=NativeRuntime.installation.session.exchange(requireNotNull(call.getString("accessToken")))
+  call.resolve(JSObject(result.toString()))
+ }
+ @PluginMethod fun openAccessPanel(call:PluginCall) {
+  try { val url=NativeRuntime.installation.panel(requireNotNull(call.getString("deviceId")))
+   activity.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url)));call.resolve()
+  } catch(_:Exception) {call.reject("Could not open access settings")}
+ }
+ @PluginMethod fun invalidateTransfers(call:PluginCall) {
+  transferGeneration++
+  background(call) {exports.invalidate();call.resolve()}
+ }
  @PluginMethod fun getDevice(call:PluginCall) {
   val id=prefs.getString("deviceId",null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("deviceId",it).commit() }
   call.resolve(JSObject().put("id",id).put("name","${Build.MANUFACTURER} ${Build.MODEL}".take(80)))
  }
  @PluginMethod fun getAccessToken(call:PluginCall) { auth.token(call) }
- @PluginMethod fun signOut(call:PluginCall) = background(call) {
+ @PluginMethod fun signOut(call:PluginCall) {
+  NativeRuntime.installation.session.invalidate()
+  background(call) {
   val values=call.getArray("reviewedNativeIds") ?: JSArray()
   require(values.length()<=4096)
   val reviewed=(0 until values.length()).map { values.getString(it).also { id -> require(UUID.fromString(id).toString()==id) } }.toSet()
   inbox.signOut(reviewed) {
    // SecureCredentialsManager.clearCredentials is synchronous. No UI path
    // takes the inbox monitor: receiving intents reads only a volatile epoch.
-   val invalidation=FutureTask<Unit> { auth.signOut() }
+   val invalidation=FutureTask<Unit> { NativeRuntime.installation.session.invalidate();transferGeneration++;auth.signOut() }
    activity.runOnUiThread(invalidation);invalidation.get()
   }
-  clipboardFiles.clear();exports.clearStaging();exports.cleanup();call.resolve()
+  clipboardFiles.clear();exports.invalidate();call.resolve()
+  }
  }
  @PluginMethod fun copyText(call:PluginCall) { activity.runOnUiThread {
   val text=call.getString("text")
@@ -86,9 +103,11 @@ class MdcNativePlugin:Plugin() {
  @PluginMethod fun discardFile(call:PluginCall) = background(call) { exports.discard(requireNotNull(call.getString("id")));call.resolve() }
  @PluginMethod fun finishFile(call:PluginCall) = background(call) {
   val action=call.getString("action");require(action in listOf("copy","save","share"))
+  val generation=transferGeneration
   val file=exports.finish(requireNotNull(call.getString("id")))
   val uri=FileProvider.getUriForFile(context,"${context.packageName}.fileprovider",file.file,file.displayName)
   activity.runOnUiThread { try {
+   check(generation==transferGeneration) {"Access changed"}
    when(action) {
     "copy" -> { (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newUri(context.contentResolver,file.displayName,uri));call.resolve(JSObject().put("saved",true)) }
     "share" -> {
@@ -96,7 +115,7 @@ class MdcNativePlugin:Plugin() {
      intent.clipData=ClipData.newUri(context.contentResolver,file.displayName,uri)
      activity.startActivity(Intent.createChooser(intent,"Share file"));call.resolve(JSObject().put("saved",true))
     }
-    "save" -> { saves[call.callbackId]=file
+    "save" -> { saves[call.callbackId]=Pair(file,generation)
      val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).setType(file.contentType).addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,file.displayName)
      startActivityForResult(call,intent,"savedDocument")
     }
@@ -105,10 +124,11 @@ class MdcNativePlugin:Plugin() {
  }
  @ActivityCallback private fun savedDocument(call:PluginCall?,result:ActivityResult) {
   if(call==null)return
-  val file=saves.remove(call.callbackId)
+  val saved=saves.remove(call.callbackId)
+  val file=saved?.first
   val uri=result.data?.data
-  if(result.resultCode!=Activity.RESULT_OK || uri==null || file==null) {call.resolve(JSObject().put("saved",false));return}
-  background(call) { context.contentResolver.openOutputStream(uri,"wt").use { output -> requireNotNull(output);file.file.inputStream().use { it.copyTo(output,NativePolicy.MAX_CHUNK) } };call.resolve(JSObject().put("saved",true)) }
+  if(result.resultCode!=Activity.RESULT_OK || uri==null || file==null || saved.second!=transferGeneration) {call.resolve(JSObject().put("saved",false));return}
+  background(call) {check(saved.second==transferGeneration); context.contentResolver.openOutputStream(uri,"wt").use { output -> requireNotNull(output);file.file.inputStream().use { it.copyTo(output,NativePolicy.MAX_CHUNK) } };call.resolve(JSObject().put("saved",true)) }
  }
  @PluginMethod fun getPendingShares(call:PluginCall) = background(call) {
   val pending=inbox.pending()
