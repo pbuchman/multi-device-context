@@ -13,9 +13,10 @@ Provision the cloud resources with the [infrastructure guide](../../infra/terraf
 Keep Terraform state, plans, provisioning tokens, service-account credentials,
 runtime packages, and command logs outside the repository in private directories.
 
-The Secret Manager secret contains one JSON object with `schemaVersion: 1`, an
-`environment` object, and the dedicated runtime service account credential. The
-environment requires these string keys:
+The Secret Manager secret contains one JSON object with exactly the top-level
+fields `schemaVersion`, `environment`, and `serviceAccount`.
+`schemaVersion` is `1`; `serviceAccount` contains the runtime identity credential
+JSON. The `environment` object requires these string keys:
 
 ```text
 MDC_APP_ORIGIN
@@ -33,9 +34,13 @@ MDC_PORT
 
 `MDC_HOST` must be `127.0.0.1`. The optional private keys are
 `MDC_OPENROUTER_API_KEY`, `MDC_TITLE_MODEL`, and `MDC_AI_EXISTING_OWNER_UID`.
-Use a dedicated inference key rather than an OpenRouter management key. New or
-missing account settings keep AI titles disabled; the existing-owner variable may
-preserve one previously opted-in account and must never enable every account.
+Provision `MDC_OPENROUTER_API_KEY` as a dedicated inference key rather than an
+OpenRouter management key, with `limit: 1`, `limit_reset: monthly`, and
+`include_byok_in_limit: true`. The title worker limits attempts but does not
+enforce provider spending, so the provider-side USD 1 monthly cap is required.
+New or missing account settings keep AI titles disabled; the existing-owner
+variable may preserve one previously opted-in account and must never enable every
+account.
 
 Create a mode-0600 bootstrap file in a mode-0700 directory:
 
