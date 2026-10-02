@@ -2,6 +2,7 @@ import type { RuntimeConfig } from "@mdc/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { readServerConfig } from "./config.js";
+import type { DeviceAccessPort } from "./device-access.js";
 import {
   BackendConflictError,
   BackendNotFoundError,
@@ -48,6 +49,14 @@ const verifier = vi.fn(async (token: string) => {
   return { uid: "derived_uid", subject: "google-oauth2|person-123" };
 });
 
+const TEST_DEVICE_ID = "00000000-0000-4000-8000-000000000010";
+const testDevice = { id: TEST_DEVICE_ID, name: "Test", platform: "android" as const, mode: "all" as const, version: 1, createdAt: 1, updatedAt: 1 };
+const devices: DeviceAccessPort = {
+  enroll: async () => ({ device: testDevice, credential: "a".repeat(43) }),
+  exchange: async (_uid, id, credential) => { if (id !== TEST_DEVICE_ID || credential !== "a".repeat(43)) throw new Error(); return testDevice; },
+  authenticate: async token => { if (token !== "valid-token") throw new Error(); return { uid: "derived_uid", device: testDevice }; },
+};
+
 const openServers: Array<ReturnType<typeof buildServer>> = [];
 
 afterEach(async () => {
@@ -56,7 +65,7 @@ afterEach(async () => {
 });
 
 function server(fake = backend()) {
-  const app = buildServer({ publicConfig, verifier, backend: fake });
+  const app = buildServer({ publicConfig, verifier, devices, backend: fake });
   openServers.push(app);
   return { app, fake };
 }
@@ -178,10 +187,11 @@ describe("authenticated API", () => {
       method: "POST",
       url: "/api/session",
       headers: { authorization: "Bearer valid-token" },
+      payload: { deviceId: TEST_DEVICE_ID, credential: "a".repeat(43) },
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ uid: "derived_uid", customToken: "custom:derived_uid" });
-    expect(fake.createCustomToken).toHaveBeenCalledWith("derived_uid");
+    expect(response.json()).toEqual({ uid: "derived_uid", customToken: "custom:derived_uid", device: testDevice });
+    expect(fake.createCustomToken).toHaveBeenCalledWith("derived_uid", TEST_DEVICE_ID);
     expect(response.headers["cache-control"]).toBe("no-store");
 
     const override = await app.inject({
@@ -219,9 +229,9 @@ describe("authenticated API", () => {
         })
       ).statusCode,
     ).toBe(204);
-    expect(fake.completeUpload).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, ITEM_ID);
-    expect(fake.deleteContext).toHaveBeenCalledWith("derived_uid", CONTEXT_ID);
-    expect(fake.deleteItem).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, ITEM_ID);
+    expect(fake.completeUpload).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, ITEM_ID, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
+    expect(fake.deleteContext).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
+    expect(fake.deleteItem).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, ITEM_ID, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
   });
 
   it.each([
@@ -282,13 +292,13 @@ describe("review security boundaries", () => {
   });
   it("R9: settings use the authenticated owner and reject agent tokens or UID overrides", async () => {
     const settings = { get: vi.fn(async () => ({ aiTitlesEnabled: false })), set: vi.fn(async (_uid: string, value: { aiTitlesEnabled: boolean }) => value) };
-    const app = buildServer({ publicConfig, verifier, backend: backend(), settings }); openServers.push(app);
+    const app = buildServer({ publicConfig, verifier, devices, backend: backend(), settings }); openServers.push(app);
     expect((await app.inject({ url: "/api/settings", headers: { authorization: "Bearer agent" } })).statusCode).toBe(401);
     const headers = { authorization: "Bearer valid-token" };
     const get = await app.inject({ url: "/api/settings", headers }); expect(get.json()).toEqual({ aiTitlesEnabled: false }); expect(settings.get).toHaveBeenCalledWith("derived_uid");
     expect((await app.inject({ method: "PATCH", url: "/api/settings", headers, payload: { aiTitlesEnabled: true, uid: "victim" } })).statusCode).toBe(400);
     expect((await app.inject({ method: "PATCH", url: "/api/settings", headers, payload: { aiTitlesEnabled: true } })).statusCode).toBe(200);
-    expect(settings.set).toHaveBeenCalledWith("derived_uid", { aiTitlesEnabled: true });
+    expect(settings.set).toHaveBeenCalledWith("derived_uid", { aiTitlesEnabled: true }, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
   });
   it("R2: untrusted remote clients cannot bypass the IP limit with forwarded headers", async () => {
     const { app } = server();
@@ -315,7 +325,7 @@ describe('Android CORS', () => {
     const { app } = server();
     for(const headers of [
       {origin:'https://localhost.evil.test','access-control-request-method':'POST'},
-      {origin:'https://localhost','access-control-request-method':'PUT'},
+      {origin:'https://localhost','access-control-request-method':'CONNECT'},
       {origin:'https://localhost','access-control-request-method':'POST','access-control-request-headers':'x-secret'},
     ]) {
       const response=await app.inject({method:'OPTIONS',url:'/api/session',headers});
@@ -328,7 +338,7 @@ describe('Android CORS', () => {
 describe("Android deployed API integration", () => {
   it("permits native settings PATCH while retaining bearer and owner validation", async () => {
     const settings = { get: vi.fn(async () => ({ aiTitlesEnabled: false })), set: vi.fn(async (_uid: string, value: { aiTitlesEnabled: boolean }) => value) };
-    const app = buildServer({ publicConfig, verifier, backend: backend(), settings }); openServers.push(app);
+    const app = buildServer({ publicConfig, verifier, devices, backend: backend(), settings }); openServers.push(app);
     const headers = { origin: "https://localhost", "access-control-request-method": "PATCH", "access-control-request-headers": "authorization,content-type" };
     const preflight = await app.inject({ method: "OPTIONS", url: "/api/settings", headers });
     expect(preflight.statusCode).toBe(204);
@@ -338,7 +348,7 @@ describe("Android deployed API integration", () => {
     const actual = await app.inject({ method: "PATCH", url: "/api/settings", headers: { origin: "https://localhost", authorization: "Bearer valid-token" }, payload: { aiTitlesEnabled: true } });
     expect(actual.statusCode).toBe(200);
     expect(actual.headers["access-control-allow-origin"]).toBe("https://localhost");
-    expect(settings.set).toHaveBeenCalledWith("derived_uid", { aiTitlesEnabled: true });
+    expect(settings.set).toHaveBeenCalledWith("derived_uid", { aiTitlesEnabled: true }, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
   });
 
   it("exposes rate-limit backoff to native clients and still limits preflights", async () => {

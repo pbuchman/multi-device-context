@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.0 — device access (2026-10-02)
+
+- Per-installation context access with passkey-confirmed grants and revocation.
+- Desktop and Android installation-session exchange for the hosted authorization
+  policy.
+- Authenticated attachment streaming and installation-aware Firebase rules.
+- Existing-phone identity migration tooling and current operating guidance.
+
 ## 0.4.2 — Android and compact chat (2026-10-02)
 
 - Private Android support with bundled Capacitor assets, system sharing, durable

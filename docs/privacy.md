@@ -6,6 +6,22 @@ and original attachments are stored in the deployment's Firestore database and
 private Cloud Storage bucket. Other accounts cannot access them. This is **not
 end-to-end encryption**: the operator and infrastructure providers process data.
 
+New installations default to their own contexts, including replies added there
+by other devices. Full access is an explicit per-installation grant. The server,
+Firestore rules, and authenticated attachment API enforce the current grant;
+changing a local device name or ID does not grant access. The separate `/access`
+panel requires an action-bound passkey with user verification for grant changes.
+Native installation credentials stay in protected native storage. Browser
+installation credentials use a Secure, HttpOnly, SameSite cookie. Credential
+hashes and passkey public keys are stored server-side, while private passkeys
+remain with the passkey provider.
+
+Turning full access off removes foreign unsent drafts, queued files and messages,
+and unfinished operations after an explicit warning when the device receives the
+policy change. It does not delete synchronized cloud contexts. Existing unknown
+local drafts survive initial registration. Exported files and offline copies
+cannot be recalled remotely.
+
 ## Optional AI titles
 
 New accounts default to AI titles off. The existing owner explicitly requested
@@ -62,8 +78,10 @@ clipboard or remove files saved to a user-selected destination.
 ## Agent access and diagnostics
 
 An agent key grants full access to its owner's data, including permanent deletion.
-Only its hash is stored server-side. Google sign-in is required to manage keys or
-AI preferences. Keep keys in private configuration; revocation is effective on
+Only its hash is stored server-side. Google sign-in and a separate passkey
+confirmation are required to create or revoke keys. A restricted installation
+cannot create a broad agent key. Changing account-wide AI preferences requires
+full device access. Keep keys in private configuration; revocation is effective on
 subsequent API authentication. `watch` observes newly created contexts, not edits
 to existing contexts, and runs only when explicitly started.
 
@@ -73,5 +91,6 @@ are 60 pre-authentication requests per minute per IP, 600 requests per minute
 globally, and 120 authenticated requests per minute per owner. Agent key creation
 is limited to five per minute and ten active keys per owner. HTTP 429 responses
 include `Retry-After`. These limits are not a hard total billing or storage cap:
-approved users can also write directly through Firebase, protected by owner-scoped
-rules.
+approved users can also write context data through Firebase, protected by account
+and installation rules. Attachment bytes use the authenticated streaming API;
+direct client access to Cloud Storage is denied.

@@ -11,6 +11,10 @@ export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLa
 export type PlatformAdapter = {
   kind: "browser" | "desktop" | "android";
   native?: NativePlatform;
+  /** Native helpers keep installation credentials out of the renderer. */
+  exchangeSession?(accessToken: string): Promise<unknown>;
+  openAccessPanel?(deviceId: string): Promise<void>;
+  invalidateTransfers?(): Promise<void>;
   activity?: { readonly initialActive: boolean; subscribe(listener: (active: boolean) => void): () => void };
   shareFile?: (file: NativeFile) => Promise<boolean>;
   assertCanSignOut?(): void;
@@ -20,7 +24,7 @@ export type PlatformAdapter = {
 export class DesktopUpdateRequiredError extends Error {}
 
 /** Only the installed preload advertises this private implementation affordance. */
-type ReviewedDesktopBridge = DesktopBridge & { readonly reviewedSignOut?: true; signOut(reviewedIds?: readonly string[]): Promise<void> };
+type ReviewedDesktopBridge = DesktopBridge & { exchangeInstallationSession?(accessToken: string): Promise<unknown>; openAccessPanel?(deviceId: string): Promise<void>; invalidateTransfers?(): Promise<void>; readonly reviewedSignOut?: true; signOut(reviewedIds?: readonly string[]): Promise<void> };
 
 export async function createPlatformAdapter(options: {
   mobile?: boolean;
@@ -38,7 +42,11 @@ export async function createPlatformAdapter(options: {
   const assertCanSignOut = () => {
     if (bridge.reviewedSignOut !== true) throw new DesktopUpdateRequiredError("Update this desktop app before signing out. This installed version cannot safely preserve newly arriving shares; your local data has not been cleared.");
   };
-  return { kind: "desktop", assertCanSignOut, native: {
+  return { kind: "desktop", assertCanSignOut,
+    ...(bridge.exchangeInstallationSession ? { exchangeSession: (token: string) => bridge.exchangeInstallationSession!(token) } : {}),
+    ...(bridge.openAccessPanel ? { openAccessPanel: (id: string) => bridge.openAccessPanel!(id) } : {}),
+    ...(bridge.invalidateTransfers ? { invalidateTransfers: () => bridge.invalidateTransfers!() } : {}),
+    native: {
     ...bridge,
     signOut: async (reviewedIds = []) => {
       assertCanSignOut();

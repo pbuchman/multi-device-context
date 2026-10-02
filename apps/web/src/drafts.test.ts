@@ -18,3 +18,35 @@ it("R3: concurrent edits preserve both versions and deletion beats a stale write
   await first.remove([a]); await second.save(a, { ...emptyDraft(), text: "Stale" });
   expect((await first.list())[a]).toBeUndefined();
 });
+
+it("keeps both writers visible in own mode and preserves recovered local work after an access downgrade", async () => {
+  const { applyLocalAccess } = await import("./local-access.js");
+  const namespace = "test:own-recovery", device = crypto.randomUUID();
+  await applyLocalAccess(namespace, { id: device, mode: "own", version: 1 }, [a]);
+  const first = new DraftStore(namespace), second = new DraftStore(namespace);
+  const base = { ...emptyDraft(), local: false };
+  await first.save(a, { ...base, text: "First writer" });
+  expect(await second.save(a, { ...base, text: "Second writer" })).toBe(true);
+  expect(Object.values(await second.list()).map(d => d.text).sort()).toEqual(["First writer", "Second writer"]);
+  await applyLocalAccess(namespace, { id: device, mode: "all", version: 2 }, [a]);
+  await applyLocalAccess(namespace, { id: device, mode: "own", version: 3 }, [a]);
+  expect(Object.values(await new DraftStore(namespace).list()).map(d => d.text).sort()).toEqual(["First writer", "Second writer"]);
+});
+
+it("rolls back recovery provenance together with the draft when saving the recovered copy fails", async () => {
+  const { applyLocalAccess, readLocalAccess } = await import("./local-access.js");
+  const { vi } = await import("vitest");
+  const namespace = "test:recovery-atomic", device = crypto.randomUUID();
+  await applyLocalAccess(namespace, { id: device, mode: "own", version: 1 }, [a]);
+  const first = new DraftStore(namespace), second = new DraftStore(namespace), base = { ...emptyDraft(), local: false };
+  await first.save(a, { ...base, text: "First writer" });
+  const original = IDBObjectStore.prototype.put;
+  const failing = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+    if ((value as { title?: string }).title === "Recovered draft") throw new DOMException("Storage rejected recovery", "DataCloneError");
+    return original.call(this, value, key);
+  });
+  try { await expect(second.save(a, { ...base, text: "Second writer" })).rejects.toThrow("Storage rejected recovery"); }
+  finally { failing.mockRestore(); }
+  expect(Object.values(await first.list()).map(d => d.text)).toEqual(["First writer"]);
+  expect((await readLocalAccess(namespace))?.own).toEqual([a]);
+});

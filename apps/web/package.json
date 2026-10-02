@@ -13,6 +13,7 @@
     "@capacitor/app": "8.1.1",
     "@capacitor/core": "8.5.2",
     "@mdc/contracts": "workspace:*",
+    "@simplewebauthn/browser": "14.0.0",
     "firebase": "12.19.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"

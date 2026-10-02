@@ -24,7 +24,7 @@ export async function generateConfig({release=false}={}) {
  const publicDir=new URL('../../web/public/',import.meta.url); await mkdir(publicDir,{recursive:true});
  await writeFile(new URL('mobile-config.json',publicDir),JSON.stringify(config));
  const dir=new URL('../android/app/src/main/res/values/',import.meta.url); await mkdir(dir,{recursive:true});
- const values={com_auth0_domain:config.auth0.domain,com_auth0_client_id:config.auth0.nativeClientId,mdc_audience:config.auth0.audience,mdc_connection:config.auth0.connection,mdc_fixture:fixture?'true':'false'};
+ const values={mdc_app_origin:origin,com_auth0_domain:config.auth0.domain,com_auth0_client_id:config.auth0.nativeClientId,mdc_audience:config.auth0.audience,mdc_connection:config.auth0.connection,mdc_fixture:fixture?'true':'false'};
  await writeFile(new URL('mobile_config.xml',dir),`<resources>\n${Object.entries(values).map(([k,v])=>`<string name="${k}" translatable="false">${escapeXml(v)}</string>`).join('\n')}\n</resources>\n`);
  return config;
 }

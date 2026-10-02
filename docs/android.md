@@ -100,6 +100,11 @@ Select the serial explicitly even if only one device is listed. An `unauthorized
 or absent device cannot be used. Open **Multi Device Context** from the launcher
 and sign in using the same Google account as the desktop app.
 
+A new installation starts with access to contexts it creates. Use the browser
+access panel and its passkey confirmation to grant access to all account contexts.
+For an existing installation, follow the identity-preserving migration in the
+[device-access guide](operations/device-access.md).
+
 For an update, increment `MDC_ANDROID_VERSION_CODE`, rebuild with the same private
 key and repeat `adb install -r`. Do not uninstall, clear app data, or use a
 different key to work around an upgrade failure: those actions can discard

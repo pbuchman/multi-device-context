@@ -7,11 +7,12 @@ import { DurableOutbox } from "./outbox.js";
 if (location.hostname !== "127.0.0.1") throw new Error("Local emulator only");
 const app = initializeApp({ projectId: "demo-mdc", apiKey: "emulator-only" }, "migration-proof");
 const legacy = new URLSearchParams(location.search).has("legacy");
-const configure = (db: Parameters<typeof connectFirestoreEmulator>[0]) => connectFirestoreEmulator(db, "127.0.0.1", 18080, { mockUserToken: { sub: "migration-user" } });
+const migrationDeviceId = "00000000-0000-4000-8000-000000000001";
+const configure = (db: Parameters<typeof connectFirestoreEmulator>[0]) => connectFirestoreEmulator(db, "127.0.0.1", 18080, { mockUserToken: { sub: "migration-user", mdcDeviceId: migrationDeviceId } });
 if (!legacy) await prepareHistory(app, configure);
 const db = initializeFirestore(app, { localCache: legacy ? persistentLocalCache({ tabManager: persistentMultipleTabManager() }) : memoryLocalCache() });
 configure(db);
-const contextId = "00000000-0000-4000-8000-000000000001", itemId = "00000000-0000-4000-8000-000000000002";
+const contextId = migrationDeviceId, itemId = "00000000-0000-4000-8000-000000000002";
 const path = `users/migration-user/contexts/${contextId}`;
 const itemRef = doc(db, `${path}/items/${itemId}`);
 const drafts = new DraftStore("demo-mdc:migration-user");
@@ -19,7 +20,7 @@ const outbox = new DurableOutbox({ projectId: "demo-mdc", uid: "migration-user" 
 const device = { id: contextId, name: "Synthetic" };
 Object.assign(window, { historyProof: {
   seed: async () => {
-    const batch = writeBatch(db); batch.set(doc(db, path), { title: "Fixture", createdAt: serverTimestamp(), updatedAt: serverTimestamp(), deleting: false });
+    const batch = writeBatch(db); batch.set(doc(db, path), { title: "Fixture", originDeviceId: contextId, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), deleting: false });
     batch.set(itemRef, { content: { kind: "text", text: "SYNTHETIC_OLD_HISTORY" }, device, createdAt: serverTimestamp(), ready: true, deleting: false });
     await batch.commit(); await getDocFromServer(itemRef);
     await drafts.save(contextId, { ...emptyDraft(), text: "SYNTHETIC_UNSENT_DRAFT" });

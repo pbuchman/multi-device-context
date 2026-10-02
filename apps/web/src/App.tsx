@@ -1,3 +1,6 @@
+import { AccessPage } from "./AccessPage.js";
+import { isAccessPageRequest } from "./browser-identity.js";
+import { applyLocalAccess, readLocalAccess } from "./local-access.js";
 import { createAccountSignOut, type AccountSignOut, type SignOutSummary } from "./account-signout.js";
 import { prepareHistory } from "./history.js";
 import { ContextOperations } from "./operations.js";
@@ -8,7 +11,6 @@ import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent } from "react";
 
 import { useNavigation } from "./navigation.js";
-import { AgentKeys, type AgentKeyClient } from "./AgentKeys.js";
 
 import { SessionManager, type ActiveSession } from "./auth.js";
 import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
@@ -57,11 +59,14 @@ export type WorkspaceOutbox = {
 export type WorkspaceServices = {
   remove?(contextId: Id, itemId?: Id): Promise<boolean>;
   initialContextId?: Id;
-  agentKeys?: AgentKeyClient;
   settings?: { getSettings(): Promise<{ aiTitlesEnabled: boolean }>; setSettings(enabled: boolean): Promise<{ aiTitlesEnabled: boolean }> };
   isDesktop?: boolean;
   platformKind?: "browser" | "desktop" | "android";
   appOrigin?: string;
+  accessMode?: "own" | "all";
+  accessActive?(): boolean;
+  checkAccess?(): Promise<void>;
+  openAccessPanel?(): Promise<void>;
   activity?: { initialActive: boolean; subscribe(listener: (active: boolean) => void): Unsubscribe };
   subscribeNavigation?: (listener: (id?: Id) => void) => Unsubscribe;
   viewer: Viewer;
@@ -249,7 +254,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const live = useRef({ services, active, mounted: true });
   live.current.services = services;
   live.current.active = active;
-  const isLive = useCallback(() => !signingOut.current && live.current.mounted && live.current.services === services
+  const isLive = useCallback(() => (services.accessActive?.() ?? true) && !signingOut.current && live.current.mounted && live.current.services === services
     && (services.platformKind !== "android" || live.current.active), [services]);
   const restorePanelFocus = useCallback(() => {
     window.setTimeout(() => {
@@ -480,6 +485,11 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     return catchup.current.run(scope, async owns => {
       const current = () => owns() && isLive();
       if (!current()) return;
+      if (services.checkAccess) {
+        services.pause?.();
+        await services.checkAccess();
+        if (!current()) return;
+      }
       for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
       const versionsAtStart = { ...streamVersions.current };
       suppressCatchupAutoSelect.current = true;
@@ -536,7 +546,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (deletionReady) {
         await deletionCleanup.finish(current, () => {
           setSyncStreams(state => ({ ...state, deleted: { confirmed: true, failed: false }, deletedItems: { confirmed: true, failed: false } }));
-          if (services.platformKind === "android") services.resume?.();
+          if (services.platformKind === "android" || services.checkAccess) services.resume?.();
         });
       }
     }, cause => {
@@ -551,7 +561,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [applyDeleted, applyDeletedItems, deletionCleanup, isLive, navigation.selectedRef, services]);
 
   useEffect(() => {
-    if (services.platformKind !== "android" || signingOut.current) return;
+    if ((!services.checkAccess && services.platformKind !== "android") || signingOut.current) return;
     let current = true;
     if (!active) {
       backgroundInactive.current = true;
@@ -576,7 +586,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (!active) return;
     const online = () => void refresh();
     window.addEventListener("online", online);
-    return () => window.removeEventListener("online", online);
+    window.addEventListener("focus", online);
+    return () => { window.removeEventListener("online", online); window.removeEventListener("focus", online); };
   }, [active, refresh]);
 
   const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false, current: () => boolean = () => true) => {
@@ -1033,9 +1044,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <div className="profile-row"><span className="avatar large">{services.viewer.name.charAt(0).toUpperCase()}</span><span><strong>{services.viewer.name}</strong><small>{services.viewer.email ?? services.viewer.uid}</small></span></div>
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
-        {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
+        {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
         <div className="privacy-note">Incoming items stay here until you explicitly choose Copy. Other accounts cannot access your contexts. Service operators process data; this is not end-to-end encryption.</div>
-        {services.agentKeys ? <AgentKeys client={services.agentKeys} /> : null}
+        {services.openAccessPanel ? <><div className="setting-row"><span>Device access<small>{services.accessMode === "all" ? "All contexts" : "Only contexts created on this device"}</small></span></div><button type="button" className="dialog-action" onClick={() => void services.openAccessPanel!().catch(cause => setError(cause instanceof Error ? cause.message : "Could not open device access"))}>Manage device access…</button></> : null}
         <button type="button" className="signout" onClick={() => void prepareSignOut()}>Sign out</button>
       </> : null}
       {panel.kind === "signout" ? <>
@@ -1051,12 +1062,6 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   </>;
 }
 
-function browserDevice(): Device {
-  const key = "mdc-browser-device-id";
-  let id = localStorage.getItem(key);
-  if (!id || !IdSchema.safeParse(id).success) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
-  return { id: IdSchema.parse(id), name: "Browser" };
-}
 
 async function browserCopyFile(file: NativeFile): Promise<void> {
   if (!file.contentType.startsWith("image/") || file.contentType === "image/svg+xml" || !("ClipboardItem" in window)) {
@@ -1073,18 +1078,50 @@ async function browserSaveFile(file: NativeFile): Promise<boolean> {
   return true;
 }
 
-async function buildServices(session: ActiveSession): Promise<{ services: WorkspaceServices; dispose(): void }> {
+type WorkspaceBundle = { services: WorkspaceServices; invalidate(): void; settle(): Promise<void>; dispose(): void };
+export async function buildServices(session: ActiveSession, onAccessChange: () => void): Promise<WorkspaceBundle> {
   const native = session.platform.native;
-  const device = native ? await native.getDevice() : browserDevice();
+  const device = { id: session.device.id, name: session.device.name };
   await prepareHistory(session.firebaseApp);
-  const cloud = new FirebaseCloud(session.firebaseApp, session.uid, session.accessToken);
+  const cloud = new FirebaseCloud(session.firebaseApp, session.uid, session.accessToken, session.device);
   const outbox = new DurableOutbox({ projectId: session.config.firebase.projectId, uid: session.uid });
-  const operations = new ContextOperations(outbox, cloud);
+  let accessActive = true;
+  let checkPending: Promise<void> | undefined;
+  const checkAccess = (): Promise<void> => {
+    if (!accessActive) return Promise.reject(new Error("Device access changed. Refresh to continue."));
+    if (!checkPending) {
+      const operation = cloud.refreshDevice().then(current => {
+        if (current.id !== device.id || current.version !== session.device.version || current.mode !== session.device.mode) {
+          invalidate(); onAccessChange(); throw new Error("Device access changed. Reloading your contexts.");
+        }
+      });
+      checkPending = operation;
+      void operation.finally(() => { if (checkPending === operation) checkPending = undefined; }).catch(() => {});
+    }
+    return checkPending;
+  };
+  // Durable local fences are installed before intake or publishing can restore old work.
+  const verifiedPolicy = await cloud.refreshDevice();
+  if (verifiedPolicy.id !== device.id || verifiedPolicy.version !== session.device.version || verifiedPolicy.mode !== session.device.mode) {
+    cloud.invalidate(); outbox.close(); onAccessChange(); throw new Error("Device access changed. Reloading your contexts.");
+  }
+  const initialContexts = await cloud.refreshContexts();
+  await applyLocalAccess(outbox.namespace, session.device, initialContexts.records.filter(context => context.originDeviceId === device.id).map(context => context.id));
+  if (session.device.mode === "own") {
+    localStorage.removeItem(`mdc-confirmed:${outbox.namespace}`);
+    localStorage.removeItem(`mdc-read:${session.uid}:${device.id}`);
+  }
+  const operations = new ContextOperations(outbox, {
+    deletionMarkers: async () => { await checkAccess(); return cloud.deletionMarkers(); },
+    publish: record => cloud.publish(record), deleteContext: id => cloud.deleteContext(id), deleteItem: (id, item) => cloud.deleteItem(id, item),
+  });
   const runner = operations.runner;
+  runner.stop();
   let lastNativeContext: Id | undefined;
   let nativeIntakeEnabled = true;
   let nativeDrainRequested = false;
   let nativeDrainPending: Promise<Id | undefined> | undefined;
+  let transferInvalidation: Promise<void> = Promise.resolve();
   const storeNativeSnapshot = async (request: PendingClipboardShare) => {
     const parts = sharePartsFromSnapshot(request.snapshot);
     const drafts = parts.map((part, index): ShareDraft => ({
@@ -1119,6 +1156,13 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
     })().finally(() => { nativeDrainPending = undefined; });
     return nativeDrainPending;
   };
+  function invalidate() {
+    if (!accessActive) return;
+    accessActive = false; nativeIntakeEnabled = false; runner.stop(); cloud.invalidate();
+    transferInvalidation = session.platform.invalidateTransfers?.() ?? Promise.resolve();
+    void transferInvalidation.catch(() => {});
+  }
+  await checkAccess();
   const initialNativeId = await drainNative();
   let activityActive = session.platform.activity?.initialActive ?? true;
   const stopActivity = session.platform.activity?.subscribe(value => { activityActive = value; });
@@ -1132,18 +1176,31 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
       return () => { nativeIntakeEnabled = previousIntake; if (!wasStopped && activityActive) runner.resume(); };
     },
     settle: async () => { await Promise.all([runner.stopAndWait(), nativeDrainPending ?? Promise.resolve()]); },
-    signOut: (cleanup, nativeIds) => session.signOut(cleanup, nativeIds),
+    signOut: (cleanup, nativeIds) => { accessActive = false; cloud.invalidate(); return session.signOut(cleanup, nativeIds); },
   });
   const initialNavigation = await native?.takeNavigation?.();
   if (initialNavigation && !initialNavigation.contextId && !initialNativeId) window.history.replaceState({}, "", "/");
-  // Android starts paused until its guarded foreground reads and durable cleanup
-  // complete. Desktop/browser retain their existing startup publishing behavior.
-  if (session.platform.kind === "android") runner.stop();
-  else void runner.drain().catch(() => {});
+  // Every platform starts paused until policy verification, scoped reads and durable cleanup finish.
+  runner.stop();
+  const stopLocalPolicy = subscribeLocal(() => {
+    void readLocalAccess(outbox.namespace).then(local => {
+      if (accessActive && !accountSignOut.locked && local && (local.deviceId !== device.id || local.version > session.device.version || local.mode !== session.device.mode)) { invalidate(); onAccessChange(); }
+    }).catch(() => { if (accessActive) { invalidate(); onAccessChange(); } });
+  });
+  const stopPolicy = cloud.subscribeDevice(current => {
+    if (!accessActive || accountSignOut.locked) return;
+    if (current.id !== device.id || current.version !== session.device.version || current.mode !== session.device.mode) { invalidate(); onAccessChange(); }
+  }, () => { if (accessActive && !accountSignOut.locked) { invalidate(); onAccessChange(); } });
   return {
     services: {
       ...(initialNavigation?.contextId || initialNativeId ? { initialContextId: initialNavigation?.contextId ?? initialNativeId! } : {}),
-      agentKeys: cloud,
+      accessMode: session.device.mode,
+      accessActive: () => accessActive,
+      checkAccess,
+      openAccessPanel: async () => {
+        if (session.platform.openAccessPanel) await session.platform.openAccessPanel(device.id);
+        else window.open(`${session.config.appOrigin}/access?device=${encodeURIComponent(device.id)}`, "_blank", "noopener,noreferrer");
+      },
       settings: cloud,
       remove: (contextId, itemId) => operations.remove(contextId, itemId),
       isDesktop: session.platform.kind === "desktop",
@@ -1160,9 +1217,9 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
       device,
       cloud,
       outbox,
-      drain: () => accountSignOut.locked ? Promise.resolve() : runner.drain(),
+      drain: () => accountSignOut.locked || !accessActive ? Promise.resolve() : runner.drain(),
       pause: () => runner.stop(),
-      resume: () => { if (!accountSignOut.locked) runner.resume(); },
+      resume: () => { if (!accountSignOut.locked && accessActive) runner.resume(); },
       copyText: native ? (value) => native.copyText(value) : (value) => navigator.clipboard.writeText(value),
       copyFile: native ? (file) => native.copyFile(file) : browserCopyFile,
       saveFile: native ? (file) => native.saveFile(file) : browserSaveFile,
@@ -1184,22 +1241,42 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
         },
       } : {}),
     },
-    dispose: () => { stopActivity?.(); nativeIntakeEnabled = false; runner.stop(); outbox.close(); },
+    invalidate,
+    settle: async () => { await Promise.all([runner.stopAndWait(), nativeDrainPending ?? Promise.resolve(), transferInvalidation]); },
+    dispose: () => { stopPolicy(); stopLocalPolicy(); stopActivity?.(); nativeIntakeEnabled = false; accessActive = false; cloud.invalidate(); runner.stop(); outbox.close(); },
   };
 }
 
-export default function App() {
+function WorkspaceApp() {
   const manager = useMemo(() => new SessionManager(), []);
   const [session, setSession] = useState<ActiveSession>();
-  const [workspace, setWorkspace] = useState<{ services: WorkspaceServices; dispose(): void }>();
+  const [workspace, setWorkspace] = useState<WorkspaceBundle>();
+  const workspaceRef = useRef<WorkspaceBundle | undefined>(undefined);
+  const lastBuiltSession = useRef<ActiveSession | undefined>(undefined);
+  const changing = useRef<Promise<void> | undefined>(undefined);
   const [state, setState] = useState<"loading" | "login" | "ready" | "error">("loading");
   const [error, setError] = useState<string>();
+
+  const reloadAccess = useCallback(() => {
+    if (changing.current) return;
+    const previous = workspaceRef.current;
+    previous?.invalidate();
+    setState("loading");
+    const operation = (async () => {
+      const next = await manager.restartDataSession();
+      await previous?.settle(); previous?.dispose(); workspaceRef.current = undefined;
+      setWorkspace(undefined); setSession(next);
+    })().catch(cause => { setError(cause instanceof Error ? cause.message : "Could not verify device access"); setState("error"); });
+    changing.current = operation;
+    void operation.finally(() => { if (changing.current === operation) changing.current = undefined; });
+  }, [manager]);
 
   const start = useCallback(async () => {
     setState("loading"); setError(undefined);
     try {
       await manager.prepare();
-      const restored = await manager.restore();
+      let restored = await manager.restore();
+      if (restored && restored === lastBuiltSession.current) { workspaceRef.current?.invalidate(); restored = await manager.restartDataSession(); await workspaceRef.current?.settle(); }
       if (!restored) { setState("login"); return; }
       setSession(restored);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Contexts is unavailable"); setState("error"); }
@@ -1207,12 +1284,13 @@ export default function App() {
   useEffect(() => { void start(); }, [start]);
   useEffect(() => {
     if (!session) return;
+    lastBuiltSession.current = session;
     let cancelled = false;
-    void buildServices(session).then((created) => {
-      if (cancelled) created.dispose(); else { setWorkspace(created); setState("ready"); }
-    }).catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : "Could not start synchronization"); setState("error"); });
+    void buildServices(session, reloadAccess).then((created) => {
+      if (cancelled) created.dispose(); else { workspaceRef.current = created; setWorkspace(created); setState("ready"); }
+    }).catch((cause: unknown) => { if (cancelled) return; setError(cause instanceof Error ? cause.message : "Could not start synchronization"); setState("error"); });
     return () => { cancelled = true; };
-  }, [session]);
+  }, [session, reloadAccess]);
   useEffect(() => () => workspace?.dispose(), [workspace]);
 
   if (state === "ready" && workspace) return <ContextWorkspace services={workspace.services} />;
@@ -1221,4 +1299,8 @@ export default function App() {
     {state === "login" ? <><h1>Move a thought between your computers.</h1><p>Sign in with your Google account. Your contexts are isolated from other accounts. AI titles are optional; service operators process stored data.</p><button type="button" className="login-button" onClick={() => void manager.login().then((active) => { if (active) setSession(active); }).catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : "Sign in failed"); setState("error"); })}>Continue with Google</button></> : null}
     {state === "error" ? <><h1>Contexts is unavailable</h1><p role="alert">{error}</p><button type="button" className="login-button" onClick={() => void start()}>Retry</button></> : null}
   </div></main>;
+}
+
+export default function App() {
+  return isAccessPageRequest() ? <AccessPage /> : <WorkspaceApp />;
 }

@@ -20,6 +20,28 @@ export const DeviceSchema = z
   .strict();
 export type Device = z.infer<typeof DeviceSchema>;
 
+export const DeviceAccessSchema = z.enum(["own", "all"]);
+export type DeviceAccess = z.infer<typeof DeviceAccessSchema>;
+export const DevicePlatformSchema = z.enum(["browser", "desktop", "android"]);
+export const DeviceEnrollmentSchema = z.object({ name: z.string().trim().min(1).max(80), platform: DevicePlatformSchema }).strict();
+export const AccessDeviceSchema = DeviceSchema.extend({
+  platform: DevicePlatformSchema,
+  mode: DeviceAccessSchema,
+  version: z.number().int().positive(),
+  createdAt: z.number().nonnegative(),
+  updatedAt: z.number().nonnegative(),
+}).strict();
+export type AccessDevice = z.infer<typeof AccessDeviceSchema>;
+export const DeviceCredentialSchema = z.object({ deviceId: IdSchema, credential: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
+export const DeviceSessionSchema = z.object({ uid: z.string().min(1), customToken: z.string().min(1), device: AccessDeviceSchema }).strict();
+export type DeviceSession = z.infer<typeof DeviceSessionSchema>;
+export const AccessActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("set-device-access"), targetId: IdSchema, expectedVersion: z.number().int().positive(), mode: DeviceAccessSchema }).strict(),
+  z.object({ action: z.literal("create-agent-key"), name: z.string().trim().min(1).max(80) }).strict(),
+  z.object({ action: z.literal("revoke-agent-key"), targetId: IdSchema }).strict(),
+]);
+export type AccessAction = z.infer<typeof AccessActionSchema>;
+
 const textContentSchema = z
   .object({
     kind: z.enum(["text", "code"]),
@@ -210,7 +232,8 @@ export const AgentContextInputSchema = z.object({
 export type AgentItemInput = z.infer<typeof AgentItemInputSchema>;
 export const AgentKeyNameSchema = z.object({ name: z.string().trim().min(1).max(80) }).strict();
 export const RenameContextSchema = z.object({ title: TitleSchema }).strict();
-export type AgentKeyInfo = { id: string; name: string; createdAt: number; lastUsedAt: number | null };
+export const AgentKeyInfoSchema = z.object({ id: IdSchema, name: z.string().min(1).max(80), createdAt: z.number().nonnegative(), lastUsedAt: z.number().nonnegative().nullable() }).strict();
+export type AgentKeyInfo = z.infer<typeof AgentKeyInfoSchema>;
 
 export function contextIdFromPath(path: string): Id | undefined {
   const match = /^\/contexts\/([^/]+)\/?$/.exec(path);
