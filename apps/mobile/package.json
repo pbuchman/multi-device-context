@@ -1,0 +1,27 @@
+{
+  "name": "@mdc/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "config": "node --experimental-strip-types scripts/config.mjs",
+    "build": "node --experimental-strip-types scripts/build.mjs",
+    "sync": "cap sync android",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "android:test": "cd android && ./gradlew testDebugUnitTest",
+    "android:lint": "cd android && ./gradlew lintDebug",
+    "android:debug": "node --experimental-strip-types scripts/build.mjs && cap sync android && cd android && ./gradlew assembleDebug",
+    "android:release": "node --experimental-strip-types scripts/build.mjs --release && cap sync android && cd android && ./gradlew assembleRelease",
+    "android:install": "cd android && ./gradlew installDebug",
+    "android:guards": "node scripts/release-guards.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/app": "8.1.1",
+    "@mdc/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.2"
+  }
+}

@@ -1,6 +1,6 @@
 # Multi Device Context
 
-A simple application for sharing personal contexts across Windows and macOS.
+A simple application for sharing personal contexts across Android, Windows, macOS, and the web.
 Each context contains text, code, links, screenshots, and file attachments.
 Signing in with the same Google account makes the same content available on
 every device.
@@ -14,12 +14,16 @@ checks and the remaining first-launch and sign-in checks on the target machines.
 - [Download private preview v0.3.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.3.0)
 - [Agent API, CLI and portable skill](docs/agent-api.md)
 - [Installation and sharing](docs/installation.md)
+- [Private Android build, USB installation and verification](docs/android.md)
 - [Home-dev deployment, updates and recovery](docs/operations/deployment.md)
 - [Requirements and initial design](docs/requirements.md)
 - [Architecture and implementation scope](docs/superpowers/specs/2026-09-30-installable-app-design.md)
 
-Paste publishes into the selected context immediately. **Share clipboard** in
-the tray/menu bar captures the current clipboard into a new context. Incoming
+The compact chat interface uses a hidden chats drawer below 840 CSS pixels,
+including narrow desktop windows. Ordinary text paste edits your draft; **Send**
+publishes it. Pasted files require confirmation. **Paste and send** and
+**Choose and send files** provide explicit immediate sharing. **Share clipboard**
+in the tray/menu bar captures the current clipboard into a new context. Incoming
 contexts open automatically on your other running devices while preserving drafts.
 Incoming items leave the receiving clipboard unchanged until you choose **Copy**.
 Contexts have optional short AI titles, direct links, and permanent deletion.

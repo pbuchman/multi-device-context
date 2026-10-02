@@ -42,6 +42,20 @@ async function open() {
   };
 }
 describe("durable native clipboard queue", () => {
+  it("refuses account clearing when a share arrived outside the reviewed snapshot", async () => {
+    const { store } = await open();
+    await store.writeSession({ uid: "owner", subject: "google-oauth2|owner", refreshToken: "secret", authScope: "X".repeat(43) });
+    const first = await store.enqueue({ text: "reviewed", files: [] });
+    const generation = store.accountGeneration();
+    const incoming = store.enqueue({ text: "unreviewed", files: [] });
+    await expect(store.clearAccount([first.id])).rejects.toThrow(/changed/);
+    await incoming;
+    expect(store.pendingShares()).toHaveLength(2); expect(store.accountGeneration()).toBe(generation);
+    expect(store.readSession()?.uid).toBe("owner");
+    await expect(store.clearAccount([])).rejects.toThrow(/changed/);
+    await store.clearAccount(store.pendingShares().map(share => share.id));
+    expect(store.pendingShares()).toHaveLength(0);
+  });
   it("persists exact bytes before returning and replays them after restart without plaintext", async () => {
     const { path, store } = await open();
     const pending = await store.enqueue({

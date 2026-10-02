@@ -2,17 +2,19 @@
 
 This document records the requirements collected on 30 September 2026. It
 preserves product behavior and deployment obligations for the implementation
-phase. Architecture proposals below remain subject to design review.
+phase, with compact-chat behavior updated on 1 October 2026. Architecture proposals below remain subject to design review.
 
 ## Confirmed product behavior
 
-- Support Windows and macOS, initially a Dell Pro and a MacBook Pro.
+- Support Android, Windows, macOS, and the web; Android phone first, DUDU 7 later.
 - Start at login and remain accessible through the Windows system tray or
   macOS menu bar.
 - Use a consistent, simplified ChatGPT-style interface: contexts in a left
-  sidebar and the selected context's items on the right.
+  sidebar and the selected context's items on the right. Below 840 CSS pixels,
+  the sidebar becomes a hidden drawer on every platform.
 - Share text, code blocks, links, screenshots, and file attachments.
-- Pasting into an open context immediately shares the pasted item.
+- Ordinary text paste edits a local draft; binary paste requires confirmation.
+  Explicit **Paste and send** and **Choose and send files** share immediately.
 - Choosing **Share clipboard** from the tray creates a new context and
   immediately shares the clipboard contents there.
 - Incoming items appear in their context. They enter the receiving computer's

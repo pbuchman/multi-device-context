@@ -1,9 +1,12 @@
+import { apiUrl } from "./api.js";
 import { liveDocumentQuery } from "./queries.js";
 import { ContentSchema, DeviceSchema, attachmentPath, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
 import type { FirebaseApp } from "firebase/app";
 import {
   collection,
+  disableNetwork,
   doc,
+  enableNetwork,
   getDocs,
   getDocsFromServer,
   initializeFirestore,
@@ -144,6 +147,8 @@ function sorted<T extends { id: Id; createdAt: number }>(records: T[], descendin
 export class FirebaseCloud {
   readonly #firestore: Firestore;
   readonly #storage: FirebaseStorage;
+  #networkEnabled = true;
+  #networkTransition: Promise<void> = Promise.resolve();
 
   constructor(
     app: FirebaseApp,
@@ -166,6 +171,14 @@ export class FirebaseCloud {
       records.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
       emit({ records, fromCache: snapshot.metadata.fromCache, hasPendingWrites: snapshot.metadata.hasPendingWrites });
     }, (error) => fail(error));
+  }
+
+  async refreshContexts(): Promise<CloudSnapshot<ContextRecord>> {
+    const live = query(collection(this.#firestore, `users/${this.uid}/contexts`), where("deleting", "==", false));
+    const snapshot = await getDocsFromServer(live);
+    const records = snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value));
+    records.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
+    return { records, fromCache: false, hasPendingWrites: snapshot.metadata.hasPendingWrites };
   }
 
   subscribeItems(
@@ -195,6 +208,14 @@ export class FirebaseCloud {
     return () => { active = false; unsubscribe(); };
   }
 
+  async refreshItems(contextId: Id): Promise<CloudSnapshot<ItemRecord>> {
+    const live = query(collection(this.#firestore, `users/${this.uid}/contexts/${contextId}/items`), where("deleting", "==", false));
+    const snapshot = await getDocsFromServer(live);
+    const records = snapshot.docs.map(entry => itemFromDocument(contextId, entry))
+      .filter((value): value is ItemRecord => Boolean(value));
+    return { records: sorted(records, false), fromCache: false, hasPendingWrites: snapshot.metadata.hasPendingWrites };
+  }
+
   async publish(record: QueuedShare): Promise<void> {
     try {
       await publishQueuedShare(record, this.#writePort());
@@ -215,10 +236,34 @@ export class FirebaseCloud {
     return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedContexts`), snapshot => emit(snapshot.docs.map(d => d.id)), fail);
   }
 
+  async refreshDeletedContexts(): Promise<Id[]> {
+    const snapshot = await getDocsFromServer(collection(this.#firestore, `users/${this.uid}/deletedContexts`));
+    return snapshot.docs.map(document => document.id as Id);
+  }
+
+  setNetworkEnabled(enabled: boolean): Promise<void> {
+    const transition = this.#networkTransition.catch(() => undefined).then(async () => {
+      // Firestore starts enabled. Re-enabling an active stream can register its
+      // listen targets twice; only real foreground/background transitions touch it.
+      if (this.#networkEnabled === enabled) return;
+      await (enabled ? enableNetwork(this.#firestore) : disableNetwork(this.#firestore));
+      this.#networkEnabled = enabled;
+    });
+    this.#networkTransition = transition;
+    return transition;
+  }
+
   subscribeDeletedItems(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe {
     return onSnapshot(collection(this.#firestore, `users/${this.uid}/deletedItems`), snapshot => emit(snapshot.docs.map(d => {
       const [contextId, itemId] = d.id.split("_"); return { contextId: contextId!, itemId: itemId! };
     })), fail);
+  }
+  async refreshDeletedItems(): Promise<{ contextId: Id; itemId: Id }[]> {
+    const snapshot = await getDocsFromServer(collection(this.#firestore, `users/${this.uid}/deletedItems`));
+    return snapshot.docs.map(document => {
+      const [contextId, itemId] = document.id.split("_");
+      return { contextId: contextId!, itemId: itemId! };
+    });
   }
   async deletionMarkers() {
     const [contexts, items] = await Promise.all(["deletedContexts", "deletedItems"].map(name => getDocsFromServer(collection(this.#firestore, `users/${this.uid}/${name}`))));
@@ -248,7 +293,7 @@ export class FirebaseCloud {
   }
 
   async #api(path: string, method: "GET" | "POST" | "DELETE" | "PATCH", body?: unknown): Promise<Response> {
-    const response = await fetch(path, {
+    const response = await fetch(apiUrl(path), {
       method,
       headers: { authorization: `Bearer ${await this.accessToken()}`, ...(body ? { "content-type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -303,7 +348,7 @@ export class FirebaseCloud {
         await batch.commit();
       },
       completeAttachment: async (record) => {
-        const response = await fetch(`/api/contexts/${record.contextId}/items/${record.itemId}/complete`, {
+        const response = await fetch(apiUrl(`/api/contexts/${record.contextId}/items/${record.itemId}/complete`), {
           method: "POST",
           headers: { authorization: `Bearer ${await this.accessToken()}` },
         });

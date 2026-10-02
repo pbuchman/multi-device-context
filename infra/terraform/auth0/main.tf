@@ -40,7 +40,7 @@ locals {
     native = {
       name      = "Multi Device Context Desktop"
       type      = "native"
-      callbacks = ["multi-device-context://auth/callback"]
+      callbacks = concat(["multi-device-context://auth/callback"], var.android_auth0_domain == null ? [] : ["com.multidevicecontext.mobile://${var.android_auth0_domain}/android/com.multidevicecontext.mobile/callback"])
     }
   }
 }

@@ -283,6 +283,7 @@ export class OutboxRunner {
   #stopped = false;
   #drainRequested = false;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #idleWaiters = new Set<() => void>();
   constructor(
     private readonly outbox: DurableOutbox,
     private readonly port: PublishPort,
@@ -335,6 +336,8 @@ export class OutboxRunner {
         if (!this.#stopped) await this.#scheduleRemaining();
       } finally {
         this.#running = false;
+        for (const resolve of this.#idleWaiters) resolve();
+        this.#idleWaiters.clear();
         if (!this.#stopped && this.#drainRequested) {
           this.#drainRequested = false;
           void this.drain().catch(() => {});
@@ -366,6 +369,13 @@ export class OutboxRunner {
     this.#drainRequested = false;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
+  }
+
+  get stopped(): boolean { return this.#stopped; }
+
+  async stopAndWait(): Promise<void> {
+    this.stop();
+    if (this.#running) await new Promise<void>(resolve => this.#idleWaiters.add(resolve));
   }
 
   resume(): void {

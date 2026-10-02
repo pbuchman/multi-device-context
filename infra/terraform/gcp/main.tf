@@ -68,7 +68,7 @@ resource "google_firestore_database" "app" {
 resource "google_identity_platform_config" "app" {
   provider           = google-beta
   project            = google_project.app.project_id
-  authorized_domains = [trimprefix(var.app_origin, "https://")]
+  authorized_domains = [trimprefix(var.app_origin, "https://"), "localhost"]
   sign_in {
     allow_duplicate_emails = false
     anonymous { enabled = false }
@@ -87,7 +87,7 @@ resource "google_apikeys_key" "browser" {
   name         = "mdc-browser"
   display_name = "Multi Device Context browser"
   restrictions {
-    browser_key_restrictions { allowed_referrers = ["${var.app_origin}/*"] }
+    browser_key_restrictions { allowed_referrers = ["${var.app_origin}/*", "https://localhost/*"] }
     api_targets { service = "identitytoolkit.googleapis.com" }
     api_targets { service = "securetoken.googleapis.com" }
     api_targets { service = "firestore.googleapis.com" }
@@ -121,7 +121,7 @@ resource "google_storage_bucket" "attachments" {
   # User deletion removes live bytes; no automatic retention of deleted objects.
   soft_delete_policy { retention_duration_seconds = 0 }
   cors {
-    origin          = [var.app_origin]
+    origin          = [var.app_origin, "https://localhost"]
     method          = ["GET", "HEAD", "POST", "PUT"]
     response_header = ["Content-Type", "Content-Length", "Content-Range", "ETag"]
     max_age_seconds = 3600

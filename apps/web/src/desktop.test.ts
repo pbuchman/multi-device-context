@@ -1,9 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
-import type { DesktopBridge } from "@mdc/contracts";
+import type { DesktopBridge, PendingClipboardShare } from "@mdc/contracts";
 
 import { drainNativeClipboardQueue } from "./desktop.js";
 
 describe("native clipboard queue", () => {
+  it("does not import an inbox result after its account was disposed", async () => {
+    let current=true;let resolve!:(requests:PendingClipboardShare[])=>void;
+    const bridge={getPendingClipboardShares:()=>new Promise<PendingClipboardShare[]>(done=>{resolve=done;}),acknowledgeClipboardShare:vi.fn(async()=>{})};
+    const store={hasNativeRequest:vi.fn(async()=>false),storeNativeSnapshot:vi.fn(async()=>{}),markNativeAcknowledged:vi.fn(async()=>{})};
+    const pending=drainNativeClipboardQueue(bridge,store,()=>current);
+    current=false;resolve([{id:"00000000-0000-4000-8000-000000000001",capturedAt:1,snapshot:{text:"pending",files:[]}}]);await pending;
+    expect(store.storeNativeSnapshot).not.toHaveBeenCalled();expect(bridge.acknowledgeClipboardShare).not.toHaveBeenCalled();
+  });
+  it("leaves the native share unacknowledged when disposed during its durable write", async () => {
+    let current=true;let resolve!:()=>void;
+    const request={id:"00000000-0000-4000-8000-000000000001",capturedAt:1,snapshot:{text:"pending",files:[]}};
+    const bridge={getPendingClipboardShares:async()=>[request],acknowledgeClipboardShare:vi.fn(async()=>{})};
+    const store={hasNativeRequest:async()=>false,storeNativeSnapshot:vi.fn(()=>new Promise<void>(done=>{resolve=done;})),markNativeAcknowledged:vi.fn(async()=>{})};
+    const pending=drainNativeClipboardQueue(bridge,store,()=>current);
+    await vi.waitFor(()=>expect(store.storeNativeSnapshot).toHaveBeenCalledTimes(1));current=false;resolve();await pending;
+    expect(bridge.acknowledgeClipboardShare).not.toHaveBeenCalled();expect(store.markNativeAcknowledged).not.toHaveBeenCalled();
+  });
   it("stores the snapshot before acknowledging and retries a failed acknowledgement without duplication", async () => {
     const events: string[] = [];
     const request = {

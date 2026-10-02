@@ -1,10 +1,11 @@
+import { createAccountSignOut, type AccountSignOut, type SignOutSummary } from "./account-signout.js";
 import { prepareHistory } from "./history.js";
 import { ContextOperations } from "./operations.js";
 import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent } from "react";
 
 import { useNavigation } from "./navigation.js";
 import { AgentKeys, type AgentKeyClient } from "./AgentKeys.js";
@@ -13,7 +14,12 @@ import { SessionManager, type ActiveSession } from "./auth.js";
 import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
 import { drainNativeClipboardQueue, type NativeQueueStore } from "./desktop.js";
 import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
-import { DurableOutbox, OutboxRunner, type QueuedShare } from "./outbox.js";
+import { DurableOutbox, type QueuedShare } from "./outbox.js";
+import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
+import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, displayTitle, formatFileSize } from "./workspace-view.js";
+import { WorkspaceDialog, trapFocus } from "./workspace-overlay.js";
+import { useTimelineScroll } from "./use-timeline-scroll.js";
+import { frozenClipboardParts, insertClipboardText, keyboardSends, type SharePart } from "./workspace-input.js";
 import "./theme.css";
 
 type Unsubscribe = () => void;
@@ -23,6 +29,11 @@ export type WorkspaceCloud = {
   subscribeDeletedContexts?(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeContexts(emit: (snapshot: CloudSnapshot<ContextRecord>) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeItems(contextId: Id, emit: (snapshot: CloudSnapshot<ItemRecord>) => void, fail: (error: Error) => void): Unsubscribe;
+  refreshContexts?(): Promise<CloudSnapshot<ContextRecord>>;
+  refreshDeletedContexts?(): Promise<Id[]>;
+  refreshDeletedItems?(): Promise<{ contextId: Id; itemId: Id }[]>;
+  refreshItems?(contextId: Id): Promise<CloudSnapshot<ItemRecord>>;
+  setNetworkEnabled?(enabled: boolean): Promise<void>;
   renameContext(contextId: Id, title: string): Promise<void>;
   deleteContext(contextId: Id): Promise<void>;
   deleteItem(contextId: Id, itemId: Id): Promise<void>;
@@ -49,15 +60,22 @@ export type WorkspaceServices = {
   agentKeys?: AgentKeyClient;
   settings?: { getSettings(): Promise<{ aiTitlesEnabled: boolean }>; setSettings(enabled: boolean): Promise<{ aiTitlesEnabled: boolean }> };
   isDesktop?: boolean;
+  platformKind?: "browser" | "desktop" | "android";
+  appOrigin?: string;
+  activity?: { initialActive: boolean; subscribe(listener: (active: boolean) => void): Unsubscribe };
   subscribeNavigation?: (listener: (id?: Id) => void) => Unsubscribe;
   viewer: Viewer;
   device: Device;
   cloud: WorkspaceCloud;
   outbox: WorkspaceOutbox;
   drain(): Promise<void>;
+  pause?(): void;
+  resume?(): void;
   copyText(text: string): Promise<void>;
   copyFile(file: NativeFile): Promise<void>;
   saveFile(file: NativeFile): Promise<boolean>;
+  shareFile?: (file: NativeFile) => Promise<boolean>;
+  accountSignOut?: AccountSignOut;
   signOut(): Promise<void>;
   getLaunchAtLogin?: () => Promise<boolean>;
   setLaunchAtLogin?: (enabled: boolean) => Promise<void>;
@@ -67,7 +85,6 @@ export type WorkspaceServices = {
   drainNativeShares?: () => Promise<Id | undefined>;
 };
 
-type SharePart = { content: Content; bytes?: Uint8Array };
 type Theme = "system" | "light" | "dark";
 
 function newId(): Id { return IdSchema.parse(crypto.randomUUID()); }
@@ -89,6 +106,13 @@ export function deriveTitle(content: Content): string {
   return (candidate || (content.kind === "code" ? "Code snippet" : "Shared note")).slice(0, 160);
 }
 
+export function sharePartsFromSnapshot(snapshot: ClipboardSnapshot): SharePart[] {
+  return [
+    ...(snapshot.text?.length ? [{ content: { kind: "text" as const, text: snapshot.text } }] : []),
+    ...snapshot.files.map(file => ({ content: { kind: "attachment" as const, name: file.name, contentType: file.contentType, size: file.bytes.byteLength }, bytes: file.bytes })),
+  ];
+}
+
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(timestamp);
 }
@@ -103,44 +127,23 @@ function Icon({ children }: { children: ReactNode }) {
   return <span className="icon" aria-hidden="true">{children}</span>;
 }
 
-function ItemCard({
-  item, cloud, onCopy, onSave, onDelete,
-}: {
-  item: ItemRecord;
-  cloud: WorkspaceCloud;
-  onCopy(item: ItemRecord): void;
-  onSave(item: ItemRecord): void;
-  onDelete(item: ItemRecord): void;
-}) {
-  const attachment = item.content.kind === "attachment" ? item.content : undefined;
-  const textContent = item.content.kind !== "attachment" ? item.content : undefined;
-  const isUrl = textContent?.kind === "text" && /^https?:\/\/\S+$/.test(textContent.text);
-  return (
-    <article className="item-card">
-      <div className="item-meta"><Icon>▣</Icon>{item.device.name} · {formatTime(item.createdAt)}</div>
-      {item.content.kind === "code" ? (
-        <div className="code-card"><div className="code-label">Code <Icon>&lt;/&gt;</Icon></div><pre>{item.content.text}</pre></div>
-      ) : attachment ? (
-        <div className="file-card">
-          <AttachmentPreview item={item} cloud={cloud} />
-          <div className="file-detail"><Icon>▧</Icon><span>{attachment.name}<small>{formatBytes(attachment.size)} · {item.ready ? attachment.contentType : "Uploading"}</small></span></div>
-        </div>
-      ) : isUrl ? (
-        <a className="text-card link-card" href={textContent!.text} target="_blank" rel="noreferrer">{textContent!.text}</a>
-      ) : <div className="text-card">{textContent?.text}</div>}
-      <div className="item-actions">
-        <button type="button" onClick={() => onCopy(item)}><Icon>⧉</Icon>Copy</button>
-        {attachment ? <button type="button" onClick={() => onSave(item)} disabled={!item.ready}><Icon>↓</Icon>Save</button> : null}
-        <button type="button" className="danger-quiet" aria-label={`Delete ${attachment?.name ?? "item"}`} onClick={() => onDelete(item)}><Icon>×</Icon></button>
-      </div>
-    </article>
-  );
-}
+type ClipboardConfirmation = { id: string; target: Id; title: string; parts: SharePart[]; owner: WorkspaceServices };
+type WorkspacePanel =
+  | { kind: "context"; context: ContextRecord }
+  | { kind: "rename"; context: ContextRecord }
+  | { kind: "delete-context"; context: ContextRecord }
+  | { kind: "item"; item: ItemRecord }
+  | { kind: "delete-item"; item: ItemRecord }
+  | { kind: "clipboard"; snapshot: ClipboardConfirmation }
+  | { kind: "add"; contextId: Id; title: string }
+  | { kind: "settings" | "signout" };
 
 export function ContextWorkspace({ services }: { services: WorkspaceServices }) {
   const [contexts, setContexts] = useState<ContextRecord[]>([]);
   const confirmedKey = `mdc-confirmed:${services.outbox.namespace}`;
   const [confirmedContextIds, setConfirmedContextIds] = useState(() => readConfirmedContexts(confirmedKey));
+  const confirmedContextIdsRef = useRef(confirmedContextIds);
+  confirmedContextIdsRef.current = confirmedContextIds;
   const navigation = useNavigation(services.outbox.namespace, services.initialContextId);
   const { selectedId, select: setSelectedId, draftContext, text, codeMode } = navigation;
   const setText = (text: string) => navigation.patch({ text });
@@ -151,18 +154,48 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [search, setSearch] = useState("");
 
   const [aiEnabled, setAiEnabled] = useState<boolean>();
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [renaming, setRenaming] = useState(false);
+  const [panel, setPanel] = useState<WorkspacePanel>();
+  const settingsOpen = panel?.kind === "settings";
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [compact, setCompact] = useState(() => window.matchMedia?.("(max-width: 839px)").matches ?? false);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [dialogError, setDialogError] = useState<string>();
+  const [accountBlocked, setAccountBlocked] = useState(false);
+  const [signOutSummary, setSignOutSummary] = useState<SignOutSummary>();
+  const signOutFlow = useMemo(() => services.accountSignOut ?? createAccountSignOut({
+    namespace: services.outbox.namespace,
+    pause: () => { services.pause?.(); return () => services.resume?.(); },
+    settle: async () => {},
+    signOut: async cleanup => { await services.signOut(); await cleanup(); },
+  }), [services]);
+  const backgroundRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const menuRef = useRef<HTMLButtonElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const panelOpener = useRef<HTMLElement | null>(null);
+  const panelRef = useRef(panel); panelRef.current = panel;
+  const pendingPublishes = useRef(new Set<Promise<unknown>>());
+  const clipboardBusy = useRef(false);
+  const sendsInFlight = useRef(new Set<string>());
+  const [, setSendTick] = useState(0);
+  const binarySent = useRef(new Set<string>());
+  const fileTarget = useRef<{ id: Id; owner: WorkspaceServices } | undefined>(undefined);
+  const pickerWakeups = useRef(new Set<(cancelled?: boolean) => void>());
   const [renameText, setRenameText] = useState("");
-  const [renameTargetId, setRenameTargetId] = useState<Id>();
   const [queueCount, setQueueCount] = useState(0);
-  const [fromCache, setFromCache] = useState(false);
-  const [pendingWrites, setPendingWrites] = useState(false);
+  const [syncStreams, setSyncStreams] = useState({
+    contexts: { fromCache: false, pending: false, failed: false },
+    items: { fromCache: false, pending: false, failed: false },
+    deleted: { confirmed: !services.cloud.refreshDeletedContexts, failed: false },
+    deletedItems: { confirmed: !services.cloud.refreshDeletedItems, failed: false },
+  });
   const [error, setError] = useState<string>();
   const [toast, setToast] = useState<string>();
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("mdc-theme") as Theme | null) ?? "system");
   const [launchAtLogin, setLaunchAtLoginState] = useState<boolean>();
+  const [refreshing, setRefreshing] = useState(false);
+  const [active, setActive] = useState(() => services.activity?.initialActive ?? true);
   const fileInput = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number | undefined>(undefined);
   const localQueuedContexts = useRef(new Set<Id>());
@@ -178,7 +211,6 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, []);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
-  useEffect(() => { setMenuOpen(false); setRenaming(false); }, [selectedId]);
   useEffect(() => {
     try { localStorage.setItem(confirmedKey, JSON.stringify([...confirmedContextIds])); }
     catch { /* Firestore still verifies ownership when the listener connects. */ }
@@ -191,6 +223,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (!services.getLaunchAtLogin) return;
     void services.getLaunchAtLogin().then(setLaunchAtLoginState).catch(() => setError("Could not read the startup setting"));
   }, [services]);
+  useEffect(() => services.activity?.subscribe(setActive), [services.activity]);
 
   useEffect(() => {
     if (!services.settings) return;
@@ -204,7 +237,145 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const acknowledged = useRef(new Set<Id>());
   const deleted = useRef(new Set<Id>());
   const deletedItems = useRef(new Set<Id>());
-  useEffect(() => services.cloud.subscribeContexts((snapshot) => {
+  const knownDeletedItems = useRef(new Map<string, { contextId: Id; itemId: Id }>());
+  const suppressCatchupAutoSelect = useRef(false);
+  const backgroundInactive = useRef(false);
+  const streamVersions = useRef({ contexts: 0, deleted: 0, deletedItems: 0, items: 0 });
+  const deletionCleanup = useMemo(() => new DeletionCleanup(), [services.outbox]);
+  const catchup = useRef(new ForegroundCatchup());
+  const signingOut = useRef(false);
+  const nativeReconcile = useRef<(() => void) | undefined>(undefined);
+  const itemStatusScope = useRef<Id | undefined>(undefined);
+  const live = useRef({ services, active, mounted: true });
+  live.current.services = services;
+  live.current.active = active;
+  const isLive = useCallback(() => !signingOut.current && live.current.mounted && live.current.services === services
+    && (services.platformKind !== "android" || live.current.active), [services]);
+  const restorePanelFocus = useCallback(() => {
+    window.setTimeout(() => {
+      const opener = panelOpener.current;
+      if (opener?.isConnected && !opener.closest("[inert]")) opener.focus({ preventScroll: true });
+      else {
+        const row = sidebarRef.current?.querySelector<HTMLElement>('[aria-current="page"]');
+        (row && !row.closest("[inert]") ? row : menuRef.current)?.focus({ preventScroll: true });
+      }
+    }, 0);
+  }, []);
+  const closePanel = useCallback((force = false) => {
+    if (!force && (dialogBusy || accountBlocked)) return;
+    setPanel(undefined); setDialogError(undefined); restorePanelFocus();
+  }, [accountBlocked, dialogBusy, restorePanelFocus]);
+  const openPanel = (next: WorkspacePanel) => {
+    if (accountBlocked) return;
+    if (!panelRef.current) panelOpener.current = document.activeElement as HTMLElement;
+    setDialogError(undefined); setPanel(next);
+  };
+  const closeDrawer = useCallback((restore = true) => {
+    setDrawerOpen(false);
+    if (restore) window.setTimeout(() => menuRef.current?.focus({ preventScroll: true }), 0);
+  }, []);
+  useEffect(() => {
+    const query = window.matchMedia?.("(max-width: 839px)");
+    if (!query) return;
+    let lastFocus: HTMLElement | null = null;
+    const focused = (event: FocusEvent) => { if (event.target instanceof HTMLElement) lastFocus = event.target; };
+    const changed = () => {
+      setCompact(query.matches);
+      if (!query.matches) {
+        setDrawerOpen(false);
+        if (lastFocus?.classList.contains("drawer-close")) window.setTimeout(() => (sidebarRef.current?.querySelector<HTMLElement>('[aria-current="page"]') ?? sidebarRef.current?.querySelector<HTMLElement>(".new-context"))?.focus({ preventScroll: true }), 0);
+        else if (lastFocus?.classList.contains("menu-button")) window.setTimeout(() => mainRef.current?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true }), 0);
+      } else if (lastFocus && sidebarRef.current?.contains(lastFocus)) window.setTimeout(() => menuRef.current?.focus({ preventScroll: true }), 0);
+    };
+    query.addEventListener("change", changed); window.addEventListener("focusin", focused);
+    return () => { query.removeEventListener("change", changed); window.removeEventListener("focusin", focused); };
+  }, []);
+  useLayoutEffect(() => {
+    if (sidebarRef.current) sidebarRef.current.inert = compact && !drawerOpen;
+    if (mainRef.current) mainRef.current.inert = compact && drawerOpen;
+    if (compact && drawerOpen && !panel) sidebarRef.current?.querySelector<HTMLElement>(".drawer-close")?.focus({ preventScroll: true });
+  }, [compact, drawerOpen, panel]);
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (panel) { event.preventDefault(); closePanel(); }
+        else if (drawerOpen) { event.preventDefault(); closeDrawer(); }
+      } else if (!panel && compact && drawerOpen && sidebarRef.current) trapFocus(event, sidebarRef.current);
+    };
+    const back = (event: Event) => {
+      if (panel) { event.preventDefault(); closePanel(); }
+      else if (drawerOpen) { event.preventDefault(); closeDrawer(); }
+    };
+    window.addEventListener("keydown", key); window.addEventListener("mdc:back", back);
+    return () => { window.removeEventListener("keydown", key); window.removeEventListener("mdc:back", back); };
+  }, [panel, compact, drawerOpen, closePanel, closeDrawer]);
+  useEffect(() => { setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
+
+  const refreshers = useRef({ contexts: new ForegroundRefresh(), deleted: new ForegroundRefresh(), deletedItems: new ForegroundRefresh(), items: new ForegroundRefresh() });
+  const applyDeleted = useCallback(async (ids: Id[]) => {
+    if (!isLive()) return;
+    for (const id of ids) deleted.current.add(id);
+    if (panelRef.current?.kind === "clipboard" && deleted.current.has(panelRef.current.snapshot.target)) {
+      closePanel(true); showToast("The target chat was deleted. Pasted files were not sent.");
+    }
+    navigation.remove(ids);
+    setContexts(current => current.filter(context => !deleted.current.has(context.id)));
+    setOptimisticItems(current => current.filter(item => !deleted.current.has(item.contextId)));
+    setConfirmedContextIds(current => {
+      const retained = [...current].filter(id => !deleted.current.has(id));
+      return retained.length === current.size ? current : new Set(retained);
+    });
+    for (const id of ids) localQueuedContexts.current.delete(id);
+    if (deleted.current.has(navigation.selectedRef.current.id)) setSelectedId(undefined);
+    // Retry known failed tombstones too, even if a subsequent snapshot omits them.
+    const currentCleanup = deletionCleanup.reconcile(deleted.current,
+      id => services.outbox.removeContext?.(id) ?? Promise.resolve());
+    try {
+      await currentCleanup;
+      if (!isLive()) return;
+      setSyncStreams(current => ({ ...current, deleted: { confirmed: true, failed: false } }));
+    } catch (cause) {
+      if (!isLive()) throw cause;
+      setSyncStreams(current => ({ ...current, deleted: { confirmed: false, failed: true } }));
+      setError("Could not remove local pending shares");
+      throw cause;
+    }
+  }, [deletionCleanup, isLive, navigation.remove, services.outbox, setSelectedId]);
+  const applyDeletedItems = useCallback(async (records: { contextId: Id; itemId: Id }[]) => {
+    if (!isLive()) return;
+    for (const item of records) {
+      deletedItems.current.add(item.itemId);
+      knownDeletedItems.current.set(`item:${item.contextId}:${item.itemId}`, item);
+    }
+    setItems(current => current.filter(item => !deletedItems.current.has(item.id)));
+    setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id)));
+    try {
+      await deletionCleanup.reconcile(knownDeletedItems.current.keys(), key => {
+        const item = knownDeletedItems.current.get(key)!;
+        return services.outbox.removeItem?.(item.contextId, item.itemId) ?? Promise.resolve();
+      });
+      if (isLive()) setSyncStreams(current => ({ ...current, deletedItems: { confirmed: true, failed: false } }));
+    } catch (cause) {
+      if (isLive()) {
+        setSyncStreams(current => ({ ...current, deletedItems: { confirmed: false, failed: true } }));
+        setError("Could not remove local pending items");
+      }
+      throw cause;
+    }
+  }, [deletionCleanup, isLive, services.outbox]);
+  useEffect(() => {
+    live.current.mounted = true;
+    return () => {
+      live.current.mounted = false;
+      catchup.current.invalidate();
+      for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
+    };
+  }, [services]);
+  useEffect(() => {
+    if (services.platformKind === "android" && !active) return;
+    return services.cloud.subscribeContexts((snapshot) => {
+    if (!isLive()) return;
+    streamVersions.current.contexts += 1;
     setConfirmedContextIds((current) => {
       const confirmed = snapshot.records.filter(context => (context.syncState === "synced" || context.syncState === "cached") && !current.has(context.id));
       return confirmed.length ? new Set([...current, ...confirmed.map(context => context.id)]) : current;
@@ -212,10 +383,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const currentId = navigation.selectedRef.current.id;
     for (const context of snapshot.records) localQueuedContexts.current.delete(context.id);
     setContexts(snapshot.records.filter(c => !deleted.current.has(c.id)).map(context => ({ ...context, unread: context.id !== currentId && context.updatedAt > (lastRead.current[context.id] ?? context.createdAt) })));
-    setFromCache(snapshot.fromCache); setPendingWrites(snapshot.hasPendingWrites);
+    setSyncStreams(current => ({ ...current, contexts: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.contexts.failed } }));
     if (!snapshot.fromCache) {
       const ready = snapshot.records.filter(c => c.syncState === "synced" && c.ready !== false);
-      if (seenContexts.current) {
+      if (seenContexts.current && !suppressCatchupAutoSelect.current) {
         const incoming = ready.filter(c => !seenContexts.current!.has(c.id) && c.originDeviceId !== services.device.id && !localQueuedContexts.current.has(c.id))
           .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
         if (incoming[0]) setSelectedId(incoming[0].id);
@@ -225,25 +396,41 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (acknowledged.current.has(currentId) && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setSelectedId(undefined);
       else if (!navigation.selectedRef.current.drafts[currentId]?.local && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setError("This context is unavailable or has been deleted");
     }
-  }, cause => setError(cause.message || "Could not load contexts")), [services.cloud, services.device.id, setSelectedId]);
+    }, cause => {
+      if (!isLive()) return;
+      streamVersions.current.contexts += 1;
+      setSyncStreams(current => ({ ...current, contexts: { ...current.contexts, failed: true } }));
+      setError(cause.message || "Could not load contexts");
+    });
+  }, [active, isLive, services.cloud, services.device.id, services.platformKind, setSelectedId]);
 
-  useEffect(() => services.cloud.subscribeDeletedContexts?.(ids => {
-    for (const id of ids) deleted.current.add(id);
-    navigation.remove(ids);
-    setContexts(current => current.filter(c => !deleted.current.has(c.id)));
-    setOptimisticItems(current => current.filter(item => !deleted.current.has(item.contextId)));
-    setConfirmedContextIds(current => new Set([...current].filter(id => !deleted.current.has(id))));
-    for (const id of ids) { localQueuedContexts.current.delete(id); void services.outbox.removeContext?.(id).catch(() => setError("Could not remove local pending shares")); }
-    if (deleted.current.has(navigation.selectedRef.current.id)) setSelectedId(undefined);
-  }, () => setError("Could not synchronize deletions")), [services.cloud, services.outbox, navigation.remove, setSelectedId]);
+  useEffect(() => {
+    if (services.platformKind === "android" && !active) return;
+    return services.cloud.subscribeDeletedContexts?.(ids => {
+    if (!isLive()) return;
+    streamVersions.current.deleted += 1;
+    void applyDeleted(ids).catch(() => undefined);
+    }, () => {
+      if (!isLive()) return;
+      setSyncStreams(current => ({ ...current, deleted: { confirmed: false, failed: true } }));
+      setError("Could not synchronize deletions");
+    });
+  }, [active, applyDeleted, isLive, services.cloud, services.platformKind]);
 
-  useEffect(() => services.cloud.subscribeDeletedItems?.(records => {
-    for (const item of records) { deletedItems.current.add(item.itemId); void services.outbox.removeItem?.(item.contextId, item.itemId).catch(() => setError("Could not remove local pending item")); }
-    setItems(current => current.filter(item => !deletedItems.current.has(item.id)));
-    setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id)));
-  }, () => setError("Could not synchronize item deletions")), [services]);
+  useEffect(() => {
+    if (services.platformKind === "android" && !active) return;
+    return services.cloud.subscribeDeletedItems?.(records => {
+      if (!isLive()) return;
+      streamVersions.current.deletedItems += 1;
+      void applyDeletedItems(records).catch(() => undefined);
+    }, () => {
+      if (!isLive()) return;
+      setSyncStreams(current => ({ ...current, deletedItems: { confirmed: false, failed: true } }));
+      setError("Could not synchronize item deletions");
+    });
+  }, [active, applyDeletedItems, isLive, services.cloud, services.platformKind]);
 
-  useEffect(() => services.subscribeNavigation?.(id => { setSelectedId(id); setError(undefined); setMenuOpen(false); setRenaming(false); }), [services, setSelectedId]);
+  useEffect(() => services.subscribeNavigation?.(id => { if (!isLive()) return; setSelectedId(id); setError(undefined); }), [isLive, services, setSelectedId]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -256,23 +443,27 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const selectedContextConfirmed = selectedId !== undefined && confirmedContextIds.has(selectedId);
   useEffect(() => {
+    if (itemStatusScope.current !== selectedId) {
+      itemStatusScope.current = selectedId;
+      setSyncStreams(current => ({ ...current, items: { fromCache: false, pending: false, failed: false } }));
+    }
     if (!selectedId || !selectedContextConfirmed) { setItems([]); return; }
+    if (services.platformKind === "android" && !active) return;
+    streamVersions.current.items += 1;
     return services.cloud.subscribeItems(selectedId, (snapshot) => {
+      if (!isLive() || navigation.selectedRef.current.id !== selectedId) return;
+      streamVersions.current.items += 1;
       setItems(snapshot.records.filter(item => !deletedItems.current.has(item.id)));
-      setFromCache(snapshot.fromCache);
-      setPendingWrites(snapshot.hasPendingWrites);
+      setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.items.failed } }));
       const cloudIds = new Set(snapshot.records.map((item) => item.id));
       setOptimisticItems((current) => current.filter((item) => item.contextId !== selectedId || !cloudIds.has(item.id)));
-    }, (cause) => setError(cause.message || "Could not load shared items"));
-  }, [selectedContextConfirmed, selectedId, services.cloud]);
-
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { setMenuOpen(false); setSettingsOpen(false); setRenaming(false); }
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, []);
+    }, (cause) => {
+      if (!isLive() || navigation.selectedRef.current.id !== selectedId) return;
+      streamVersions.current.items += 1;
+      setSyncStreams(current => ({ ...current, items: { ...current.items, failed: true } }));
+      setError(cause.message || "Could not load shared items");
+    });
+  }, [active, isLive, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
 
   const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))];
   const selected = allContexts.find((context) => context.id === selectedId);
@@ -280,8 +471,117 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const visibleItems = [...items.filter(item => item.contextId === selectedId), ...optimisticItems.filter((item) => item.contextId === selectedId)]
     .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
 
-  const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false) => {
+  const scroll = useTimelineScroll(selectedId, visibleItems.map(item => item.id));
+
+  const refresh = useCallback((): Promise<void> => {
+    if (!isLive() || !services.cloud.refreshContexts || !services.cloud.refreshDeletedContexts) return Promise.resolve();
+    const selectedAtStart = navigation.selectedRef.current.id;
+    const scope = `${services.viewer.uid}:${selectedAtStart}`;
+    return catchup.current.run(scope, async owns => {
+      const current = () => owns() && isLive();
+      if (!current()) return;
+      for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
+      const versionsAtStart = { ...streamVersions.current };
+      suppressCatchupAutoSelect.current = true;
+      setRefreshing(true);
+      const tasks: Promise<void>[] = [
+        refreshers.current.contexts.run(`${services.viewer.uid}:contexts`, () => services.cloud.refreshContexts!(), snapshot => {
+          if (!current() || streamVersions.current.contexts !== versionsAtStart.contexts) return;
+          for (const context of snapshot.records) seenContexts.current?.add(context.id);
+          setContexts(current => {
+            const queued = current.filter(context => localQueuedContexts.current.has(context.id));
+            const queuedIds = new Set(queued.map(context => context.id));
+            return [...queued, ...snapshot.records.filter(context => !queuedIds.has(context.id) && !deleted.current.has(context.id))];
+          });
+          setConfirmedContextIds(current => {
+            const incoming = snapshot.records.filter(context => !current.has(context.id));
+            return incoming.length ? new Set([...current, ...incoming.map(context => context.id)]) : current;
+          });
+          setSyncStreams(current => ({ ...current, contexts: { fromCache: false, pending: snapshot.hasPendingWrites, failed: false } }));
+        }),
+        refreshers.current.deleted.run(`${services.viewer.uid}:deleted`, () => services.cloud.refreshDeletedContexts!(), async ids => {
+          if (!current()) return;
+          if (streamVersions.current.deleted === versionsAtStart.deleted) return applyDeleted(ids);
+        }),
+        refreshers.current.deletedItems.run(`${services.viewer.uid}:deleted-items`, () => services.cloud.refreshDeletedItems?.() ?? Promise.resolve([]), async records => {
+          if (!current()) return;
+          if (streamVersions.current.deletedItems === versionsAtStart.deletedItems) return applyDeletedItems(records);
+        }),
+      ];
+      if (selectedAtStart && confirmedContextIdsRef.current.has(selectedAtStart) && services.cloud.refreshItems) {
+        tasks.push(refreshers.current.items.run(`${services.viewer.uid}:${selectedAtStart}`, () => services.cloud.refreshItems!(selectedAtStart), snapshot => {
+          if (!current() || navigation.selectedRef.current.id !== selectedAtStart || streamVersions.current.items !== versionsAtStart.items) return;
+          setItems(snapshot.records.filter(item => !deletedItems.current.has(item.id)));
+          const ids = new Set(snapshot.records.map(item => item.id));
+          setOptimisticItems(current => current.filter(item => item.contextId !== selectedAtStart || !ids.has(item.id)));
+          setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.items.failed } }));
+        }));
+      }
+      const results = await Promise.allSettled(tasks);
+      if (!current()) return;
+      if (results[0]?.status === "rejected" && streamVersions.current.contexts === versionsAtStart.contexts) {
+        setSyncStreams(state => ({ ...state, contexts: { ...state.contexts, failed: true } }));
+      }
+      if (results[3]?.status === "rejected" && navigation.selectedRef.current.id === selectedAtStart && streamVersions.current.items === versionsAtStart.items) {
+        setSyncStreams(state => ({ ...state, items: { ...state.items, failed: true } }));
+      }
+      const deletionReady = results[1]?.status === "fulfilled" && results[2]?.status === "fulfilled";
+      if (!deletionReady) setSyncStreams(state => ({ ...state, deleted: { confirmed: false, failed: true } }));
+      if (results[2]?.status !== "fulfilled") setSyncStreams(state => ({ ...state, deletedItems: { confirmed: false, failed: true } }));
+      if (results.some(result => result.status === "rejected")) {
+        setError(results.every(result => result.status === "rejected") ? "Could not refresh from the server" : "Some data could not be refreshed");
+      } else {
+        setError(message => message === "Could not refresh from the server" || message === "Some data could not be refreshed" || message === "Refresh timed out" ? undefined : message);
+      }
+      if (deletionReady) {
+        await deletionCleanup.finish(current, () => {
+          setSyncStreams(state => ({ ...state, deleted: { confirmed: true, failed: false }, deletedItems: { confirmed: true, failed: false } }));
+          if (services.platformKind === "android") services.resume?.();
+        });
+      }
+    }, cause => {
+      if (!isLive()) return;
+      if (cause) {
+        setSyncStreams(state => ({ ...state, deleted: { confirmed: false, failed: true } }));
+        setError(cause instanceof Error ? cause.message : "Could not refresh from the server");
+      }
+      setRefreshing(false);
+      suppressCatchupAutoSelect.current = backgroundInactive.current;
+    });
+  }, [applyDeleted, applyDeletedItems, deletionCleanup, isLive, navigation.selectedRef, services]);
+
+  useEffect(() => {
+    if (services.platformKind !== "android" || signingOut.current) return;
+    let current = true;
+    if (!active) {
+      backgroundInactive.current = true;
+      suppressCatchupAutoSelect.current = true;
+      catchup.current.invalidate();
+      for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
+      setRefreshing(false);
+      services.pause?.();
+      void services.cloud.setNetworkEnabled?.(false)?.catch(() => { if (isLive()) setError("Could not pause network access"); });
+      return () => { current = false; };
+    }
+    backgroundInactive.current = false;
+    void Promise.resolve(services.cloud.setNetworkEnabled?.(true)).then(async () => {
+      if (!current || !isLive()) return;
+      await refresh();
+    }).catch(() => {
+      if (current && isLive()) setError("Could not restore network access");
+    });
+    return () => { current = false; };
+  }, [active, refresh, services]);
+  useEffect(() => {
+    if (!active) return;
+    const online = () => void refresh();
+    window.addEventListener("online", online);
+    return () => window.removeEventListener("online", online);
+  }, [active, refresh]);
+
+  const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false, current: () => boolean = () => true) => {
     const queued = (await services.outbox.list()).filter(record => !deleted.current.has(record.contextId));
+    if (!current()) return;
     if (selectLatestNative) {
       selectContext = queued.filter((record) => record.nativeRequestId)
         .sort((left, right) => right.queuedAt - left.queuedAt)[0]?.contextId;
@@ -317,15 +617,16 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const pendingDeletionCount = useRef(0);
   const queueRefreshRevision = useRef(0);
   const refreshQueue = useCallback(async () => {
+    if (!isLive()) return;
     const revision = ++queueRefreshRevision.current;
     const queued = await services.outbox.list();
     const deletions = await services.outbox.deletions?.() ?? [];
-    if (revision !== queueRefreshRevision.current) return;
+    if (!isLive() || revision !== queueRefreshRevision.current) return;
     if (deletions.length) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
     else if (pendingDeletionCount.current) setError(current => current?.startsWith("Deletion is not confirmed") ? undefined : current);
     pendingDeletionCount.current = deletions.length;
     const cancelled = await services.outbox.cancelled?.();
-    if (revision !== queueRefreshRevision.current) return;
+    if (!isLive() || revision !== queueRefreshRevision.current) return;
     if (cancelled) {
       for (const id of cancelled.contexts) deleted.current.add(id);
       for (const id of cancelled.items) deletedItems.current.add(id);
@@ -339,81 +640,208 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [services.outbox]);
   useEffect(() => { void refreshQueue(); return subscribeLocal(() => { void refreshQueue(); }); }, [refreshQueue]);
   useEffect(() => {
-    if (queueCount === 0) return;
+    if (queueCount === 0 || (services.platformKind === "android" && !active)) return;
     const timer = window.setInterval(() => void refreshQueue(), 2_000);
     return () => window.clearInterval(timer);
-  }, [queueCount, refreshQueue]);
+  }, [active, queueCount, refreshQueue, services.platformKind]);
   useEffect(() => {
     let active = true;
     void restoreQueued().catch(() => { if (active) setError("Pending shares could not be restored"); });
     return () => { active = false; };
   }, [restoreQueued]);
   useEffect(() => {
-    if (!services.subscribeNativeShares || !services.drainNativeShares) return;
-    return services.subscribeNativeShares(() => {
-      void services.drainNativeShares!()
-        .then((contextId) => restoreQueued(contextId))
-        .then(refreshQueue)
-        .catch((cause: unknown) => {
-          void restoreQueued(undefined, true).then(refreshQueue).then(services.drain);
-          setError(cause instanceof Error ? cause.message : "Clipboard sharing failed");
-        });
-    });
-  }, [refreshQueue, restoreQueued, services]);
+    if (!services.subscribeNativeShares || !services.drainNativeShares || (services.platformKind === "android" && !active)) return;
+    let subscribed = true;
+    let running = false;
+    let requested = false;
+    const current = () => subscribed && isLive();
+    const reconcile = () => {
+      requested = true;
+      if (running || !current()) return;
+      running = true;
+      void (async () => {
+        try {
+          while (requested && current()) {
+            requested = false;
+            try {
+              const contextId = await services.drainNativeShares!();
+              if (!current()) return;
+              await restoreQueued(contextId, false, current);
+              if (current()) await refreshQueue();
+            } catch (cause) {
+              if (!current()) return;
+              // A durable write may have succeeded before native acknowledgement
+              // failed. Show that queue without losing the original intake error.
+              await restoreQueued(undefined, true, current).catch(() => undefined);
+              if (!current()) return;
+              await refreshQueue().catch(() => undefined);
+              if (!current()) return;
+              setError(cause instanceof Error ? cause.message : "Clipboard sharing failed");
+              void services.drain().catch(() => undefined);
+            }
+          }
+        } finally { running = false; }
+      })();
+    };
+    // Subscribe first: an event after the native snapshot schedules another read.
+    const unsubscribe = services.subscribeNativeShares(reconcile);
+    nativeReconcile.current = reconcile;
+    if (services.platformKind === "android") reconcile();
+    return () => {
+      subscribed = false;
+      if (nativeReconcile.current === reconcile) nativeReconcile.current = undefined;
+      unsubscribe();
+    };
+  }, [active, isLive, refreshQueue, restoreQueued, services]);
 
-  const share = useCallback(async (parts: SharePart[], forcedContextId?: Id, sentText?: string) => {
-    if (parts.length === 0) return;
-    const contextId = forcedContextId ?? selectedId ?? newId();
-    const createsContext = !contexts.some((context) => context.id === contextId);
-    const localTitle = navigation.selectedRef.current.drafts[contextId]?.title;
-    const manualTitle = Boolean(createsContext && localTitle && localTitle !== "New context");
-    const title = manualTitle ? localTitle! : deriveTitle(parts[0]!.content);
-    const now = Date.now();
-    try {
-      const drafts = parts.map((part, index): ShareDraft => ({
-        contextId,
-        itemId: newId(),
-        title,
-        content: ContentSchema.parse(part.content),
-        device: services.device,
-        createsContext: createsContext && index === 0,
-        ...(manualTitle ? { manualTitle: true } : {}),
-        ...(part.bytes ? { bytes: part.bytes } : {}),
-      }));
-      if (services.outbox.enqueueBatch) await services.outbox.enqueueBatch(drafts);
-      else for (const draft of drafts) await services.outbox.enqueue(draft);
-      navigation.commit(contextId, sentText);
-      if (createsContext) {
-        localQueuedContexts.current.add(contextId);
-        setContexts((current) => [{ id: contextId, title, createdAt: now, updatedAt: now, syncState: "pending" }, ...current]);
+  const share = useCallback((parts: SharePart[], forcedContextId?: Id, sentText?: string, onEnqueueStart?: () => void): Promise<boolean> => {
+    const contextId = forcedContextId ?? navigation.selectedRef.current.id;
+    if (!parts.length || !isLive() || accountBlocked || deleted.current.has(contextId)) return Promise.resolve(false);
+    const operation = (async () => {
+      let enqueued = false;
+      const createsContext = !contexts.some(context => context.id === contextId) && !localQueuedContexts.current.has(contextId);
+      const localTitle = navigation.selectedRef.current.drafts[contextId]?.title;
+      const manualTitle = Boolean(createsContext && localTitle && localTitle !== "New context");
+      const title = manualTitle ? localTitle! : deriveTitle(parts[0]!.content);
+      const now = Date.now();
+      try {
+        const drafts = parts.map((part, index): ShareDraft => ({
+          contextId, itemId: newId(), title, content: ContentSchema.parse(part.content), device: services.device,
+          createsContext: createsContext && index === 0,
+          ...(manualTitle ? { manualTitle: true } : {}), ...(part.bytes ? { bytes: part.bytes } : {}),
+        }));
+        if (!isLive() || deleted.current.has(contextId)) return false;
+        onEnqueueStart?.();
+        if (services.outbox.enqueueBatch) await services.outbox.enqueueBatch(drafts);
+        else for (const draft of drafts) await services.outbox.enqueue(draft);
+        enqueued = true;
+        if (!live.current.mounted || live.current.services !== services || deleted.current.has(contextId)) return true;
+        navigation.commit(contextId, sentText);
+        if (createsContext) {
+          localQueuedContexts.current.add(contextId);
+          setContexts(current => [{ id: contextId, title, createdAt: now, updatedAt: now, syncState: "pending" }, ...current.filter(context => context.id !== contextId)]);
+        }
+        // A late enqueue must never select the captured target again.
+        setOptimisticItems(current => [...current, ...drafts.map((draft, index) => ({ id: draft.itemId, contextId, content: draft.content, device: draft.device, createdAt: now + index, ready: draft.content.kind !== "attachment", syncState: "pending" as const }))]);
+        scroll.scrollToBottom(contextId);
+        await refreshQueue();
+        if (isLive()) {
+          void services.drain().then(refreshQueue).catch((cause: unknown) => { if (isLive()) setError(cause instanceof Error ? cause.message : "Sharing failed"); });
+          showToast("Shared · syncing to your other devices");
+        }
+        return true;
+      } catch (cause) {
+        if (live.current.mounted && live.current.services === services) setError(cause instanceof Error ? cause.message : "This item could not be shared");
+        return enqueued;
       }
-      if (navigation.selectedRef.current.id === selectedId || forcedContextId) setSelectedId(contextId);
-      setOptimisticItems((current) => [...current, ...drafts.map((draft, index) => ({
-        id: draft.itemId,
-        contextId,
-        content: draft.content,
-        device: draft.device,
-        createdAt: now + index,
-        ready: draft.content.kind !== "attachment",
-        syncState: "pending" as const,
-      }))]);
-      await refreshQueue();
-      void services.drain().then(refreshQueue).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Sharing failed"));
-      showToast("Shared · syncing to your other devices");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "This item could not be shared");
-    }
-  }, [contexts, refreshQueue, selectedId, services, showToast]);
+    })();
+    pendingPublishes.current.add(operation);
+    void operation.finally(() => pendingPublishes.current.delete(operation));
+    return operation;
+  }, [accountBlocked, contexts, isLive, navigation.commit, navigation.selectedRef, refreshQueue, scroll.scrollToBottom, services, showToast]);
 
-  const shareFiles = useCallback(async (files: File[] | NativeFile[], forcedContextId?: Id) => {
-    try { await share(await fileParts(files), forcedContextId); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Files could not be shared"); }
-  }, [share]);
+  const captureInput = () => ({
+    target: navigation.selectedRef.current.id, owner: services, revision: navigation.revisionRef.current,
+    text: navigation.selectedRef.current.drafts[navigation.selectedRef.current.id]?.text ?? "",
+    code: navigation.selectedRef.current.drafts[navigation.selectedRef.current.id]?.code ?? false,
+    start: textareaRef.current?.selectionStart ?? text.length, end: textareaRef.current?.selectionEnd ?? text.length,
+  });
+  type InputCapture = ReturnType<typeof captureInput>;
+  const ownsInput = (capture: InputCapture) => isLive() && !accountBlocked && capture.owner === live.current.services
+    && capture.target === navigation.selectedRef.current.id && capture.revision === navigation.revisionRef.current
+    && !deleted.current.has(capture.target)
+    && capture.start === (textareaRef.current?.selectionStart ?? capture.start) && capture.end === (textareaRef.current?.selectionEnd ?? capture.end);
+  const staleClipboard = () => { if (isLive()) setError("Your chat or draft changed while reading the clipboard. Nothing was sent or replaced. Paste again."); };
+  const applyTextPaste = (capture: InputCapture, pasted: string) => {
+    if (!ownsInput(capture)) { staleClipboard(); return; }
+    const inserted = insertClipboardText(capture, pasted);
+    ContentSchema.parse({ kind: capture.code ? "code" : "text", text: inserted.text });
+    setText(inserted.text);
+    window.setTimeout(() => {
+      if (navigation.selectedRef.current.id === capture.target && textareaRef.current?.value === inserted.text) textareaRef.current.setSelectionRange(inserted.caret, inserted.caret);
+    }, 0);
+  };
+  const receivePaste = async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    event.preventDefault(); if (accountBlocked || !isLive()) return;
+    const capture = captureInput();
+    const pastedText = event.clipboardData.getData("text/plain");
+    const browserFiles = [...event.clipboardData.files];
+    try {
+      if (!services.readClipboard && !browserFiles.length) { if (pastedText.length) applyTextPaste(capture, pastedText); return; }
+      const snapshot: ClipboardSnapshot = services.readClipboard ? await services.readClipboard() : {
+        ...(pastedText.length ? { text: pastedText } : {}),
+        files: (await fileParts(browserFiles)).flatMap(part => part.content.kind === "attachment" ? [{ name: part.content.name, contentType: part.content.contentType, bytes: part.bytes }] : []),
+      };
+      if (!ownsInput(capture)) { staleClipboard(); return; }
+      if (!snapshot.files.length) { if (snapshot.text?.length) applyTextPaste(capture, snapshot.text); else setError("The clipboard is empty or its format is not supported."); return; }
+      const parts = await frozenClipboardParts(snapshot, capture.code);
+      if (!ownsInput(capture)) { staleClipboard(); return; }
+      openPanel({ kind: "clipboard", snapshot: { id: crypto.randomUUID(), owner: services, target: capture.target, title: displayTitle(allContexts.find(context => context.id === capture.target)?.title), parts } });
+    } catch (cause) { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not read the clipboard"); }
+  };
+  const fastPaste = async () => {
+    if (!services.readClipboard || clipboardBusy.current || !isLive() || accountBlocked) return;
+    clipboardBusy.current = true; const capture = captureInput();
+    try {
+      const snapshot = await services.readClipboard();
+      const parts = await frozenClipboardParts(snapshot, capture.code);
+      if (!ownsInput(capture)) { staleClipboard(); return; }
+      if (!parts.length) { setError("The clipboard is empty or its format is not supported."); return; }
+      await share(parts, capture.target);
+    } catch (cause) { if (isLive()) setError(cause instanceof Error ? cause.message : "Clipboard sharing failed"); }
+    finally { clipboardBusy.current = false; }
+  };
+  const confirmClipboard = async (snapshot: ClipboardConfirmation) => {
+    if (binarySent.current.has(snapshot.id) || dialogBusy) return;
+    if (!isLive() || snapshot.owner !== services || deleted.current.has(snapshot.target)) { setDialogError("This clipboard request is no longer available. Nothing was sent."); return; }
+    binarySent.current.add(snapshot.id); setDialogBusy(true);
+    try { if (await share(snapshot.parts, snapshot.target)) closePanel(true); else binarySent.current.delete(snapshot.id); }
+    finally { setDialogBusy(false); }
+  };
+  const sendText = () => {
+    const capture = captureInput(), key = `${capture.target}:${capture.revision}`;
+    if (!capture.text.length || sendsInFlight.current.has(key)) return;
+    sendsInFlight.current.add(key); setSendTick(value => value + 1);
+    void share([{ content: { kind: capture.code ? "code" : "text", text: capture.text } }], capture.target, capture.text).finally(() => {
+      sendsInFlight.current.delete(key); if (live.current.mounted && live.current.services === services) setSendTick(value => value + 1);
+    });
+  };
+  useEffect(() => { for (const wake of [...pickerWakeups.current]) wake(); }, [active, accountBlocked, services]);
+  useEffect(() => () => { for (const wake of [...pickerWakeups.current]) wake(true); }, [services]);
+  const ownsPicker = (target: { id: Id; owner: WorkspaceServices }) => live.current.mounted
+    && target.owner === services && live.current.services === target.owner && !signingOut.current && !deleted.current.has(target.id);
+  const waitForPickerForeground = (target: { id: Id; owner: WorkspaceServices }): Promise<boolean> => new Promise(resolve => {
+    const wake = (cancelled = false) => {
+      if (cancelled || !ownsPicker(target)) { pickerWakeups.current.delete(wake); resolve(false); }
+      else if (isLive()) { pickerWakeups.current.delete(wake); resolve(true); }
+    };
+    pickerWakeups.current.add(wake); wake();
+  });
+  const sharePickedFiles = async (files: File[]) => {
+    const target = fileTarget.current; fileTarget.current = undefined;
+    if (!files.length || !target || !ownsPicker(target)) return;
+    try {
+      // Android can deliver ActivityResult before its foreground event. Retain
+      // the accepted files across that boundary, but never publish in background.
+      const parts = await fileParts(files);
+      while (await waitForPickerForeground(target)) {
+        let enqueueStarted = false;
+        if (await share(parts, target.id, undefined, () => { enqueueStarted = true; })) return;
+        // A second pause can arrive between waking and enqueue. Keep the
+        // same captured bytes until a later resume. An attempted durable
+        // write is never repeated here, even if it failed during a pause.
+        if (enqueueStarted || isLive() || !ownsPicker(target)) return;
+      }
+    } catch (cause) {
+      if (await waitForPickerForeground(target) && ownsPicker(target)) setError(cause instanceof Error ? cause.message : "Files could not be shared");
+    }
+  };
 
   const copyItem = async (item: ItemRecord) => {
     try {
       if (item.content.kind === "attachment") {
         const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
+        if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
         await services.copyFile({ name: item.content.name, contentType: item.content.contentType, bytes });
       } else await services.copyText(item.content.text);
       showToast("Copied to this device");
@@ -423,19 +851,34 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (item.content.kind !== "attachment") return;
     try {
       const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
+      if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
       if (await services.saveFile({ name: item.content.name, contentType: item.content.contentType, bytes })) showToast("File saved");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Save failed"); }
   };
+  const shareItem = async (item: ItemRecord) => {
+    if (item.content.kind !== "attachment" || !services.shareFile) return;
+    try {
+      const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
+      if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
+      if (await services.shareFile({ name: item.content.name, contentType: item.content.contentType, bytes })) showToast("Share sheet opened");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Share failed"); }
+  };
 
   const submitRename = async () => {
+    if (panel?.kind !== "rename" || accountBlocked) return;
+    const target = panel.context;
     const title = renameText.trim().slice(0, 160);
-    if (!selected || selected.id !== renameTargetId || !title) return;
+    if (!title) { setDialogError("Enter a chat name."); return; }
+    if (deleted.current.has(target.id)) { setDialogError("This chat has been deleted."); return; }
+    setDialogBusy(true); setDialogError(undefined);
     try {
-      if (selected.id === draftContext?.id) setDraftContext({ ...draftContext, title });
-      else await services.cloud.renameContext(selected.id, title);
-      setContexts((current) => current.map((context) => context.id === selected.id ? { ...context, title } : context));
-      setRenaming(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Rename failed"); }
+      if (navigation.selectedRef.current.drafts[target.id]?.local) navigation.patchFor(target.id, { title });
+      else await services.cloud.renameContext(target.id, title);
+      if (!isLive()) return;
+      setContexts(current => current.map(context => context.id === target.id ? { ...context, title } : context));
+      closePanel(true);
+    } catch (cause) { if (isLive()) setDialogError(cause instanceof Error ? cause.message : "Rename failed"); }
+    finally { setDialogBusy(false); }
   };
 
   const fallbackDeletes = useRef(new Map<string, () => Promise<void>>());
@@ -450,14 +893,14 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     fallbackDeletes.current.set(key, action); await action(); return true;
   };
   const deleteContext = async (context: ContextRecord) => {
-    if (!window.confirm(`Permanently delete “${context.title}” and all its items? There is no undo.`)) return;
-    setMenuOpen(false);
+    if (accountBlocked || !isLive()) return;
     try {
       const complete = await remove(context.id);
+      if (!isLive()) return;
       deleted.current.add(context.id); navigation.remove([context.id]);
       setContexts(current => current.filter(c => c.id !== context.id));
       setOptimisticItems(current => current.filter(item => item.contextId !== context.id));
-      if (selectedId === context.id) setSelectedId(undefined);
+      if (navigation.selectedRef.current.id === context.id) setSelectedId(undefined);
       if (complete) showToast("Context permanently deleted"); else setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
       await refreshQueue();
     } catch { setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
@@ -465,6 +908,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const deleteItem = async (item: ItemRecord) => {
     try {
       const complete = await remove(item.contextId, item.id);
+      if (!isLive()) return;
       deletedItems.current.add(item.id);
       setItems(current => current.filter(i => i.id !== item.id));
       setOptimisticItems(current => current.filter(i => i.id !== item.id));
@@ -479,101 +923,132 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   };
   const retry = async () => {
     setError(undefined); navigation.retry();
-    try { for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
+    nativeReconcile.current?.();
+    try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
     catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
   };
 
-  const signOut = async () => {
-    const [webPending, nativePending] = await Promise.all([services.outbox.count(), services.pendingNativeCount?.() ?? 0]);
-    if (webPending + nativePending > 0 && !window.confirm(`${webPending + nativePending} pending share(s) will be removed. Sign out?`)) return;
-    await navigation.clear();
-    await services.signOut();
-    window.location.reload();
+  const settleLocalInput = async () => {
+    await Promise.all([...pendingPublishes.current]);
+    await navigation.flush();
+  };
+  const prepareSignOut = async () => {
+    if (dialogBusy) return;
+    openPanel({ kind: "signout" }); setDialogBusy(true); setSignOutSummary(undefined);
+    const owner = services;
+    try {
+      const summary = await signOutFlow.prepare(settleLocalInput);
+      if (live.current.services === owner && live.current.mounted) setSignOutSummary(summary);
+    } catch (cause) {
+      if (live.current.services === owner && live.current.mounted) setDialogError(cause instanceof Error ? cause.message : "Could not read local data. Nothing was cleared.");
+    } finally { if (live.current.services === owner && live.current.mounted) setDialogBusy(false); }
+  };
+  const completeSignOut = async (retry = false) => {
+    if (dialogBusy || (!retry && !signOutSummary)) return;
+    const owner = services;
+    signingOut.current = true; setAccountBlocked(true); setDialogBusy(true); setDialogError(undefined);
+    try {
+      const result = retry ? await signOutFlow.retry() : await signOutFlow.confirm(signOutSummary!, settleLocalInput);
+      if (live.current.services !== owner || !live.current.mounted) return;
+      if (result.status === "changed") { setSignOutSummary(result.summary); setDialogError("Local data changed. Review the updated counts before confirming again."); }
+      else if (services.platformKind !== "browser") { window.location.reload(); }
+    } catch (cause) {
+      if (live.current.services === owner && live.current.mounted) setDialogError(cause instanceof Error ? cause.message : "Sign-out is incomplete. Retry to finish.");
+    } finally {
+      if (live.current.services === owner && live.current.mounted) { signingOut.current = signOutFlow.locked; setAccountBlocked(signOutFlow.locked); setDialogBusy(false); if (!signOutFlow.locked) { void refresh(); nativeReconcile.current?.(); } }
+    }
   };
 
+  const pendingWrites = syncStreams.contexts.pending || syncStreams.items.pending;
+  const fromCache = syncStreams.contexts.fromCache || syncStreams.items.fromCache;
   const syncLabel = queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
-    : fromCache ? "Offline history" : "Synced";
+    : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
 
-  return (
-    <div className="app-shell">
-      <aside className="sidebar" aria-label="Contexts sidebar">
-        <div className="brand"><span className="brand-mark"><Icon>▦</Icon></span>Contexts</div>
-        <button type="button" className="new-context" aria-label="New context" onClick={() => { setSelectedId(undefined); setError(undefined); }}><Icon>＋</Icon><span>New context</span></button>
-        <label className="search"><Icon>⌕</Icon><input type="search" aria-label="Search contexts" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search contexts" /></label>
-        <div className="sidebar-label">RECENT CONTEXTS</div>
-        <nav className="context-list" aria-label="Your contexts">
-          {visibleContexts.map((context) => <div className="context-row" key={context.id}><button type="button" key={context.id} aria-label={context.title === "New context" ? "Open new context draft" : context.title} aria-current={context.id === selectedId} onClick={() => setSelectedId(context.id)}><span>{context.title}</span>{context.unread ? <i aria-label="Unread" /> : null}</button><button type="button" className="context-delete" aria-label={`Delete context ${context.title}`} onClick={() => void deleteContext(context)}>×</button></div>)}
-        </nav>
-        <div className="sidebar-spacer" />
-        <div className="device-state"><div><span className={`status-dot ${fromCache ? "offline" : ""}`} />{syncLabel}</div><div><Icon>▣</Icon>{services.device.name} · This device</div></div>
-        <div className="account"><span className="avatar">{services.viewer.name.charAt(0).toLocaleUpperCase()}</span><span>{services.viewer.name}<small>Personal account</small></span><button type="button" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Icon>⚙</Icon></button></div>
-      </aside>
+  const panelTitle = panel?.kind === "context" ? "Chat options" : panel?.kind === "rename" ? "Rename chat" : panel?.kind === "delete-context" ? "Delete chat?" : panel?.kind === "item" ? "Message options" : panel?.kind === "delete-item" ? "Delete message?" : panel?.kind === "clipboard" ? "Send pasted files?" : panel?.kind === "add" ? "Add to this chat" : panel?.kind === "signout" ? "Sign out?" : "Settings";
+  const option = (icon: Parameters<typeof WorkspaceIcon>[0]["name"], label: string, action: () => void, disabled = false, description?: string) => <button type="button" className={`dialog-action ${icon === "trash" ? "danger" : ""}`} onClick={action} disabled={disabled || dialogBusy}><WorkspaceIcon name={icon} /><span>{label}{description ? <small>{description}</small> : null}</span></button>;
+  const confirmDelete = async () => {
+    if (!panel || dialogBusy) return;
+    setDialogBusy(true);
+    try {
+      if (panel.kind === "delete-context") await deleteContext(panel.context);
+      if (panel.kind === "delete-item") await deleteItem(panel.item);
+      closePanel(true);
+    } finally { setDialogBusy(false); }
+  };
 
-      <main className="main-panel">
-        <header className="titlebar">
-          <div className="title-group">
-            {renaming ? <input className="rename-input" aria-label="Context name" value={renameText} autoFocus onChange={(event) => setRenameText(event.target.value)} onBlur={() => void submitRename()} onKeyDown={(event) => { if (event.key === "Enter") void submitRename(); }} />
-              : <h1>{selected?.title ?? "New context"}</h1>}
-            <small><Icon>▣</Icon>{visibleItems.length} {visibleItems.length === 1 ? "item" : "items"} · Your account</small>
-          </div>
-          <div className="header-actions"><span className={`sync ${fromCache ? "offline" : ""}`}><Icon>✓</Icon>{syncLabel}</span><button type="button" aria-label="Context options" aria-expanded={menuOpen} disabled={!selected} onClick={() => setMenuOpen((open) => !open)}><Icon>•••</Icon></button></div>
-          {menuOpen && selected ? <div className="context-menu" role="menu">
-            <button type="button" onClick={() => { setRenameTargetId(selected.id); setRenameText(selected.title); setRenaming(true); setMenuOpen(false); }}>Rename context</button>
-            {!draftContext ? <button type="button" onClick={() => { void services.copyText(`${location.origin}/contexts/${selected.id}`).then(() => showToast("Context link copied")); setMenuOpen(false); }}>Copy link</button> : null}
-            {!services.isDesktop && !draftContext ? <a href={`multi-device-context://context/${selected.id}`}>Open in desktop app</a> : null}
-            <button type="button" className="danger" onClick={() => void deleteContext(selected)}>Delete context</button>
-          </div> : null}
-        </header>
-
-        {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" onClick={() => void retry()}>Retry</button><button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}>×</button></div> : null}
-        <section className="timeline" aria-label="Shared items">
-          {visibleItems.length ? <>{visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ItemCard item={item} cloud={services.cloud} onCopy={(value) => void copyItem(value)} onSave={(value) => void saveItem(value)} onDelete={(value) => void deleteItem(value)} /></Fragment>)}</>
-            : <div className="empty"><Icon>▧</Icon><strong>A little space for your context.</strong><span>Paste text, a screenshot, or a file.</span></div>}
-        </section>
-
-        <div className="composer-wrap">
-          <div className="composer">
-            <textarea rows={2} value={text} aria-label="Paste to share instantly, or type a note" placeholder={codeMode ? "Paste code to share instantly…" : "Paste anything to share instantly…"}
-              onChange={(event) => setText(event.target.value)}
-              onPaste={(event) => {
-                if (services.readClipboard) {
-                  event.preventDefault();
-                  void services.readClipboard().then((snapshot) => {
-                    if (snapshot.files.length) return shareFiles(snapshot.files);
-                    if (snapshot.text?.length) return share([{ content: { kind: codeMode || snapshot.text.trimStart().startsWith("```") ? "code" : "text", text: snapshot.text } }]);
-                    throw new Error("This clipboard format is not supported");
-                  }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Clipboard sharing failed"));
-                  return;
-                }
-                if (event.clipboardData.files.length) { event.preventDefault(); void shareFiles([...event.clipboardData.files]); return; }
-                const pasted = event.clipboardData.getData("text/plain");
-                if (pasted.length) { event.preventDefault(); void share([{ content: { kind: codeMode || pasted.trimStart().startsWith("```") ? "code" : "text", text: pasted } }]); }
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && text.length) {
-                  event.preventDefault(); const value = text; void share([{ content: { kind: codeMode ? "code" : "text", text: value } }], undefined, value);
-                }
-              }} />
-            <div className="composer-tools"><div><button type="button" aria-label="Attach files" onClick={() => fileInput.current?.click()}><Icon>＋</Icon></button><button type="button" aria-label="Share as code" aria-pressed={codeMode} onClick={() => setCodeMode((active) => !active)}><Icon>&lt;/&gt;</Icon></button></div><span>Paste to share <kbd>{navigator.platform.includes("Mac") ? "⌘ V" : "Ctrl V"}</kbd></span></div>
-          </div>
-          <div className="composer-note">Pastes share immediately. For a typed note, press Enter.<br />{aiEnabled ? "AI titles send the first text (up to 8,000 characters), or filename and type, to OpenRouter. File contents are not sent. Disable in Settings." : aiEnabled === false ? "AI titles are off. Titles are derived without an external model." : "AI title settings are loading. OpenRouter may receive the first text or filename; never file bytes."}</div>
-          <input ref={fileInput} type="file" multiple hidden onChange={(event) => { if (event.target.files) void shareFiles([...event.target.files]); event.target.value = ""; }} />
+  return <>
+    <div ref={backgroundRef} className={`app-shell ${compact && drawerOpen ? "drawer-open" : ""}`}>
+      {compact && drawerOpen ? <button className="drawer-backdrop" type="button" tabIndex={-1} aria-label="Close chats menu backdrop" onClick={() => closeDrawer()} /> : null}
+      <ChatSidebar elementRef={sidebarRef} compact={compact} open={drawerOpen} contexts={visibleContexts} selectedId={selectedId} search={search} onSearch={setSearch}
+        onSelect={id => { if (!accountBlocked) { setSelectedId(id); closeDrawer(false); } }}
+        onNew={() => { if (!accountBlocked) { setSelectedId(undefined); setError(undefined); closeDrawer(false); window.setTimeout(() => textareaRef.current?.focus(), 0); } }}
+        onClose={() => closeDrawer()} onOptions={context => openPanel({ kind: "context", context })} onSettings={() => openPanel({ kind: "settings" })}
+        onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={services.viewer.name} />
+      <main ref={mainRef} className="main-panel">
+        <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh()}
+          onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked} />
+        {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" disabled={accountBlocked} onClick={() => void retry()}>Retry</button>{error ? <button type="button" className="icon-button" aria-label="Dismiss error" onClick={() => setError(undefined)}><WorkspaceIcon name="close" /></button> : null}</div> : null}
+        <div className="timeline-region">
+          <section ref={scroll.viewport} className="timeline" aria-label="Messages to yourself"><div ref={scroll.content} className="timeline-content">
+            {visibleItems.length ? visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ChatMessage item={item} cloud={services.cloud} blocked={accountBlocked} onCopy={value => void copyItem(value)} onMore={item => openPanel({ kind: "item", item })} /></Fragment>)
+              : <div className="empty"><WorkspaceIcon name="stack" /><strong>A place for your thoughts.</strong><span>Message yourself. Send it to pick it up on another device.</span></div>}
+          </div></section>
+          {scroll.newMessages ? <button type="button" className="new-messages" onClick={() => scroll.scrollToBottom(selectedId)}>New messages <WorkspaceIcon name="save" /></button> : null}
         </div>
-        {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
+        <ChatComposer text={text} code={codeMode} android={services.platformKind === "android"} nativeClipboard={!!services.readClipboard} blocked={accountBlocked} sending={sendsInFlight.current.has(`${selectedId}:${navigation.revisionRef.current}`)} textareaRef={textareaRef}
+          onText={value => { if (!accountBlocked) setText(value); }} onPaste={event => { void receivePaste(event); }} onKey={event => {
+            if (keyboardSends({ key: event.key, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, isComposing: event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 }, services.platformKind === "android", codeMode)) { event.preventDefault(); sendText(); }
+          }} onAdd={() => openPanel({ kind: "add", contextId: selectedId, title: displayTitle(selected?.title) })} onCodeOff={() => setCodeMode(() => false)} onFastPaste={() => void fastPaste()} onSend={sendText} />
+        <input ref={fileInput} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; void sharePickedFiles(files); }} />
       </main>
-
-      {settingsOpen ? <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div className="settings-head"><h2 id="settings-title">Settings</h2><button type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button></div>
-        <div className="profile-row"><span className="avatar large">{services.viewer.name.charAt(0).toUpperCase()}</span><span><strong>{services.viewer.name}</strong><small>{services.viewer.email ?? services.viewer.uid}</small></span></div>
-        <label className="setting-row"><span>Theme<small>Choose how Contexts looks.</small></span><select value={theme} onChange={(event) => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-        <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start Contexts with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={(event) => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => setError("Could not change the startup setting")); }} /></label>
-        {services.settings ? <label className="setting-row"><span>AI context titles<small>Send first text or filename/type to OpenRouter. Turning off prevents new requests; already sent requests cannot be recalled.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => setAiEnabled(value.aiTitlesEnabled)).catch(() => setError("Could not save AI setting. Reopen Settings to retry.")); }} /></label> : null}
-        <div className="privacy-note"><Icon>▣</Icon><span>Incoming items stay here until you explicitly choose Copy. Other accounts cannot access your contexts. Service operators process data; this is not end-to-end encryption.</span></div>
-        {services.agentKeys ? <AgentKeys client={services.agentKeys} /> : null}
-        <button type="button" className="signout" onClick={() => void signOut()}>Sign out</button>
-      </section></div> : null}
     </div>
-  );
+    {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
+    {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()}>
+      {panel.kind === "context" ? <>
+        <p className="dialog-description">{displayTitle(panel.context.title)}</p>
+        {option("edit", "Rename chat", () => { setRenameText(panel.context.title === "New context" ? "" : panel.context.title); setPanel({ kind: "rename", context: panel.context }); })}
+        {!navigation.selectedRef.current.drafts[panel.context.id]?.local ? option("link", "Copy link", () => { const target = panel.context.id; void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${target}`).then(() => { if (isLive()) showToast("Chat link copied"); }).catch(cause => { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not copy the link"); }); closePanel(); }, false, "The link does not give other accounts access.") : null}
+        {!services.isDesktop && services.platformKind !== "android" && !navigation.selectedRef.current.drafts[panel.context.id]?.local ? <a className="dialog-action" href={`multi-device-context://context/${panel.context.id}`}><WorkspaceIcon name="share" /><span>Open in app</span></a> : null}
+        <div className="dialog-divider" />{option("trash", "Delete chat…", () => setPanel({ kind: "delete-context", context: panel.context }))}
+      </> : null}
+      {panel.kind === "rename" ? <form className="rename-form" onSubmit={event => { event.preventDefault(); void submitRename(); }}><label htmlFor="chat-name">Chat name</label><input id="chat-name" className="rename-input" aria-label="Chat name" maxLength={160} value={renameText} onChange={event => setRenameText(event.target.value)} disabled={dialogBusy} /><div className="dialog-buttons"><button type="button" disabled={dialogBusy} onClick={() => closePanel()}>Cancel</button><button type="submit" className="primary" disabled={dialogBusy || !renameText.trim()}>Save</button></div></form> : null}
+      {panel.kind === "item" ? <>
+        <p className="dialog-description">{panel.item.content.kind === "attachment" ? panel.item.content.name : `${panel.item.device.name} · ${formatTime(panel.item.createdAt)}`}</p>
+        {option("copy", panel.item.content.kind === "attachment" ? "Copy file" : "Copy message", () => { void copyItem(panel.item); closePanel(); }, panel.item.content.kind === "attachment" && !panel.item.ready)}
+        {panel.item.content.kind === "attachment" ? <>{option("save", "Save to this device…", () => { void saveItem(panel.item); closePanel(); }, !panel.item.ready)}{services.shareFile ? option("share", "Share through Android…", () => { void shareItem(panel.item); closePanel(); }, !panel.item.ready) : null}</> : null}
+        <div className="dialog-divider" />{option("trash", "Delete message…", () => setPanel({ kind: "delete-item", item: panel.item }))}
+      </> : null}
+      {panel.kind === "delete-context" || panel.kind === "delete-item" ? <><p className="dialog-description">{panel.kind === "delete-context" ? `“${displayTitle(panel.context.title)}” and all its messages will be permanently deleted from your devices.` : `${panel.item.content.kind === "attachment" ? `“${panel.item.content.name}”` : "This message"} will be permanently deleted from this chat on your devices.`} There is no undo.</p><div className="dialog-buttons"><button type="button" disabled={dialogBusy} onClick={() => closePanel()}>Cancel</button><button type="button" className="destructive" disabled={dialogBusy} onClick={() => void confirmDelete()}>{panel.kind === "delete-context" ? "Delete chat" : "Delete message"}</button></div></> : null}
+      {panel.kind === "clipboard" ? <>
+        <p className="dialog-description">Send this captured clipboard content to <strong>{panel.snapshot.title}</strong>? Your typed draft stays unchanged.</p>
+        <ul className="clipboard-files">{panel.snapshot.parts.map((part, index) => <li key={index}>{part.content.kind === "attachment" ? <><WorkspaceIcon name="file" /><span>{part.content.name}<small>{formatFileSize(part.content.size)}</small></span></> : <p className="clipboard-text">{part.content.text}</p>}</li>)}</ul>
+        <div className="dialog-buttons"><button type="button" disabled={dialogBusy} onClick={() => closePanel()}>Cancel</button><button type="button" className="primary" disabled={dialogBusy || deleted.current.has(panel.snapshot.target)} onClick={() => void confirmClipboard(panel.snapshot)}>Send files</button></div>
+      </> : null}
+      {panel.kind === "add" ? <>
+        <p className="dialog-description">{panel.title}</p>
+        {option("file", "Choose and send files…", () => { fileTarget.current = { id: panel.contextId, owner: services }; closePanel(); fileInput.current?.click(); }, false, "Selected files are sent immediately to this chat.")}
+        <button type="button" className="dialog-action" aria-label="Code mode" aria-pressed={navigation.selectedRef.current.drafts[panel.contextId]?.code ?? false} onClick={() => { if (!deleted.current.has(panel.contextId)) navigation.patchFor(panel.contextId, { code: !navigation.selectedRef.current.drafts[panel.contextId]?.code }); closePanel(); }}><WorkspaceIcon name="code" /><span>Code mode<small>{navigation.selectedRef.current.drafts[panel.contextId]?.code ? "On" : "Off"} · Applies to typed and pasted text</small></span></button>
+      </> : null}
+      {panel.kind === "settings" ? <>
+        <div className="profile-row"><span className="avatar large">{services.viewer.name.charAt(0).toUpperCase()}</span><span><strong>{services.viewer.name}</strong><small>{services.viewer.email ?? services.viewer.uid}</small></span></div>
+        <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+        {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
+        {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
+        <div className="privacy-note">Incoming items stay here until you explicitly choose Copy. Other accounts cannot access your contexts. Service operators process data; this is not end-to-end encryption.</div>
+        {services.agentKeys ? <AgentKeys client={services.agentKeys} /> : null}
+        <button type="button" className="signout" onClick={() => void prepareSignOut()}>Sign out</button>
+      </> : null}
+      {panel.kind === "signout" ? <>
+        <p className="dialog-description">Signing out removes this account’s local drafts and pending work from this device. Messages already synchronized remain on your other devices.</p>
+        {signOutSummary ? <dl className="signout-counts"><div><dt>Unsent drafts</dt><dd>{signOutSummary.drafts}</dd></div><div><dt>Queued messages and files</dt><dd>{signOutSummary.webShares}</dd></div><div><dt>Incoming native share batches</dt><dd>{signOutSummary.nativeBatches}</dd></div><div><dt>Unfinished deletions</dt><dd>{signOutSummary.deletions}</dd></div></dl> : <p>{dialogBusy ? "Checking local data…" : "Local data could not be checked. No cleanup was performed."}</p>}
+        <div className="dialog-buttons"><button type="button" disabled={dialogBusy || accountBlocked} onClick={() => closePanel()}>Cancel</button>
+          {signOutSummary ? <button type="button" className="destructive" disabled={dialogBusy} onClick={() => void completeSignOut()}>Confirm sign out</button> : <button type="button" disabled={dialogBusy} onClick={() => void prepareSignOut()}>Retry checking data</button>}
+          {accountBlocked && dialogError ? <button type="button" disabled={dialogBusy} onClick={() => void completeSignOut(true)}>Retry sign out</button> : null}
+        </div>
+      </> : null}
+      {dialogError ? <p className="dialog-error" role="alert">{dialogError}</p> : null}
+    </WorkspaceDialog> : null}
+  </>;
 }
 
 function browserDevice(): Device {
@@ -599,18 +1074,19 @@ async function browserSaveFile(file: NativeFile): Promise<boolean> {
 }
 
 async function buildServices(session: ActiveSession): Promise<{ services: WorkspaceServices; dispose(): void }> {
-  const device = session.bridge ? await session.bridge.getDevice() : browserDevice();
+  const native = session.platform.native;
+  const device = native ? await native.getDevice() : browserDevice();
   await prepareHistory(session.firebaseApp);
   const cloud = new FirebaseCloud(session.firebaseApp, session.uid, session.accessToken);
   const outbox = new DurableOutbox({ projectId: session.config.firebase.projectId, uid: session.uid });
   const operations = new ContextOperations(outbox, cloud);
   const runner = operations.runner;
-  const bridge = session.bridge;
   let lastNativeContext: Id | undefined;
+  let nativeIntakeEnabled = true;
+  let nativeDrainRequested = false;
+  let nativeDrainPending: Promise<Id | undefined> | undefined;
   const storeNativeSnapshot = async (request: PendingClipboardShare) => {
-    const parts: SharePart[] = request.snapshot.files.length
-      ? request.snapshot.files.map((file) => ({ content: { kind: "attachment", name: file.name, contentType: file.contentType, size: file.bytes.byteLength }, bytes: file.bytes }))
-      : request.snapshot.text?.length ? [{ content: { kind: "text", text: request.snapshot.text } }] : [];
+    const parts = sharePartsFromSnapshot(request.snapshot);
     const drafts = parts.map((part, index): ShareDraft => ({
       contextId: request.id,
       itemId: newId(),
@@ -629,62 +1105,86 @@ async function buildServices(session: ActiveSession): Promise<{ services: Worksp
     storeNativeSnapshot,
     markNativeAcknowledged: (id) => outbox.markNativeAcknowledged(id),
   };
-  const drainNative = async (): Promise<Id | undefined> => {
-    if (!bridge) return undefined;
+  const drainNative = (): Promise<Id | undefined> => {
+    if (!native || !nativeIntakeEnabled) return Promise.resolve(undefined);
+    nativeDrainRequested = true;
+    if (nativeDrainPending) return nativeDrainPending;
     lastNativeContext = undefined;
-    await drainNativeClipboardQueue(bridge, nativeStore);
-    return lastNativeContext;
+    nativeDrainPending = (async () => {
+      do {
+        nativeDrainRequested = false;
+        await drainNativeClipboardQueue(native, nativeStore, () => nativeIntakeEnabled);
+      } while (nativeDrainRequested && nativeIntakeEnabled);
+      return nativeIntakeEnabled ? lastNativeContext : undefined;
+    })().finally(() => { nativeDrainPending = undefined; });
+    return nativeDrainPending;
   };
   const initialNativeId = await drainNative();
-  const initialNavigation = await bridge?.takeNavigation?.();
+  let activityActive = session.platform.activity?.initialActive ?? true;
+  const stopActivity = session.platform.activity?.subscribe(value => { activityActive = value; });
+  const accountSignOut = createAccountSignOut({
+    namespace: outbox.namespace,
+    checkAvailable: () => session.platform.assertCanSignOut?.(),
+    ...(native ? { readNativeRequests: () => native.getPendingClipboardShares() } : {}),
+    pause: () => {
+      const wasStopped = runner.stopped, previousIntake = nativeIntakeEnabled;
+      nativeIntakeEnabled = false; runner.stop();
+      return () => { nativeIntakeEnabled = previousIntake; if (!wasStopped && activityActive) runner.resume(); };
+    },
+    settle: async () => { await Promise.all([runner.stopAndWait(), nativeDrainPending ?? Promise.resolve()]); },
+    signOut: (cleanup, nativeIds) => session.signOut(cleanup, nativeIds),
+  });
+  const initialNavigation = await native?.takeNavigation?.();
   if (initialNavigation && !initialNavigation.contextId && !initialNativeId) window.history.replaceState({}, "", "/");
-  void runner.drain().catch(() => {});
+  // Android starts paused until its guarded foreground reads and durable cleanup
+  // complete. Desktop/browser retain their existing startup publishing behavior.
+  if (session.platform.kind === "android") runner.stop();
+  else void runner.drain().catch(() => {});
   return {
     services: {
       ...(initialNavigation?.contextId || initialNativeId ? { initialContextId: initialNavigation?.contextId ?? initialNativeId! } : {}),
       agentKeys: cloud,
       settings: cloud,
       remove: (contextId, itemId) => operations.remove(contextId, itemId),
-      isDesktop: Boolean(bridge),
-      ...(bridge?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => {
+      isDesktop: session.platform.kind === "desktop",
+      platformKind: session.platform.kind,
+      appOrigin: session.config.appOrigin,
+      ...(session.platform.activity ? { activity: session.platform.activity } : {}),
+      ...(native?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => {
         let active = true;
-        const unsubscribe = bridge.onNavigate!(event => listener(event.contextId));
-        void bridge.takeNavigation?.().then(event => { if (active && event) listener(event.contextId); }).catch(() => {});
+        const unsubscribe = native.onNavigate!(event => listener(event.contextId));
+        void native.takeNavigation?.().then(event => { if (active && event) listener(event.contextId); }).catch(() => {});
         return () => { active = false; unsubscribe(); };
       } } : {}),
       viewer: session.viewer,
       device,
       cloud,
       outbox,
-      drain: () => runner.drain(),
-      copyText: bridge ? (value) => bridge.copyText(value) : (value) => navigator.clipboard.writeText(value),
-      copyFile: bridge ? (file) => bridge.copyFile(file) : browserCopyFile,
-      saveFile: bridge ? (file) => bridge.saveFile(file) : browserSaveFile,
-      signOut: bridge
-        ? async () => {
-            runner.stop();
-            try { await session.signOut(); await outbox.clear(); }
-            catch (error) { runner.resume(); void runner.drain(); throw error; }
-          }
-        : async () => {
-            runner.stop();
-            try { await outbox.clear(); await session.signOut(); }
-            catch (error) { runner.resume(); void runner.drain(); throw error; }
-          },
-      ...(bridge ? {
-        getLaunchAtLogin: () => bridge.getLaunchAtLogin(),
-        setLaunchAtLogin: (enabled: boolean) => bridge.setLaunchAtLogin(enabled),
-        pendingNativeCount: async () => (await bridge.getPendingClipboardShares()).length,
-        readClipboard: () => bridge.readClipboard(),
-        subscribeNativeShares: (listener: () => void) => bridge.onShareClipboard(listener),
+      drain: () => accountSignOut.locked ? Promise.resolve() : runner.drain(),
+      pause: () => runner.stop(),
+      resume: () => { if (!accountSignOut.locked) runner.resume(); },
+      copyText: native ? (value) => native.copyText(value) : (value) => navigator.clipboard.writeText(value),
+      copyFile: native ? (file) => native.copyFile(file) : browserCopyFile,
+      saveFile: native ? (file) => native.saveFile(file) : browserSaveFile,
+      ...(session.platform.shareFile ? { shareFile: session.platform.shareFile } : {}),
+      accountSignOut,
+      signOut: async () => { throw new Error("Use the reviewed sign-out flow."); },
+      ...(native ? {
+        ...(native.getLaunchAtLogin ? { getLaunchAtLogin: () => native.getLaunchAtLogin!() } : {}),
+        ...(native.setLaunchAtLogin ? { setLaunchAtLogin: (enabled: boolean) => native.setLaunchAtLogin!(enabled) } : {}),
+        pendingNativeCount: async () => (await native.getPendingClipboardShares()).length,
+        readClipboard: () => native.readClipboard(),
+        subscribeNativeShares: (listener: () => void) => native.onShareClipboard(listener),
         drainNativeShares: async () => {
           const contextId = await drainNative();
-          window.setTimeout(() => void runner.drain(), 0);
+          if (nativeIntakeEnabled) window.setTimeout(() => {
+            if (nativeIntakeEnabled) void runner.drain().catch(() => undefined);
+          }, 0);
           return contextId;
         },
       } : {}),
     },
-    dispose: () => { runner.stop(); outbox.close(); },
+    dispose: () => { stopActivity?.(); nativeIntakeEnabled = false; runner.stop(); outbox.close(); },
   };
 }
 

@@ -9,13 +9,16 @@ async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
   return result.value;
 }
 if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
-  const bridge: DesktopBridge = {
+  const bridge: DesktopBridge & { readonly reviewedSignOut: true } = {
     version: 1,
+    reviewedSignOut: true,
     platform: process.platform as DesktopBridge["platform"],
     getDevice: () => invoke("getDevice"),
     getAccessToken: (interactive = false) =>
       invoke("getAccessToken", interactive),
-    signOut: () => invoke("signOut"),
+    // Optional private argument binds cleanup to the exact reviewed inbox. The
+    // exported v1 bridge stays unchanged; older no-argument callers fail closed.
+    signOut: (reviewedNativeIds: readonly string[] = []) => invoke("signOut", reviewedNativeIds),
     readClipboard: () => invoke("readClipboard"),
     copyText: (text: string) => invoke("copyText", text),
     copyFile: (file: NativeFile) => invoke("copyFile", file),

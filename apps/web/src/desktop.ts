@@ -21,14 +21,21 @@ export function inspectDesktopBridge():
 }
 
 export async function drainNativeClipboardQueue(
-  bridge: DesktopBridge,
+  bridge: Pick<DesktopBridge, "getPendingClipboardShares" | "acknowledgeClipboardShare">,
   store: NativeQueueStore,
+  current: () => boolean = () => true,
 ): Promise<void> {
+  if (!current()) return;
   const requests = await bridge.getPendingClipboardShares();
   for (const request of requests) {
+    if (!current()) return;
     const id = IdSchema.parse(request.id);
-    if (!(await store.hasNativeRequest(id))) await store.storeNativeSnapshot(request);
+    const stored = await store.hasNativeRequest(id);
+    if (!current()) return;
+    if (!stored) await store.storeNativeSnapshot(request);
+    if (!current()) return;
     await bridge.acknowledgeClipboardShare(id);
+    if (!current()) return;
     await store.markNativeAcknowledged(id);
   }
 }

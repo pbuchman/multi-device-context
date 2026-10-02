@@ -41,6 +41,21 @@ describe("authentication boundary", () => {
     await expect(loadRuntimeConfig(fetcher)).rejects.toThrow("configuration");
   });
 
+  it("loads mobile config from the trusted server and rejects native build configuration drift", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify(config)));
+    await expect(loadRuntimeConfig(fetcher, { mobile: true, appOrigin: config.appOrigin })).resolves.toEqual(config);
+    expect(fetcher.mock.calls.map(call => call[0])).toEqual(["/mobile-config.json", `${config.appOrigin}/api/config`]);
+    const changed = { ...config, auth0: { ...config.auth0, nativeClientId: "different-client" } };
+    const drift = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(config))).mockResolvedValueOnce(new Response(JSON.stringify(changed)));
+    await expect(loadRuntimeConfig(drift, { mobile: true, appOrigin: config.appOrigin })).rejects.toThrow("Android app");
+  });
+
+  it("rejects mobile config missing a trusted HTTPS origin before making a request", async () => {
+    const fetcher = vi.fn();
+    await expect(loadRuntimeConfig(fetcher, { mobile: true })).rejects.toThrow("origin");
+    await expect(loadRuntimeConfig(fetcher, { mobile: true, appOrigin: "https://elsewhere.test" })).rejects.toThrow();
+  });
+
   it("posts an access token without persisting it and validates the session payload", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ uid: "derived_uid", customToken: "custom" }), {
       status: 200,

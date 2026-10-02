@@ -65,6 +65,16 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     trustProxy: ["127.0.0.1", "::1"],
   });
   const { publicConfig, verifier, backend } = options;
+  // CORS metadata must survive early rate-limit/authentication responses.
+  app.addHook("onRequest", async (request, reply) => {
+    if (!request.url.startsWith("/api/")) return;
+    reply.header("vary", "Origin");
+    const origin = request.headers.origin;
+    if (request.method !== "OPTIONS" && (origin === "https://localhost" || origin === publicConfig.appOrigin)) {
+      reply.header("access-control-allow-origin", origin);
+      reply.header("access-control-expose-headers", "Retry-After");
+    }
+  });
   const sessionAttempts = new WindowLimit(30);
   const preAuth = new WindowLimit(60), global = new WindowLimit(600, 60_000, 1);
   const owners = new WindowLimit(120);
@@ -85,6 +95,24 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     if (!path.startsWith("/api/") || path === "/api/config") return;
     const retry = preAuth.take(request.ip) || global.take("all");
     if (retry) return reply.header("retry-after", retry).code(429).send({ error: "Too Many Requests" });
+  });
+  // Keep preflights behind the deployed global/IP limits and source-map guard.
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method !== "OPTIONS" || !request.url.startsWith("/api/")) return;
+    const origin = request.headers.origin;
+    const permitted = origin === "https://localhost" || origin === publicConfig.appOrigin;
+    const method = request.headers["access-control-request-method"];
+    const requested = String(request.headers["access-control-request-headers"] ?? "")
+      .toLowerCase().split(",").map(header => header.trim()).filter(Boolean);
+    if (!permitted || !["GET", "POST", "PATCH", "DELETE"].includes(String(method))
+      || requested.some(header => !["authorization", "content-type"].includes(header))) {
+      return reply.code(403).send({ error: "Forbidden" });
+    }
+    reply.header("access-control-allow-origin", origin!);
+    reply.header("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    reply.header("access-control-allow-headers", "Authorization, Content-Type");
+    reply.header("access-control-max-age", "600");
+    return reply.code(204).send();
   });
   const csp = [
     "default-src 'self'",

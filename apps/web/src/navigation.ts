@@ -16,8 +16,12 @@ export function useNavigation(namespace: string, initialId?: Id) {
   const busy = useRef(0);
   const failed = useRef<(() => Promise<unknown>)[]>([]);
   const initialized = useRef(false);
+  const revisionRef = useRef(0);
   const update = useCallback((fn: (s: typeof state) => typeof state) => {
-    const next = fn(latest.current); latest.current = next; setState(next);
+    const before = latest.current; const next = fn(before);
+    const a = before.drafts[before.id], b = next.drafts[next.id];
+    if (before.id !== next.id || a?.text !== b?.text || a?.code !== b?.code || a?.title !== b?.title || a?.local !== b?.local) revisionRef.current++;
+    latest.current = next; setState(next);
   }, []);
   const reload = useCallback(async () => {
     const drafts = await store.list();
@@ -46,11 +50,15 @@ export function useNavigation(namespace: string, initialId?: Id) {
     const path = latest.current.drafts[nextId]?.local ? "/" : `/contexts/${nextId}`;
     if (location.pathname !== path) history[replace ? "replaceState" : "pushState"]({}, "", path);
   }, [update]);
-  const patch = useCallback((value: Partial<Draft>) => {
-    const id = latest.current.id;
+  const patchFor = useCallback((id: string, value: Partial<Draft>) => {
     const next = { ...(latest.current.drafts[id] ?? emptyDraft()), ...value };
     update(s => ({ ...s, drafts: { ...s.drafts, [id]: next } })); persist(id, next);
   }, [update, persist]);
+  const patch = useCallback((value: Partial<Draft>) => patchFor(latest.current.id, value), [patchFor]);
+  const flush = useCallback(async () => {
+    await chain.current;
+    if (failed.current.length) throw new Error("Your draft could not be saved locally. Keep this tab open and retry.");
+  }, []);
   const commit = useCallback((id: string, sentText?: string) => {
     const draft = latest.current.drafts[id]; if (!draft) return;
     const next = { ...draft, local: false, text: sentText !== undefined && draft.text === sentText ? "" : draft.text };
@@ -62,7 +70,7 @@ export function useNavigation(namespace: string, initialId?: Id) {
   }, [store, queue, update]);
   useEffect(() => { const pop = () => select(contextIdFromPath(location.pathname), true); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [select]);
   const draft = state.drafts[state.id] ?? { ...emptyDraft(), local: false };
-  const localContexts: ContextRecord[] = Object.entries(state.drafts).filter(([id, d]) => d.local && (d.text || id === state.id)).map(([id, d]) => ({ id, title: d.title === "New context" && d.text ? "Draft · " + d.text.slice(0, 40) : d.title, createdAt: d.createdAt, updatedAt: d.createdAt, syncState: "pending" }));
-  return { selectedId: state.id, selectedRef: latest, select, patch, remove, commit, text: draft.text, codeMode: draft.code, issue,
+  const localContexts: ContextRecord[] = Object.entries(state.drafts).filter(([id, d]) => d.local && (d.text || d.title !== "New context" || id === state.id)).map(([id, d]) => ({ id, title: d.title === "New context" && d.text ? "Draft · " + d.text.slice(0, 40) : d.title, createdAt: d.createdAt, updatedAt: d.createdAt, syncState: "pending" }));
+  return { selectedId: state.id, selectedRef: latest, revisionRef, select, patch, patchFor, flush, remove, commit, text: draft.text, codeMode: draft.code, issue,
     localContexts, draftContext: localContexts.find(c => c.id === state.id), retry: () => { setIssue(undefined); for (const operation of failed.current.splice(0)) queue(operation); }, clear: async () => { await chain.current; await store.clear(); } };
 }
