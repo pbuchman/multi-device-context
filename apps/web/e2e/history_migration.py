@@ -1,6 +1,9 @@
 import json
+import subprocess
 import tempfile
 from playwright.sync_api import sync_playwright
+
+subprocess.run(["node", "scripts/e2e/seed-history-device.mjs"], check=True)
 
 with tempfile.TemporaryDirectory(prefix="mdc-history-") as profile, sync_playwright() as p:
     browser = p.chromium.launch_persistent_context(profile, headless=True)
