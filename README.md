@@ -28,9 +28,10 @@ the [Android guide](docs/android.md). Published checksums are available in
 [SHA256SUMS.txt](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.4/SHA256SUMS.txt),
 and every asset is listed on the [v0.5.4 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.4).
 
-These downloads do not create an account or grant access to the maintainer's
-hosted deployment. There is no public hosted enrollment. Run your own deployment
-with the [self-hosting guide](docs/self-hosting.md).
+Publishing the source and installers does not grant access to the maintainer's
+hosted deployment. Hosted access remains subject to its authentication and
+device permissions. Run your own deployment with the
+[self-hosting guide](docs/self-hosting.md).
 
 ## One context, wherever the work continues
 
