@@ -25,6 +25,7 @@ android {
     namespace = "com.multidevicecontext.mobile"
     compileSdk = rootProject.ext.compileSdkVersion
     buildToolsVersion "36.0.0"
+    buildFeatures { buildConfig true }
     defaultConfig {
         applicationId "com.multidevicecontext.mobile"
         minSdkVersion rootProject.ext.minSdkVersion

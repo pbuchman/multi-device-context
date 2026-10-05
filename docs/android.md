@@ -5,8 +5,9 @@ storage used by the web and desktop apps. Its application ID is
 `com.multidevicecontext.mobile`. It targets Android 8.0/API 26 or later; builds use
 API 36, JDK 21 and Capacitor 8.5.2. It is installed privately as an APK.
 
-There is no store release, automatic updater, push notification, background
-service or background synchronization. Realtime updates run while the app is
+There is no store release, push notification, background service or background
+synchronization. Preview APKs can update through the app after one updater-capable
+build has been installed manually. Realtime updates run while the app is
 active. Returning to the app or reconnecting refreshes the context list, selected
 items and deletion markers and resumes eligible pending sends. **Refresh** does
 the same reads without changing the selected context or unsent drafts, except
@@ -69,11 +70,11 @@ signing. A debug build without it uses Android's generic debug key and cannot
 update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
-increase it for each update. The current default is 8; it is not automatically
-incremented. Keep the application ID and signing key unchanged.
+increase it for each update. It is not automatically incremented. Keep the
+application ID and signing key unchanged.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=8
+export MDC_ANDROID_VERSION_CODE=10
 pnpm --filter @mdc/mobile android:release
 ```
 
@@ -105,12 +106,35 @@ access panel and its passkey confirmation to grant access to all account context
 For an existing installation, follow the identity-preserving migration in the
 [device-access guide](operations/device-access.md).
 
-For an update, increment `MDC_ANDROID_VERSION_CODE`, rebuild with the same private
-key and repeat `adb install -r`. Do not uninstall, clear app data, or use a
-different key to work around an upgrade failure: those actions can discard
-unsent drafts, local shares and the session. The `android:install` script invokes
-Gradle's debug installation; the explicit serial command above is preferred for
-personal-device acceptance.
+The first release that contains the updater must still be installed with the
+manual `adb install -r` command above. Later Preview releases appear in the app's
+settings. The app checks its fixed public Preview catalog at startup, every six
+hours while its process is running, and when it returns to the foreground after
+six hours. It does not use a GitHub token or the product server for update
+downloads. The Android package contains bundled interface assets, so a hosted
+web deployment cannot update an installed Android app.
+
+When an update is selected, Android downloads the catalog-named APK to private
+cache and verifies its declared byte length, SHA-256, SHA-512, package name,
+version name, increasing version code, supported minimum SDK, and installed
+signing certificate. Immediately before installation it verifies the cached APK
+again and hashes the bytes copied into a private `PackageInstaller` session. The
+renderer cannot provide a URL or filesystem path. Android may first open the
+per-app **Install unknown apps** settings screen; this permission is never
+granted silently. Android then shows its own installation confirmation. A
+refusal, cancellation, interrupted download, or offline check leaves the app and
+its data usable so the operation can be retried. The handoff uses Android's
+[PackageInstaller](https://developer.android.com/reference/android/content/pm/PackageInstaller)
+API rather than deleting or replacing application data itself.
+
+For release production and catalog publication, follow the shared
+[Preview update procedure](updates.md). Every APK must increase
+`MDC_ANDROID_VERSION_CODE`, keep the same application ID and signing key, and be
+published by that procedure. Do not uninstall, clear app data, or use a different
+key to work around an upgrade failure: those actions can discard unsent drafts,
+local shares and the session. The `android:install` script invokes Gradle's debug
+installation; the explicit serial command above is preferred for personal-device
+acceptance.
 
 ## Sharing and offline behavior
 
@@ -196,6 +220,7 @@ pnpm test:rules
 pnpm --filter @mdc/mobile android:debug
 pnpm --filter @mdc/mobile android:test
 pnpm --filter @mdc/mobile android:lint
+pnpm --filter @mdc/mobile android:guards
 ```
 
 `pnpm test` includes the mobile Node configuration tests. Android unit tests and
@@ -212,6 +237,39 @@ builds reject private signing. For local reproduction of CI only, set
 `MDC_ANDROID_SIGNING_CONFIG` to a nonexistent file before running `android:debug`;
 unset those overrides for every personal-device build.
 
+The updater-specific fixture commands used by CI should set all three guards on
+the same invocation so Gradle cannot discover a private signing configuration:
+
+```sh
+CI=true \
+MDC_APP_ORIGIN=https://context.example.com \
+MDC_MOBILE_CONFIG_FIXTURE="$PWD/apps/mobile/tests/fixtures/runtime-config.json" \
+MDC_ANDROID_SIGNING_CONFIG=/tmp/mdc-no-private-signing.json \
+pnpm --filter @mdc/mobile android:debug
+
+CI=true \
+MDC_MOBILE_CONFIG_FIXTURE="$PWD/apps/mobile/tests/fixtures/runtime-config.json" \
+MDC_ANDROID_SIGNING_CONFIG=/tmp/mdc-no-private-signing.json \
+pnpm --filter @mdc/mobile android:test
+
+CI=true \
+MDC_MOBILE_CONFIG_FIXTURE="$PWD/apps/mobile/tests/fixtures/runtime-config.json" \
+MDC_ANDROID_SIGNING_CONFIG=/tmp/mdc-no-private-signing.json \
+pnpm --filter @mdc/mobile android:lint
+```
+
+On a clean API 36 emulator, updater instrumentation can be run with an explicit
+serial after the fixture debug build:
+
+```sh
+CI=true \
+MDC_MOBILE_CONFIG_FIXTURE="$PWD/apps/mobile/tests/fixtures/runtime-config.json" \
+MDC_ANDROID_SIGNING_CONFIG=/tmp/mdc-no-private-signing.json \
+ANDROID_SERIAL=emulator-5580 \
+apps/mobile/android/gradlew -p apps/mobile/android connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest
+```
+
 ## Device support boundaries
 
 The following behavior depends on real devices or external applications and is
@@ -221,7 +279,8 @@ not established by source, unit, lint, or synthetic CI checks alone:
 - rotation, Back/keyboard behavior, and process recreation with drafts, queued
   content, and the authenticated session;
 - Android external-share delivery and delivery to a second signed-in device;
-- signed in-place upgrades and offline recovery on the intended phone;
+- signed in-place updater handoff, unknown-source refusal, system-confirmation
+  cancellation, and offline recovery on the intended phone;
 - first launch, login launch, and sharing on the intended Windows and macOS
   target machines; and
 - DUDU 7 installation and behavior.
