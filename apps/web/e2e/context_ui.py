@@ -16,11 +16,26 @@ with sync_playwright() as playwright:
     page.goto(BASE_URL, wait_until="networkidle")
     assert page.title() == "Contexts · UI test"
     page.get_by_role("heading", name="New chat").wait_for()
+    expect(page.get_by_role("button", name="Open new chat")).to_have_count(0)
+    expect(page.get_by_role("button", name="Clear search")).to_have_count(0)
     page.get_by_role("button", name="Website handoff", exact=True).click()
     page.get_by_role("heading", name="Website handoff").wait_for()
     assert page.get_by_text("Here’s the layout I was working on", exact=False).is_visible()
+    assert page.get_by_role("button", name="Delete message").count() >= 2
+    assert page.locator(".account .avatar img").is_visible()
     assert not page.locator("vite-error-overlay").count()
     page.screenshot(path=str(SCREENSHOTS / "desktop-light.png"), full_page=True)
+
+    search = page.get_by_label("Search chat titles")
+    search.fill("website")
+    expect(page.get_by_role("button", name="Clear search")).to_have_count(1)
+    assert search.evaluate("el => getComputedStyle(el).outlineStyle") == "none"
+    assert page.locator(".search").evaluate("el => getComputedStyle(el).boxShadow") != "none"
+    controls = [page.get_by_role("button", name="Clear search"), page.get_by_role("button", name="Refresh chats and messages"), page.get_by_role("button", name="Options for Website handoff")]
+    centers = [control.bounding_box()["x"] + control.bounding_box()["width"] / 2 for control in controls]
+    assert max(centers) - min(centers) < 1, centers
+    page.screenshot(path=str(SCREENSHOTS / "search-focused.png"), full_page=True)
+    page.get_by_role("button", name="Clear search").click()
 
     # Keep real refresh work pending so progress remains visible in both themes.
     for theme in ("light", "dark"):
@@ -130,6 +145,9 @@ with sync_playwright() as playwright:
 
     page.get_by_label("Open settings").click()
     page.get_by_role("combobox", name="Theme").select_option("dark")
+    assert page.get_by_role("combobox", name="Theme").evaluate("el => el.getBoundingClientRect().height") == 36
+    assert page.get_by_role("checkbox", name="Launch at login").evaluate("el => el.getBoundingClientRect().height") == 40
+    assert page.get_by_role("dialog").locator(".avatar img").is_visible()
     assert page.locator("html").get_attribute("data-theme") == "dark"
     page.screenshot(path=str(SCREENSHOTS / "desktop-dark.png"), full_page=True)
     page.get_by_role("button", name="Close dialog").click()
