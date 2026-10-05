@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Guarded transitive dependency patches for deeply nested brace patterns and
+  shared-cache stale response handling, with exploit regression tests.
+
 - Account name and email across desktop, Android and browser, with a separate
   authenticated profile endpoint and non-blocking fallback.
 - Compact 32 px chat rows for mouse and trackpad, retaining 48 px touch targets.
