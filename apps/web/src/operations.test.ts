@@ -34,3 +34,22 @@ it("R1/R5: reconcile remote deletion before replaying queued bytes", async () =>
   const operations = new ContextOperations(outbox, remote); await operations.runner.drain(); operations.runner.stop();
   expect(remote.publish).not.toHaveBeenCalled(); expect(await outbox.list()).toEqual([]); outbox.close();
 });
+it("records a failed preparation as a retryable deletion failure before HTTP attempts", async () => {
+  const outbox = new DurableOutbox({ projectId: "test", uid: "preparation" }), remote = cloud();
+  remote.deletionMarkers.mockRejectedValueOnce(new TypeError("offline"));
+  const operations = new ContextOperations(outbox, remote);
+  expect(await operations.remove(contextId)).toBe(false); operations.runner.stop();
+  expect(await outbox.deletions()).toEqual([expect.objectContaining({ attempts: 1, paused: false })]);
+  expect(remote.deleteContext).not.toHaveBeenCalled(); outbox.close();
+});
+it("keeps a newly queued deletion pending while another drain is running without Web Locks", async () => {
+  const outbox = new DurableOutbox({ projectId: "test", uid: "overlap" }), remote = cloud();
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  remote.deletionMarkers.mockImplementationOnce(async () => { await gate; return { contexts: [], items: [] }; });
+  const operations = new ContextOperations(outbox, remote); const first = operations.runner.drain();
+  await Promise.resolve();
+  expect(await operations.remove(contextId, itemId)).toBe(false);
+  expect(await outbox.deletions()).toEqual([expect.objectContaining({ attempts: 0, paused: false })]);
+  release(); await first; operations.runner.stop();
+  expect(remote.deleteItem).toHaveBeenCalledTimes(1); expect(await outbox.deletions()).toEqual([]); outbox.close();
+});

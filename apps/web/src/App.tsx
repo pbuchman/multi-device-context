@@ -51,7 +51,7 @@ export type WorkspaceOutbox = {
   removeContext?(id: Id): Promise<void>;
   removeItem?(contextId: Id, itemId: Id): Promise<void>;
   cancelled?(): Promise<{ contexts: Id[]; items: Id[] }>;
-  deletions?(): Promise<{ contextId: Id; itemId?: Id }[]>;
+  deletions?(): Promise<{ contextId: Id; itemId?: Id; attempts?: number; paused?: boolean; nextAttemptAt?: number }[]>;
   enqueueBatch?(drafts: ShareDraft[]): Promise<void>;
   enqueue(draft: ShareDraft): Promise<void>;
   count(): Promise<number>;
@@ -206,6 +206,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const pickerWakeups = useRef(new Set<(cancelled?: boolean) => void>());
   const [renameText, setRenameText] = useState("");
   const [queueCount, setQueueCount] = useState(0);
+  const [deletionCount, setDeletionCount] = useState(0);
+  const [deletionFailed, setDeletionFailed] = useState(false);
+  const [activeDeletions, setActiveDeletions] = useState(0);
   const [syncStreams, setSyncStreams] = useState({
     contexts: { fromCache: false, pending: false, failed: false },
     items: { fromCache: false, pending: false, failed: false },
@@ -332,7 +335,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     window.addEventListener("keydown", key); window.addEventListener("mdc:back", back);
     return () => { window.removeEventListener("keydown", key); window.removeEventListener("mdc:back", back); };
   }, [panel, compact, drawerOpen, closePanel, closeDrawer]);
-  useEffect(() => { setChatMenu(undefined); setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
+  useEffect(() => { setChatMenu(undefined); setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setDeletionCount(0); setDeletionFailed(false); setActiveDeletions(0); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
 
   const refreshers = useRef({ contexts: new ForegroundRefresh(), deleted: new ForegroundRefresh(), deletedItems: new ForegroundRefresh(), items: new ForegroundRefresh() });
   const applyDeleted = useCallback(async (ids: Id[]) => {
@@ -660,7 +663,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const queued = await services.outbox.list();
     const deletions = await services.outbox.deletions?.() ?? [];
     if (!isLive() || revision !== queueRefreshRevision.current) return;
-    if (deletions.length) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+    const failedDeletion = deletions.some(record => record.paused || ((record.attempts ?? 0) > 0 && record.nextAttemptAt !== 0));
+    setDeletionCount(deletions.length);
+    setDeletionFailed(failedDeletion);
+    if (failedDeletion) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
     else if (pendingDeletionCount.current) setError(current => current?.startsWith("Deletion is not confirmed") ? undefined : current);
     pendingDeletionCount.current = deletions.length;
     const cancelled = await services.outbox.cancelled?.();
@@ -672,16 +678,16 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       setItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
       setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
     }
-    setQueueCount(queued.length + deletions.length);
+    setQueueCount(queued.length);
     const failed = queued.find((record) => record.status === "paused" || record.status === "failed");
     if (failed?.lastError) setError(failed.lastError);
   }, [services.outbox]);
   useEffect(() => { void refreshQueue(); return subscribeLocal(() => { void refreshQueue(); }); }, [refreshQueue]);
   useEffect(() => {
-    if (queueCount === 0 || (services.platformKind === "android" && !active)) return;
+    if ((queueCount === 0 && deletionCount === 0) || (services.platformKind === "android" && !active)) return;
     const timer = window.setInterval(() => void refreshQueue(), 2_000);
     return () => window.clearInterval(timer);
-  }, [active, queueCount, refreshQueue, services.platformKind]);
+  }, [active, queueCount, deletionCount, refreshQueue, services.platformKind]);
   useEffect(() => {
     let active = true;
     void restoreQueued().catch(() => { if (active) setError("Pending shares could not be restored"); });
@@ -932,6 +938,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   };
   const deleteContext = async (context: ContextRecord) => {
     if (accountBlocked || !isLive()) return;
+    setActiveDeletions(count => count + 1);
     try {
       const complete = await remove(context.id);
       if (!isLive()) return;
@@ -939,11 +946,14 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       setContexts(current => current.filter(c => c.id !== context.id));
       setOptimisticItems(current => current.filter(item => item.contextId !== context.id));
       if (navigation.selectedRef.current.id === context.id) setSelectedId(undefined);
-      if (complete) showToast("Context permanently deleted"); else setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+      if (complete) showToast("Context permanently deleted");
       await refreshQueue();
-    } catch { setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const deleteItem = async (item: ItemRecord) => {
+    if (accountBlocked || !isLive()) return;
+    setActiveDeletions(count => count + 1);
     try {
       const complete = await remove(item.contextId, item.id);
       if (!isLive()) return;
@@ -955,14 +965,15 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         setContexts(current => current.filter(context => context.id !== item.contextId));
         if (navigation.selectedRef.current.id === item.contextId) setSelectedId(undefined);
       }
-      if (!complete) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+      if (complete) showToast("Message permanently deleted");
       await refreshQueue();
-    } catch { setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const retry = async () => {
     setError(undefined); navigation.retry();
     nativeReconcile.current?.();
-    try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
+    try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await refreshQueue(); await services.drain(); await refreshQueue(); }
     catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
   };
 
@@ -1024,7 +1035,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const pendingWrites = syncStreams.contexts.pending || syncStreams.items.pending;
   const fromCache = syncStreams.contexts.fromCache || syncStreams.items.fromCache;
-  const syncLabel = refreshing ? "Refreshing…" : queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
+  const syncLabel = refreshing ? "Refreshing…" : deletionFailed ? "Deletion needs retry" : deletionCount > 0 || activeDeletions > 0 ? "Deleting…" : queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
     : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
 
   const openChatMenu = (context: ContextRecord, anchor: ChatMenuAnchor, opener: HTMLElement) => {
