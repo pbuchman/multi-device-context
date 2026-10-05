@@ -69,12 +69,20 @@ function run(command, args, options = {}) {
 
 function runCapture(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], ...options });
+    const { deadlineMs = 600_000, ...spawnOptions } = options;
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], ...spawnOptions });
     let stdout = "", stderr = "";
+    const deadline = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${basename(command)} exceeded its ${deadlineMs} ms deadline`));
+    }, deadlineMs);
     child.stdout.on("data", value => { stdout += value; });
     child.stderr.on("data", value => { stderr += value; });
-    child.once("error", reject);
-    child.once("exit", code => code === 0 ? resolvePromise(stdout) : reject(new Error(`${basename(command)} failed (${code}): ${stderr.slice(-2000)}`)));
+    child.once("error", error => { clearTimeout(deadline); reject(error); });
+    child.once("exit", code => {
+      clearTimeout(deadline);
+      code === 0 ? resolvePromise(stdout) : reject(new Error(`${basename(command)} failed (${code}): ${stderr.slice(-2000)}`));
+    });
   });
 }
 
@@ -222,15 +230,41 @@ async function containsMarkers(root, markers) {
   return markers.every(marker => found.has(marker));
 }
 
-async function launch(executable, playwright, environment, spki) {
-  const launched = await playwright.launch({
-    executablePath: executable,
-    args: [`--ignore-certificate-errors-spki-list=${spki}`],
-    env: environment,
-    timeout: 60_000,
-  });
-  const window = await launched.firstWindow({ timeout: 60_000 });
-  return { launched, window };
+async function captureMacLaunchDiagnostic(screenshotPath) {
+  const processes = await runCapture("ps", ["-axo", "pid=,ppid=,state=,etime=,comm="], { deadlineMs: 10_000 })
+    .then(output => output.split("\n").filter(line => /Multi Device Context|SecurityAgent|CoreServicesUIAgent|UserNotificationCenter/iu.test(line)))
+    .catch(error => [`Process inspection failed: ${error instanceof Error ? error.message : String(error)}`]);
+  let screenshotError;
+  try { await run("screencapture", ["-x", screenshotPath], { deadlineMs: 10_000 }); }
+  catch (error) { screenshotError = error instanceof Error ? error.message : String(error); }
+  report.launchDiagnostic = {
+    screenshot: screenshotError ? undefined : basename(screenshotPath),
+    ...(screenshotError ? { screenshotError } : {}),
+    processes,
+  };
+  await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");
+}
+
+async function launch(executable, playwright, environment, spki, diagnosticScreenshot) {
+  let diagnosticPromise, diagnosticTimer;
+  if (process.platform === "darwin" && diagnosticScreenshot) {
+    diagnosticTimer = setTimeout(() => {
+      diagnosticPromise = captureMacLaunchDiagnostic(diagnosticScreenshot);
+    }, 15_000);
+  }
+  try {
+    const launched = await playwright.launch({
+      executablePath: executable,
+      args: [`--ignore-certificate-errors-spki-list=${spki}`],
+      env: environment,
+      timeout: 60_000,
+    });
+    const window = await launched.firstWindow({ timeout: 60_000 });
+    return { launched, window };
+  } finally {
+    clearTimeout(diagnosticTimer);
+    await diagnosticPromise;
+  }
 }
 
 async function waitForBridge(window, origin) {
@@ -367,7 +401,13 @@ try {
     checkpoint("Opened the verified exact B DMG, then explicitly quit, mounted, manually replaced A, and retained the install path");
   }
 
-  ({ launched: app } = await launch(executable, playwright, environment, server.spki));
+  ({ launched: app } = await launch(
+    executable,
+    playwright,
+    environment,
+    server.spki,
+    join(dirname(reportPath), "native-update-launch.png"),
+  ));
   const bWindow = app.windows()[0];
   await bWindow.waitForLoadState("domcontentloaded");
   const runtimeB = await app.evaluate(async ({ app: electronApp, safeStorage }, path) => {
