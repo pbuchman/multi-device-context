@@ -52,7 +52,7 @@ All identifiers are UUIDs. JSON objects reject unknown input fields.
 | `GET /contexts/:id/items?after=CURSOR&limit=50` | Paginated items |
 | `POST /contexts/:id/items` | `{id, content, device?}`; immutable append |
 | `DELETE /contexts/:id/items/:itemId` | Permanent item deletion |
-| `PUT /contexts/:id/items/:itemId/content` | Raw bytes; `Content-Type: application/octet-stream`; finalizes reserved attachment |
+| `PUT /contexts/:id/items/:itemId/content` | Raw bytes; `Content-Type: application/octet-stream`; finalizes the reserved attachment |
 | `GET /contexts/:id/items/:itemId/content` | Authenticated streamed download; no public bearer URL |
 
 `content` is `{kind: "text" | "code", text}` or
@@ -77,11 +77,13 @@ server cleanup; repeating the same deletion safely completes it.
 
 AI-generated titles require the owner's account-level setting. When it is disabled,
 the server makes no title-provider request and keeps the fallback title. When it
-is enabled, titles use only the first text (up to 8000 characters) or attachment
-filename and MIME type. File bytes never go to the model. The server requires
-OpenRouter ZDR, uses a separate inference key with a USD 1 monthly cap, and keeps
-the initial title on failure. Prompts, outputs and credentials are not logged.
-Existing contexts are not backfilled.
+is enabled, titles use the first text (up to 8000 characters), or a supported
+first image up to 5 MiB so the model can follow meaningful visible text. Other
+attachments send only filename and MIME type. If the image language is unclear,
+the title is English. The server requires OpenRouter ZDR, uses a separate
+inference key with a USD 1 monthly cap, and keeps the initial title on failure.
+Prompts, outputs and credentials are not logged. Existing contexts are not
+backfilled.
 
 Deletion has no application trash or backup. Server-managed markers contain only
 deleted context and item IDs and prevent offline replay from resurrecting data.

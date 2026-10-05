@@ -64,6 +64,25 @@ describe("agent persistence and title races", () => {
     expect(fetcher).not.toHaveBeenCalled(); expect((await store.getContext(owner, id)).titleState).toBe("fallback");
     expect(await settings.get(other)).toEqual({ aiTitlesEnabled: false }); vi.unstubAllGlobals();
   });
+  it("waits for a private image upload before sending its bytes for an enabled AI title", async () => {
+    const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: true });
+    const id = randomUUID(), itemId = randomUUID(), bytes = new Uint8Array([137, 80, 78, 71]);
+    await store.writeItem(owner, id, { id: itemId, content: { kind: "attachment", name: "polish.png", contentType: "image/png", size: bytes.byteLength } }, true);
+    const reader = vi.fn(async () => bytes);
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "Polski raport wdrożenia" } }] })));
+    vi.stubGlobal("fetch", fetcher);
+    const worker = new TitleWorker(db, "test-only", undefined, settings, reader);
+    await worker.process(store.context(owner, id));
+    expect(reader).not.toHaveBeenCalled(); expect(fetcher).not.toHaveBeenCalled();
+    await store.upload(owner, id, itemId, Readable.from([Buffer.from(bytes)]));
+    await worker.process(store.context(owner, id));
+    expect(reader).toHaveBeenCalledWith(expect.objectContaining({ uid: owner, contextId: id, itemId }));
+    const options = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1];
+    const request = JSON.parse(options.body as string);
+    expect(request.messages[1].content[1].image_url.url).toBe("data:image/png;base64,iVBORw==");
+    expect((await store.getContext(owner, id)).title).toBe("Polski raport wdrożenia");
+    vi.unstubAllGlobals();
+  });
   it("R5: deleting the unfinished first attachment promotes a ready sibling", async () => {
     const id = randomUUID(), first = randomUUID(), next = randomUUID();
     await store.writeItem(owner, id, { id: first, content: { kind: "attachment", name: "cancel.bin", contentType: "application/octet-stream", size: 3 } }, true);
