@@ -147,7 +147,9 @@ jobs:
           name: native-update-report-${{ matrix.platform }}-${{ matrix.architecture }}
           if-no-files-found: ignore
           retention-days: 7
-          path: apps/desktop/release/native-update-a-to-b.json
+          path: |
+            apps/desktop/release/native-update-a-to-b.json
+            apps/desktop/release/native-update-launch.png
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         # PRs still build and test; publish only verified main installers.
         if: success() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
