@@ -2,6 +2,7 @@
 // artifact is immutable input; test A is built in a private copied workspace.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { access, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -43,11 +44,25 @@ const report = {
 };
 let app, server, installedExecutable, mountedVolumes = [];
 
+function checkpoint(message) {
+  report.checks.push(message);
+  writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
+  console.log(`A→B: ${message}`);
+}
+
 function run(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: "inherit", ...options });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => code === 0 ? resolvePromise() : reject(new Error(`${basename(command)} failed (${signal ?? code})`)));
+    const { deadlineMs = 600_000, ...spawnOptions } = options;
+    const child = spawn(command, args, { stdio: "inherit", ...spawnOptions });
+    const deadline = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${basename(command)} exceeded its ${deadlineMs} ms deadline`));
+    }, deadlineMs);
+    child.once("error", error => { clearTimeout(deadline); reject(error); });
+    child.once("exit", (code, signal) => {
+      clearTimeout(deadline);
+      code === 0 ? resolvePromise() : reject(new Error(`${basename(command)} failed (${signal ?? code})`));
+    });
   });
 }
 
@@ -112,7 +127,7 @@ async function installA(aArtifact) {
   if (process.platform === "win32") {
     const installDirectory = join(privateRoot, "non-default", "Multi Device Context");
     await mkdir(dirname(installDirectory), { recursive: true });
-    await run(aArtifact, ["/S", `/D=${installDirectory}`]);
+    await run(aArtifact, ["/S", `/D=${installDirectory}`], { deadlineMs: 180_000 });
     return join(installDirectory, "Multi Device Context.exe");
   }
   const mount = await attachDmg(aArtifact, join(privateRoot, "mount-a"));
@@ -150,7 +165,7 @@ async function uninstallWindowsFixture(required = false) {
     if (required) throw new Error("The isolated NSIS installation has no uninstaller; registry cleanup cannot be proven.");
     return;
   }
-  await run(join(directory, uninstaller), ["/S"]);
+  await run(join(directory, uninstaller), ["/S"], { deadlineMs: 60_000 });
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (!await access(installedExecutable).then(() => true, () => false)) {
@@ -227,7 +242,7 @@ async function quitNormally(currentApp, window, flushMarker) {
       void window.contextDesktop.completeCommand(request.id, true);
     });
   }, flushMarker);
-  const closed = currentApp.waitForEvent("close");
+  const closed = currentApp.waitForEvent("close", { timeout: 60_000 });
   await currentApp.evaluate(({ app: electronApp }) => electronApp.quit());
   await closed;
 }
@@ -249,7 +264,7 @@ try {
   const openssl = await findOpenSsl(); report.openssl = openssl.version;
   await run(openssl.command, ["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", "30", "-config", opensslConfig, "-keyout", keyPath, "-out", certificatePath]);
   server = await startFixtureServer({ port, certificatePath, keyPath, catalog, updatePath: bPath });
-  report.checks.push("Fixture source is local HTTPS with a certificate-specific browser pin and no runtime URL override");
+  checkpoint("Fixture source is local HTTPS with a certificate-specific browser pin and no runtime URL override");
 
   const copiedWorkspace = join(privateRoot, "source");
   const fixture = await preparePrivateTestWorkspace({ sourceRoot, destination: copiedWorkspace, origin, version: aVersion });
@@ -261,17 +276,17 @@ try {
   };
   await run(process.execPath, ["scripts/build.mjs"], { cwd: fixture.appDirectory, env: buildEnvironment });
   await expectFailure(process.execPath, [join(desktopDirectory, "scripts/check-package.mjs"), "bundle"], { cwd: fixture.appDirectory, env: buildEnvironment });
-  report.checks.push("Standard production package validation rejects the marked test-A bundle");
+  checkpoint("Standard production package validation rejects the marked test-A bundle");
   await run(process.execPath, [builderCli, "--config", "electron-builder.yml", process.platform === "win32" ? "--win" : "--mac", process.platform === "win32" ? "nsis" : "dmg", process.platform === "win32" ? "--x64" : "--arm64", "--publish", "never"], { cwd: fixture.appDirectory, env: buildEnvironment });
   const aArtifact = join(fixture.appDirectory, "release", `Multi-Device-Context-${aVersion}-${process.platform === "win32" ? "win-x64.exe" : "mac-arm64.dmg"}`);
   assert((await hashFile(aArtifact)).size > 0, "Test A package was not produced");
-  report.checks.push("Test A was built only in a private copied workspace and packaging was forced to --publish never");
+  checkpoint("Test A was built only in a private copied workspace and packaging was forced to --publish never");
 
   const executable = await installA(aArtifact); installedExecutable = executable;
   assert.equal(installedManifest(executable).version, aVersion);
   assert.equal(installedManifest(executable).mdcNativeUpdateTestOnly, TEST_FIXTURE_MARKER);
   report.installation = { nonDefault: process.platform === "win32", executable };
-  report.checks.push(process.platform === "win32" ? "Installed test A at a non-default per-user location" : "Mounted test-A DMG and copied the app into an isolated Applications directory");
+  checkpoint(process.platform === "win32" ? "Installed test A at a non-default per-user location" : "Mounted test-A DMG and copied the app into an isolated Applications directory");
 
   const { _electron: playwright } = await import("playwright");
   const environment = { ...process.env, NODE_EXTRA_CA_CERTS: certificatePath };
@@ -309,7 +324,7 @@ try {
   assert.equal(installedManifest(executable).version, aVersion, "Ordinary Quit installed the cached update");
   assert(await containsMarkers(runtimeA.userData, markers), "Draft/outbox/settings fixture data did not flush before ordinary Quit");
   const nativeStateBefore = await hashFile(runtimeA.nativeStatePath);
-  report.checks.push("Downloaded and verified B, then ordinary acknowledged Quit left A installed and flushed synthetic browser data");
+  checkpoint("Downloaded and verified B, then ordinary acknowledged Quit left A installed and flushed synthetic browser data");
 
   ({ launched: app, window } = await launch(executable, playwright, environment, server.spki));
   await waitForBridge(window, origin);
@@ -327,7 +342,7 @@ try {
     await app.waitForEvent("close", { timeout: 180_000 }); app = undefined;
     await waitForVersion(executable, bVersion);
     await killAutoStartedWindowsB();
-    report.checks.push("Explicit Update and restart used the renderer save acknowledgement and NSIS replaced A in place with B");
+    checkpoint("Explicit Update and restart used the renderer save acknowledgement and NSIS replaced A in place with B");
   } else {
     const opened = await window.evaluate(() => window.contextDesktop.installUpdate());
     assert.equal(opened, undefined);
@@ -335,7 +350,7 @@ try {
     await quitNormally(app, window, "manual-mac-quit-acknowledged"); app = undefined;
     await replaceMacWithB(executable);
     assert.equal(installedManifest(executable).version, bVersion);
-    report.checks.push("Opened the verified exact B DMG, then explicitly quit, mounted, manually replaced A, and retained the install path");
+    checkpoint("Opened the verified exact B DMG, then explicitly quit, mounted, manually replaced A, and retained the install path");
   }
 
   ({ launched: app } = await launch(executable, playwright, environment, server.spki));
@@ -356,13 +371,13 @@ try {
   );
   assert.deepEqual(await hashFile(runtimeA.nativeStatePath), nativeStateBefore, "Encrypted native startup state changed during A→B");
   assert(await containsMarkers(runtimeB.userData, markers), "Synthetic draft/outbox/settings sentinels did not survive A→B");
-  report.checks.push("Restarted exact B at the same path; safeStorage, user-data path, draft, outbox and settings sentinels survived");
+  checkpoint("Restarted exact B at the same path; safeStorage, user-data path, draft, outbox and settings sentinels survived");
   if (process.platform === "win32") await app.evaluate(({ app: electronApp }) => electronApp.setLoginItemSettings({ openAtLogin: false, args: ["--background"] }));
   await app.close(); app = undefined;
 
   if (process.platform === "win32") {
     await uninstallWindowsFixture(true);
-    report.checks.push("Ran the isolated NSIS uninstaller and removed the non-default test installation before the normal B install");
+    checkpoint("Ran the isolated NSIS uninstaller and removed the non-default test installation before the normal B install");
   }
 
   const bAfter = await hashFile(bPath), sourceAfter = await hashFile(productionSource);
@@ -370,7 +385,7 @@ try {
   assert.deepEqual(sourceAfter, sourceBefore, "Production update constants changed during A→B acceptance");
   assert(server.artifactBytesServed() >= bBefore.size, "Fixture server never delivered the exact B payload");
   assert.equal(server.artifactBytesServed() % bBefore.size, 0, "Fixture server delivered a partial B payload");
-  report.checks.push("Release B and production source remained byte-for-byte unchanged; local HTTPS served only complete exact-B payloads");
+  checkpoint("Release B and production source remained byte-for-byte unchanged; local HTTPS served only complete exact-B payloads");
   report.fixtureRequests = server.requests;
   report.passed = true;
 } catch (error) {
