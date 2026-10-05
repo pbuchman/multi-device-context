@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:https';
 import { spawn } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -95,6 +96,26 @@ export async function prepareMobile(repository, environment, runCommand = comman
   await runCommand('pnpm', ['exec', 'cap', 'sync', 'android'], { cwd: mobile, env: environment, echo: true });
 }
 
+export function registerInterruptCleanup(target, caResource = CA_RESOURCE) {
+  const handlers = new Map();
+  const dispose = () => {
+    for (const [signal, handler] of handlers) target.removeListener(signal, handler);
+    handlers.clear();
+  };
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const handler = () => {
+      try { rmSync(caResource, { force: true }); }
+      finally {
+        dispose();
+        target.kill(target.pid, signal);
+      }
+    };
+    handlers.set(signal, handler);
+    target.once(signal, handler);
+  }
+  return dispose;
+}
+
 async function waitFor(operation, description, timeout = 30_000) {
   const started = Date.now(); let last;
   while (Date.now() - started < timeout) {
@@ -110,6 +131,7 @@ async function main() {
   const reportPath = process.env.MDC_ANDROID_ACCEPTANCE_REPORT || DEFAULT_REPORT;
   const report = { success: false, startedAt: new Date().toISOString(), emulator: process.env.ANDROID_SERIAL, stages: [], limits: ['Synthetic generic-debug-key emulator acceptance; no physical/private-signed device evidence.'] };
   let server; let adb; let temporary;
+  const disposeInterruptCleanup = registerInterruptCleanup(process);
   const stage = (name, evidence = {}) => { report.stages.push({ name, at: new Date().toISOString(), ...evidence }); };
   try {
     assert.equal(process.env.CI, 'true', 'CI=true is required');
@@ -249,6 +271,7 @@ async function main() {
     report.error = cause instanceof Error ? { message: cause.message, stack: cause.stack } : { message: String(cause) };
     throw cause;
   } finally {
+    disposeInterruptCleanup();
     if (server) await new Promise(resolveClose => server.close(resolveClose));
     if (adb && process.env.ANDROID_SERIAL) await command(adb, ['-s', process.env.ANDROID_SERIAL, 'reverse', '--remove', `tcp:${ACCEPTANCE_PORT}`], { allowFailure: true });
     await rm(CA_RESOURCE, { force: true });

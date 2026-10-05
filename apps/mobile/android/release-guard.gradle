@@ -1,6 +1,20 @@
 // Inspect resolved tasks: assemble/build and abbreviations also schedule release packaging.
 // whenReady runs for --dry-run too, keeping CI graph regression checks meaningful.
 gradle.taskGraph.whenReady { graph ->
+    def includesAcceptance = graph.allTasks.any { task ->
+        task.project == project && task.name.toLowerCase().contains('acceptance')
+    }
+    if (includesAcceptance) {
+        def genericDebugSigning = project.mdcAcceptanceUsesGenericDebugSigning
+        if (genericDebugSigning instanceof Closure) genericDebugSigning = genericDebugSigning.call()
+        if (!project.mdcAcceptanceCi || !project.mdcAcceptanceFixtureBuild || project.mdcAcceptancePrivateSigningConfigured) {
+            throw new GradleException('Android update acceptance requires CI fixture config and no private signing configuration')
+        }
+        if (!project.mdcAcceptanceVersionNameValid || !project.mdcAcceptanceVersionCodeValid) {
+            throw new GradleException('Android update acceptance requires strict version name and positive version code')
+        }
+        if (!genericDebugSigning) throw new GradleException('Android update acceptance requires the generic debug signing config')
+    }
     def includesRelease = graph.allTasks.any { task ->
         task.project == project && task.name.toLowerCase().contains('release')
     }

@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ACCEPTANCE_PORT,
   acceptanceEnvironment,
   catalogForArtifact,
   prepareMobile,
+  registerInterruptCleanup,
   uiTarget,
 } from '../scripts/android-update-acceptance.mjs';
 
@@ -50,6 +54,24 @@ test('standalone acceptance prepares fixture web assets and synchronizes Capacit
       options: { cwd: mobile, env: environment, echo: true },
     },
   ]);
+});
+
+test('interrupt cleanup removes the generated CA before propagating the signal', async t => {
+  const temporary = await mkdtemp(join(tmpdir(), 'mdc-acceptance-signal-test-'));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const ca = join(temporary, 'mdc_acceptance_ca.pem');
+  await writeFile(ca, 'synthetic test CA');
+  const target = new EventEmitter();
+  target.pid = 123;
+  let propagated;
+  target.kill = (pid, signal) => { propagated = { pid, signal }; };
+  const dispose = registerInterruptCleanup(target, ca);
+  target.emit('SIGINT');
+
+  await assert.rejects(access(ca), { code: 'ENOENT' });
+  assert.deepEqual(propagated, { pid: 123, signal: 'SIGINT' });
+  assert.equal(target.listenerCount('SIGTERM'), 0);
+  dispose();
 });
 
 test('catalog pins the exact synthetic B bytes and fixed loopback HTTPS feed', () => {

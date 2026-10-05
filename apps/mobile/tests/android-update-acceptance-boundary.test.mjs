@@ -15,6 +15,12 @@ test('Android acceptance feed and controller exist only in the guarded acceptanc
   assert.match(gradle, /https:\/\/pbuchman\.github\.io\/multi-device-context\/updates\/preview\.json/);
   assert.match(gradle, /MDC_ANDROID_ACCEPTANCE_VERSION_NAME/);
   assert.match(gradle, /MDC_ANDROID_ACCEPTANCE_VERSION_CODE/);
+  assert.doesNotMatch(gradle, /startParameter\.taskNames/);
+  assert.match(gradle, /signingConfig signingConfigs\.debug/);
+  assert.match(gradle, /withBuildType\('acceptance'\)/);
+  assert.match(guard, /taskGraph\.whenReady/);
+  assert.match(guard, /includesAcceptance/);
+  assert.match(guard, /mdcAcceptancePrivateSigningConfigured/);
   assert.match(guard, /mdcAcceptanceConfigured/);
   assert.doesNotMatch(mainManifest, /AcceptanceUpdateReceiver|mdc_acceptance_network_security/);
   assert.match(acceptanceManifest, /AcceptanceUpdateReceiver/);
