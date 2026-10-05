@@ -25,6 +25,10 @@ hosted interface; install a current desktop application to gain native updates.
 No update requires deleting application data, clearing the keychain, removing
 quarantine attributes, or disabling operating-system protections.
 
+On macOS, replacing an ad-hoc signed build may also require approving the app's
+Keychain access again. Follow the [macOS installation instructions](installation.md#macos)
+to reopen the existing encrypted local data.
+
 ## Trust and validation
 
 The native layer chooses the update source and installer. The renderer cannot

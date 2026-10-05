@@ -46,6 +46,13 @@ Anyway**, then confirm the application name. This is Apple's documented per-app
 exception; a device-management policy can disallow it. See
 [Apple's instructions](https://support.apple.com/102445).
 
+After replacing an ad-hoc signed build, macOS may ask again to let **Multi Device
+Context** access its **Safe Storage** item in Keychain. Approve that application's
+request and enter your Mac login password if macOS asks for it. The existing
+encrypted local data needs this access to open. [Electron documents this
+permission prompt](https://www.electronjs.org/docs/latest/api/safe-storage) for
+builds without a consistent signing identity.
+
 The app remains in the menu bar when the window closes. Check **Launch at login**
 in the app's tray menu or settings, and verify the actual login launch on your
 Mac. Confirm login launch on the target Mac after a real logout/login cycle.
