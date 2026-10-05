@@ -82,6 +82,11 @@ An empty new chat stays out of the list until it has content or a name. Search
 shows a single clear control only while a query is present. Each message has
 Copy, Delete, and More controls; deleting the final message also deletes the
 empty context after confirmation.
+Click an image message to open a full-window preview inside the application.
+Right-click or Control-click the thumbnail or enlarged image and choose **Copy
+image**. PNG images keep their bytes; other browser-renderable image formats are
+decoded to PNG for consistent clipboard support. Saving still preserves the
+original file.
 With a mouse or trackpad, chat rows are 32 px high; touch devices retain 48 px
 hit targets. In wide windows, drag the separator beside the sidebar to resize it
 between 220 and 480 px. The main panel keeps at least 360 px. Focus the separator
@@ -140,15 +145,16 @@ the sidebar. Existing contexts can be opened by their copied HTTPS link; the
 
 Every context starts with a fallback name. AI-generated names require the
 account-level **Settings → AI context titles** setting and are not requested when
-that setting is disabled. When enabled, only bounded first text or file names and
-types are sent to the title model, never attachment bytes. Rename a context from
-its menu to choose your own title. Use **Chat options → Delete chat** to delete it
+that setting is disabled. When enabled, bounded first text or a supported first
+image up to 5 MiB is sent to the title model; other files send only name and type.
+Rename a context from its menu to choose your own title. Use **Chat options → Delete chat** to delete it
 permanently after confirmation; there is no trash or restore. **Deleting…** means
 the operation is waiting for confirmation. A failed attempt shows **Deletion
 needs retry** and a retry warning; a pending request by itself is not an error.
 
 For agent access, open **Settings → Agent access**, create a named key and store
-it privately. The [agent API and portable skill guide](https://github.com/pbuchman/multi-device-context/blob/main/docs/agent-api.md)
+it privately. The
+[agent API and portable skill guide](https://github.com/pbuchman/multi-device-context/blob/main/docs/agent-api.md)
 explains setup, watching for new contexts and returning results. Agent keys grant
 full access to your data and can be revoked from Settings.
 

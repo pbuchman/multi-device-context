@@ -1,21 +1,21 @@
-import { AccountSettings } from "./settings.js";
 import { pathToFileURL } from "node:url";
 
 import { applicationDefault, deleteApp, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
+import { attachmentPath } from "@mdc/contracts";
 
 import { AgentStore } from "./agent-store.js";
-import { TitleWorker } from "./titles.js";
-
 import { createAuthVerifier } from "./auth.js";
-import { readServerConfig } from "./config.js";
-import { FirebaseBackend } from "./firebase.js";
-import { DeviceAccessStore } from "./device-access.js";
 import { FirestoreAccessAdministration } from "./access.js";
 import { AttachmentStore } from "./attachments.js";
 import { buildServer } from "./server.js";
+import { readServerConfig } from "./config.js";
+import { DeviceAccessStore } from "./device-access.js";
+import { FirebaseBackend } from "./firebase.js";
+import { AccountSettings } from "./settings.js";
+import { TitleWorker } from "./titles.js";
 
 export async function startServer(env: NodeJS.ProcessEnv = process.env) {
   const config = readServerConfig(env);
@@ -24,9 +24,10 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
     projectId: config.publicConfig.firebase.projectId,
     storageBucket: config.publicConfig.firebase.storageBucket,
   });
+  const bucket = getStorage(adminApp).bucket();
   const backend = new FirebaseBackend({
     firestore: getFirestore(adminApp),
-    bucket: getStorage(adminApp).bucket(),
+    bucket,
     auth: getAuth(adminApp),
     dispose: () => deleteApp(adminApp),
   });
@@ -38,11 +39,15 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
     backend,
     devices: new DeviceAccessStore(getFirestore(adminApp), getAuth(adminApp)),
     access: new FirestoreAccessAdministration(getFirestore(adminApp), { origin: config.publicConfig.appOrigin }),
-    attachments: new AttachmentStore(getFirestore(adminApp), getStorage(adminApp).bucket(), backend),
+    attachments: new AttachmentStore(getFirestore(adminApp), bucket, backend),
     webDist: config.webDist,
-    agents: new AgentStore(getFirestore(adminApp), getStorage(adminApp).bucket(), backend),
+    agents: new AgentStore(getFirestore(adminApp), bucket, backend),
   });
-  const titles = new TitleWorker(getFirestore(adminApp), env.MDC_OPENROUTER_API_KEY, env.MDC_TITLE_MODEL, settings);
+  const titles = new TitleWorker(getFirestore(adminApp), env.MDC_OPENROUTER_API_KEY, env.MDC_TITLE_MODEL, settings, async ({ uid, contextId, itemId, content }) => {
+    const [bytes] = await bucket.file(attachmentPath(uid, contextId, itemId)).download();
+    if (bytes.byteLength !== content.size) throw new Error("Title image size changed");
+    return new Uint8Array(bytes);
+  });
   server.addHook("preClose", async () => { await titles.close(); });
   try {
     await backend.startCleanup();

@@ -31,11 +31,14 @@ API. Disabling prevents new provider requests; it cannot recall a request alread
 sent. Enabling does not regenerate historical contexts.
 
 With AI enabled, OpenRouter receives at most the first 8,000 JavaScript UTF-16
-code units of the first text/code item, or the attachment filename and MIME type.
-Attachment bytes are never sent for naming. The server requests ZDR routing;
-that limits retention at supported providers, not the fact of external processing.
-Provider credentials stay server-side. Failures leave a fallback title; a manual
-rename wins over delayed model results. Prompts/responses are not logged.
+code units of the first text/code item. For a first PNG, JPEG, WebP or GIF image
+up to 5 MiB, it receives the image bytes so the title can follow the language of
+meaningful visible text; if that language is unclear, the title is English.
+Other attachments send only their filename and MIME type. The server requests
+ZDR routing; that limits retention at supported providers, not the fact of
+external processing. Provider credentials stay server-side. Failures leave a
+fallback title; a manual rename wins over delayed model results.
+Prompts/responses are not logged.
 
 ## Local storage and offline use
 

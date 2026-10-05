@@ -9,6 +9,7 @@ import { prepareHistory } from "./history.js";
 import { ContextOperations } from "./operations.js";
 import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
+import { browserCopyFile, clipboardImageFile } from "./clipboard-image.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
 import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type SyntheticEvent } from "react";
@@ -888,7 +889,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (item.content.kind === "attachment") {
         const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
         if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
-        await services.copyFile({ name: item.content.name, contentType: item.content.contentType, bytes });
+        const file = await clipboardImageFile({ name: item.content.name, contentType: item.content.contentType, bytes });
+        if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
+        await services.copyFile(file);
       } else await services.copyText(item.content.text);
       showToast("Copied to this device");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Copy failed"); }
@@ -1130,7 +1133,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <AccountDetails viewer={viewer} profile={services.profile} />
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
-        {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
+        {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or a supported first image up to 5 MiB, to OpenRouter. Other files send only filename/type. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
         <div className="privacy-note">Incoming items stay here until you explicitly choose Copy. Other accounts cannot access your contexts. Service operators process data; this is not end-to-end encryption.</div>
         {services.openAccessPanel ? <><div className="setting-row"><span>Device access<small>{services.accessMode === "all" ? "All contexts" : "Only contexts created on this device"}</small></span></div><button type="button" className="dialog-action" onClick={() => void services.openAccessPanel!().catch(cause => setError(cause instanceof Error ? cause.message : "Could not open device access"))}>Manage device access…</button></> : null}
         <button type="button" className="signout" onClick={() => void prepareSignOut()}>Sign out</button>
@@ -1149,14 +1152,6 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   </>;
 }
 
-
-async function browserCopyFile(file: NativeFile): Promise<void> {
-  if (!file.contentType.startsWith("image/") || file.contentType === "image/svg+xml" || !("ClipboardItem" in window)) {
-    throw new Error("File copying is available in the desktop app. Use Save in this browser.");
-  }
-  const item = new ClipboardItem({ [file.contentType]: new Blob([bytesBuffer(file.bytes)], { type: file.contentType }) });
-  await navigator.clipboard.write([item]);
-}
 
 async function browserSaveFile(file: NativeFile): Promise<boolean> {
   const url = URL.createObjectURL(new Blob([bytesBuffer(file.bytes)], { type: file.contentType }));

@@ -59,7 +59,7 @@ export function ChatMessage({ item, cloud, onCopy, onDelete, onMore, blocked }: 
   const time = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(item.createdAt);
   return <article className="item-card" data-item-id={item.id}>
     {item.content.kind === "code" ? <div className="code-card"><div className="code-label">Code</div><pre>{text}</pre></div>
-      : attachment ? <div className="file-card"><AttachmentPreview item={item} cloud={cloud} /><div className="file-detail"><WorkspaceIcon name="file" /><span title={attachment.name}>{attachment.name}<small>{formatFileSize(attachment.size)} · {item.ready ? attachment.contentType : "Uploading"}</small></span></div></div>
+      : attachment ? <div className="file-card"><AttachmentPreview item={item} cloud={cloud} onCopy={() => onCopy(item)} blocked={blocked} /><div className="file-detail"><WorkspaceIcon name="file" /><span title={attachment.name}>{attachment.name}<small>{formatFileSize(attachment.size)} · {item.ready ? attachment.contentType : "Uploading"}</small></span></div></div>
         : isUrl ? <a className="text-card link-card" href={text} target="_blank" rel="noreferrer">{text}</a> : <div className="text-card">{text}</div>}
     <div className="item-actions"><span className="item-meta" title={`${item.device.name} · ${time}`}>{item.syncState === "pending" ? "Pending · " : item.syncState === "failed" || item.syncState === "paused" ? "Not sent · " : ""}{item.device.name} · {time}</span>
       <button type="button" className="icon-button" aria-label={attachment ? `Copy ${attachment.name}` : "Copy message"} title="Copy to this device" disabled={blocked || (!!attachment && !item.ready)} onClick={() => onCopy(item)}><WorkspaceIcon name="copy" /></button>
