@@ -362,3 +362,36 @@ describe("Android deployed API integration", () => {
     expect(response.headers["access-control-expose-headers"]).toBe("Retry-After");
   });
 });
+
+describe("account profile", () => {
+  it("requires verified auth and returns only matching profile fields without a device grant", async () => {
+    const profileFetcher = vi.fn(async () => new Response(JSON.stringify({ sub: "google-oauth2|person-123", name: "Person", email: "person@example.test", picture: "private" })));
+    const app = buildServer({ publicConfig, verifier, backend: backend(), profileFetcher }); openServers.push(app);
+    expect((await app.inject({ method: "GET", url: "/api/profile" })).statusCode).toBe(401);
+    expect(profileFetcher).not.toHaveBeenCalled();
+    const response = await app.inject({ method: "GET", url: "/api/profile", headers: { authorization: "Bearer valid-token" } });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual({ name: "Person", email: "person@example.test" });
+    expect(profileFetcher).toHaveBeenCalledWith("https://login.example.test/userinfo", expect.objectContaining({ headers: { authorization: "Bearer valid-token", accept: "application/json" } }));
+  });
+  it.each([{ sub: "another-user", name: "Wrong" }, null])("rejects mismatched or invalid profiles", async profile => {
+    const app = buildServer({ publicConfig, verifier, backend: backend(), profileFetcher: async () => new Response(JSON.stringify(profile)) }); openServers.push(app);
+    const response = await app.inject({ method: "GET", url: "/api/profile", headers: { authorization: "Bearer valid-token" } });
+    expect(response.statusCode).toBe(502); expect(response.json()).toEqual({ error: "Account details unavailable" });
+  });
+  it("handles unavailable Auth0 without leaking upstream details", async () => {
+    const app = buildServer({ publicConfig, verifier, backend: backend(), profileFetcher: async () => { throw new Error("private upstream failure"); } }); openServers.push(app);
+    const response = await app.inject({ method: "GET", url: "/api/profile", headers: { authorization: "Bearer valid-token" } });
+    expect(response.statusCode).toBe(502); expect(response.headers["cache-control"]).toBe("no-store");
+  });
+});
+
+it("rate limits profile requests before calling Auth0 and keeps failures uncached", async () => {
+  const profileFetcher = vi.fn(async () => new Response(JSON.stringify({ sub: "google-oauth2|person-123" })));
+  const app = buildServer({ publicConfig, verifier, backend: backend(), profileFetcher }); openServers.push(app);
+  for (let index = 0; index < 60; index++) await app.inject({ method: "GET", url: "/api/profile", headers: { authorization: "Bearer valid-token" } });
+  const response = await app.inject({ method: "GET", url: "/api/profile", headers: { authorization: "Bearer valid-token" } });
+  expect(response.statusCode).toBe(429); expect(response.headers["cache-control"]).toBe("no-store");
+  expect(profileFetcher).toHaveBeenCalledTimes(60);
+});

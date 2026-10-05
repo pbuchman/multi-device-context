@@ -76,12 +76,14 @@ it("disposes Firebase when custom-token sign-in fails", async () => {
   expect(sdk.deleteApp).toHaveBeenCalledTimes(1);
 });
 
-it("cleans Firebase if the browser profile lookup fails after authentication", async () => {
+it("keeps the browser session usable if profile lookup fails", async () => {
   const f = fixture();
   sdk.createAuth0Client.mockResolvedValueOnce({ isAuthenticated: async () => true, getTokenSilently: async () => "access", getUser: async () => { throw new Error("profile unavailable"); } });
   const manager = new SessionManager(f.fetcher, { platformFactory: async () => ({ kind: "browser", dispose() {} }) });
-  await expect(manager.login()).rejects.toThrow("profile unavailable");
-  expect(sdk.deleteApp).toHaveBeenCalledTimes(1);
+  const session = (await manager.login())!;
+  expect(session.viewer.name).toBe("Signed in");
+  expect(await session.accessToken()).toBe("firebase-access");
+  expect(sdk.deleteApp).not.toHaveBeenCalled();
 });
 
 it("invalidates native auth before web cleanup and leaves web data untouched on auth failure", async () => {
@@ -167,4 +169,49 @@ it("cannot open a native workspace through the Auth0-only legacy exchange", asyn
  const f=fixture(); delete f.platform.exchangeSession;
  await expect(f.manager.login()).rejects.toThrow(/update/i);
  expect(sdk.signInWithCustomToken).not.toHaveBeenCalled();
+});
+
+it.each(["android", "desktop"] as const)("loads %s profile in the background using the Auth0 token", async kind => {
+  const f = fixture(kind);
+  let finish!: (response: Response) => void;
+  f.fetcher.mockImplementation(async input => String(input).endsWith("/api/profile") ? new Promise(resolve => { finish = resolve; }) : new Response(JSON.stringify(config)));
+  const session = (await f.manager.restore())!;
+  expect(session.viewer).toEqual({ uid: "uid", name: "Signed in" });
+  const listener = vi.fn(); session.profile!.subscribe(listener);
+  finish(new Response(JSON.stringify({ name: "Alice", email: "alice@example.test" })));
+  await vi.waitFor(() => expect(session.profile!.getSnapshot()).toEqual({ uid: "uid", name: "Alice", email: "alice@example.test" }));
+  expect(listener).toHaveBeenCalledTimes(1);
+  expect(f.fetcher).toHaveBeenCalledWith(expect.stringContaining("/api/profile"), expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer access" }) }));
+  await session.signOut();
+});
+it("ignores a profile arriving after signout and never exposes a UID as the name", async () => {
+  const f = fixture(); let finish!: (response: Response) => void;
+  f.fetcher.mockImplementation(async input => String(input).endsWith("/api/profile") ? new Promise(resolve => { finish = resolve; }) : new Response(JSON.stringify(config)));
+  const session = (await f.manager.restore())!; const listener = vi.fn(); session.profile!.subscribe(listener);
+  await session.signOut(); finish(new Response(JSON.stringify({ name: "Old account" })));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(session.profile!.getSnapshot().name).toBe("Signed in"); expect(listener).not.toHaveBeenCalled();
+});
+
+it.each([{ email: "only@example.test" }, {}])("uses human-readable profile fallbacks", async data => {
+  const f = fixture();
+  f.fetcher.mockImplementation(async input => new Response(JSON.stringify(String(input).endsWith("/api/profile") ? data : config)));
+  const session = (await f.manager.restore())!;
+  await vi.waitFor(() => expect(session.profile!.getSnapshot().name).toBe("email" in data ? data.email : "Signed in"));
+  expect(session.profile!.getSnapshot().name).not.toBe(session.uid);
+  await session.signOut();
+});
+it("does not carry a pending profile into the next account", async () => {
+  const f = fixture(); let oldResponse!: (response: Response) => void;
+  f.fetcher.mockImplementation(async input => String(input).endsWith("/api/profile") ? new Promise(resolve => { oldResponse = resolve; }) : new Response(JSON.stringify(config)));
+  const old = (await f.manager.restore())!;
+  await old.signOut();
+  const resolveOld = oldResponse;
+  f.fetcher.mockImplementation(async input => new Response(JSON.stringify(String(input).endsWith("/api/profile") ? { name: "New account" } : config)));
+  const next = (await f.manager.login())!;
+  await vi.waitFor(() => expect(next.profile!.getSnapshot().name).toBe("New account"));
+  resolveOld(new Response(JSON.stringify({ name: "Old account" })));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(next.profile!.getSnapshot().name).toBe("New account");
+  expect(old.profile!.getSnapshot().name).toBe("Signed in");
 });

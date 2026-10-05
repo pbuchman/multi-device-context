@@ -361,7 +361,7 @@ describe("ContextWorkspace", () => {
     expect(screen.getByRole("button", { name: "Beta" })).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(screen.getByText("alex@example.com")).toBeTruthy();
+    expect(within(screen.getByRole("dialog")).getByText("alex@example.com")).toBeTruthy();
     expect(screen.getByText(/available in the desktop app/i)).toBeTruthy();
   });
 
@@ -502,4 +502,21 @@ it("R5: removing an optimistic queued message removes the displayed content", as
   await userEvent.click(screen.getByRole("button", { name: "Delete message" }));
   await waitFor(() => expect(screen.queryByText("Queued synthetic text")).toBeNull());
   expect(test.value.outbox.removeItem).toHaveBeenCalledWith(record.contextId, record.itemId);
+});
+
+it("updates account details in the footer and settings when the session profile arrives", async () => {
+  const test = services();
+  let viewer: WorkspaceServices["viewer"] = { uid: "technical-id", name: "Signed in" };
+  let notify = () => {};
+  test.value.profile = { getSnapshot: () => viewer, subscribe: listener => { notify = listener; return () => {}; } };
+  render(<ContextWorkspace services={test.value} />);
+  expect(screen.getByText("Account details unavailable")).toBeTruthy();
+  expect(screen.queryByText("technical-id")).toBeNull();
+  act(() => { viewer = { uid: "technical-id", name: "Full Name", email: "full@example.test" }; notify(); });
+  const footer = screen.getByRole("button", { name: "Open settings" });
+  expect(within(footer).getByText("Full Name")).toBeTruthy();
+  expect(within(footer).getByText("full@example.test")).toBeTruthy();
+  await userEvent.click(footer);
+  expect(within(screen.getByRole("dialog")).getByText("Full Name")).toBeTruthy();
+  expect(within(screen.getByRole("dialog")).getByText("full@example.test")).toBeTruthy();
 });

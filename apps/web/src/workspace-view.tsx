@@ -21,9 +21,9 @@ export function WorkspaceIcon({ name }: { name: IconName }) {
 export function displayTitle(title?: string) { return !title || title === "New context" ? "New chat" : title; }
 export function formatFileSize(size: number) { return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`; }
 
-export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, search, onSearch, onSelect, onNew, onClose, onOptions, onSettings, onRefresh, refreshing, blocked, name }: {
+export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, search, onSearch, onSelect, onNew, onClose, onOptions, onSettings, onRefresh, refreshing, blocked, name, email }: {
   elementRef: RefObject<HTMLElement | null>; compact: boolean; open: boolean; contexts: ContextRecord[]; selectedId: string; search: string; onSearch(value: string): void;
-  onSelect(id: string): void; onNew(): void; onClose(): void; onOptions(context: ContextRecord): void; onSettings(): void; onRefresh(): void; refreshing: boolean; blocked: boolean; name: string;
+  onSelect(id: string): void; onNew(): void; onClose(): void; onOptions(context: ContextRecord): void; onSettings(): void; onRefresh(): void; refreshing: boolean; blocked: boolean; name: string; email?: string | undefined;
 }) {
   return <aside ref={elementRef} className="sidebar" aria-label="Chats sidebar" role={compact && open ? "dialog" : undefined} aria-modal={compact && open ? true : undefined}>
     <div className="brand"><span className="brand-mark"><WorkspaceIcon name="stack" /></span><span>Multi Device Context<small>Chat with yourself</small></span><button type="button" className="icon-button drawer-close" aria-label="Close chats menu" onClick={onClose}><WorkspaceIcon name="close" /></button></div>
@@ -35,7 +35,7 @@ export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, s
         <button type="button" className="icon-button" aria-label={`Options for ${displayTitle(context.title)}`} onClick={() => onOptions(context)} disabled={blocked}><WorkspaceIcon name="more" /></button>
       </div>) : <p className="no-results">No chats match this title. Clear your search to see all chats.</p>}</nav>
     </div>
-    <div className="sidebar-footer"><button type="button" className="account" aria-label="Open settings" onClick={onSettings} disabled={blocked}><span className="avatar">{name.charAt(0).toUpperCase()}</span><span>Settings<small>{name}</small></span><WorkspaceIcon name="settings" /></button></div>
+    <div className="sidebar-footer"><button type="button" className="account" aria-label="Open settings" onClick={onSettings} disabled={blocked}><span className="avatar">{name.charAt(0).toUpperCase()}</span><span className="account-details"><span title={name}>{name}</span><small title={email}>{email ?? "Account details unavailable"}</small></span><WorkspaceIcon name="settings" /></button></div>
   </aside>;
 }
 

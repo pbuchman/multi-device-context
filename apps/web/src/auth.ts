@@ -1,7 +1,7 @@
 import { auth0ClientOptions } from "./browser-identity.js";
 import { apiUrl, createApiUrl, mobileBuild } from "./api.js";
-import { createAuth0Client, type Auth0Client, type User } from "@auth0/auth0-spa-js";
-import { contextIdFromPath, RuntimeConfigSchema, DeviceSessionSchema, type DeviceSession, type AccessDevice, type DesktopBridge, type RuntimeConfig } from "@mdc/contracts";
+import { createAuth0Client, type Auth0Client } from "@auth0/auth0-spa-js";
+import { contextIdFromPath, AccountProfileSchema, RuntimeConfigSchema, DeviceSessionSchema, type DeviceSession, type AccessDevice, type DesktopBridge, type RuntimeConfig } from "@mdc/contracts";
 import { deleteApp, initializeApp, type FirebaseApp } from "firebase/app";
 import { getAuth, initializeAuth, inMemoryPersistence, signInWithCustomToken, signOut as firebaseSignOut } from "firebase/auth";
 import { clearIndexedDbPersistence, getFirestore, terminate } from "firebase/firestore";
@@ -12,6 +12,8 @@ import type { Viewer } from "./model.js";
 type Fetcher = typeof fetch;
 type SessionResponse = DeviceSession;
 
+export type SessionProfile = { getSnapshot(): Viewer; subscribe(listener: () => void): () => void };
+
 export type ActiveSession = {
   config: RuntimeConfig;
   firebaseApp: FirebaseApp;
@@ -20,6 +22,7 @@ export type ActiveSession = {
   /** Dispose only the data session when the device policy changes. */
   disposeData(): Promise<void>;
   viewer: Viewer;
+  profile?: SessionProfile;
   accessToken(): Promise<string>;
   /** Local auth invalidation precedes account cleanup; browser navigation is last. */
   signOut(cleanup?: () => Promise<void>, reviewedNativeIds?: readonly string[]): Promise<void>;
@@ -87,12 +90,6 @@ export async function exchangeSession(
   const parsed = DeviceSessionSchema.safeParse(await response.json());
   if (!parsed.success) throw new Error("The session response is invalid");
   return parsed.data;
-}
-
-function viewerFromProfile(uid: string, profile: User | undefined, fallbackEmail?: string | null): Viewer {
-  const email = profile?.email ?? fallbackEmail ?? undefined;
-  const name = profile?.name ?? profile?.nickname ?? email ?? uid;
-  return email ? { uid, name, email } : { uid, name };
 }
 
 function firebaseDisposer(app: FirebaseApp): () => Promise<void> {
@@ -216,14 +213,11 @@ export class SessionManager {
     current();
     const firebaseApp = initializeApp(config.firebase, `mdc-${config.firebase.projectId}`);
     let credential;
-    let profile: User | undefined;
     try {
       const auth = initializeAuth(firebaseApp, { persistence: inMemoryPersistence });
       credential = await signInWithCustomToken(auth, exchanged.customToken);
       current();
       if (credential.user.uid !== exchanged.uid) throw new Error("Authenticated account mismatch");
-      profile = this.#auth0 ? await this.#auth0.getUser() : undefined;
-      current();
     } catch (error) {
       await disposeFirebase(firebaseApp);
       throw error;
@@ -233,13 +227,17 @@ export class SessionManager {
     let nativeSignedOut = false, browserSignedOut = false, cleanupDone = false, logoutDone = false;
     let logoutUrl: string | undefined;
     const disposeSessionFirebase = firebaseDisposer(firebaseApp);
+    let viewer: Viewer = { uid: exchanged.uid, name: "Signed in" };
+    const profileListeners = new Set<() => void>();
+    const profile: SessionProfile = { getSnapshot: () => viewer, subscribe: listener => { profileListeners.add(listener); return () => { profileListeners.delete(listener); }; } };
     const session: ActiveSession = {
       config,
       firebaseApp,
       uid: exchanged.uid,
       device: exchanged.device,
       disposeData: disposeSessionFirebase,
-      viewer: viewerFromProfile(exchanged.uid, profile, credential.user.email),
+      viewer,
+      profile,
       platform,
       accessToken: async () => {
         current();
@@ -283,6 +281,23 @@ export class SessionManager {
       ...(platform.kind === "desktop" ? { bridge: platform.native as DesktopBridge } : {}),
     };
     this.#session = session;
+    // Use the verified Auth0 token from session establishment, not the Firebase
+    // data token. Profile failures must never prevent opening the workspace.
+    void (async () => {
+      try {
+        const response = await this.fetcher(createApiUrl(config.appOrigin)("/api/profile"), {
+          headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+          cache: "no-store", signal: AbortSignal.timeout(5_000),
+        });
+        if (!response.ok) return;
+        const data = AccountProfileSchema.parse(await response.json());
+        current();
+        if (this.#session !== session) return;
+        viewer = { uid: exchanged.uid, name: data.name ?? data.email ?? "Signed in", ...(data.email ? { email: data.email } : {}) };
+        session.viewer = viewer;
+        for (const listener of profileListeners) listener();
+      } catch { /* Optional account details remain unavailable this session. */ }
+    })();
     return session;
   }
 

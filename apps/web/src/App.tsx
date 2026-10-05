@@ -8,11 +8,11 @@ import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent } from "react";
+import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent } from "react";
 
 import { useNavigation } from "./navigation.js";
 
-import { SessionManager, type ActiveSession } from "./auth.js";
+import { SessionManager, type ActiveSession, type SessionProfile } from "./auth.js";
 import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
 import { drainNativeClipboardQueue, type NativeQueueStore } from "./desktop.js";
 import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
@@ -25,6 +25,7 @@ import { frozenClipboardParts, insertClipboardText, keyboardSends, type SharePar
 import "./theme.css";
 
 type Unsubscribe = () => void;
+const emptySubscribe = () => () => {};
 
 export type WorkspaceCloud = {
   subscribeDeletedItems?(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe;
@@ -70,6 +71,7 @@ export type WorkspaceServices = {
   activity?: { initialActive: boolean; subscribe(listener: (active: boolean) => void): Unsubscribe };
   subscribeNavigation?: (listener: (id?: Id) => void) => Unsubscribe;
   viewer: Viewer;
+  profile?: SessionProfile;
   device: Device;
   cloud: WorkspaceCloud;
   outbox: WorkspaceOutbox;
@@ -144,6 +146,7 @@ type WorkspacePanel =
   | { kind: "settings" | "signout" };
 
 export function ContextWorkspace({ services }: { services: WorkspaceServices }) {
+  const viewer = useSyncExternalStore(services.profile?.subscribe ?? emptySubscribe, services.profile?.getSnapshot ?? (() => services.viewer));
   const [contexts, setContexts] = useState<ContextRecord[]>([]);
   const confirmedKey = `mdc-confirmed:${services.outbox.namespace}`;
   const [confirmedContextIds, setConfirmedContextIds] = useState(() => readConfirmedContexts(confirmedKey));
@@ -994,7 +997,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         onSelect={id => { if (!accountBlocked) { setSelectedId(id); closeDrawer(false); } }}
         onNew={() => { if (!accountBlocked) { setSelectedId(undefined); setError(undefined); closeDrawer(false); window.setTimeout(() => textareaRef.current?.focus(), 0); } }}
         onClose={() => closeDrawer()} onOptions={context => openPanel({ kind: "context", context })} onSettings={() => openPanel({ kind: "settings" })}
-        onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={services.viewer.name} />
+        onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={viewer.name} email={viewer.email} />
       <main ref={mainRef} className="main-panel">
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh()}
           onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked} />
@@ -1041,7 +1044,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <button type="button" className="dialog-action" aria-label="Code mode" aria-pressed={navigation.selectedRef.current.drafts[panel.contextId]?.code ?? false} onClick={() => { if (!deleted.current.has(panel.contextId)) navigation.patchFor(panel.contextId, { code: !navigation.selectedRef.current.drafts[panel.contextId]?.code }); closePanel(); }}><WorkspaceIcon name="code" /><span>Code mode<small>{navigation.selectedRef.current.drafts[panel.contextId]?.code ? "On" : "Off"} · Applies to typed and pasted text</small></span></button>
       </> : null}
       {panel.kind === "settings" ? <>
-        <div className="profile-row"><span className="avatar large">{services.viewer.name.charAt(0).toUpperCase()}</span><span><strong>{services.viewer.name}</strong><small>{services.viewer.email ?? services.viewer.uid}</small></span></div>
+        <div className="profile-row"><span className="avatar large">{viewer.name.charAt(0).toUpperCase()}</span><span><strong>{viewer.name}</strong><small>{viewer.email ?? "Account details unavailable"}</small></span></div>
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
         {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
@@ -1214,6 +1217,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
         return () => { active = false; unsubscribe(); };
       } } : {}),
       viewer: session.viewer,
+      ...(session.profile ? { profile: session.profile } : {}),
       device,
       cloud,
       outbox,
