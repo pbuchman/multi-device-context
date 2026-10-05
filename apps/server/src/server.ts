@@ -29,6 +29,7 @@ export interface Backend {
 }
 
 export type BuildServerOptions = {
+  profileFetcher?: typeof fetch;
   publicConfig: RuntimeConfig;
   verifier: AuthVerifier;
   backend: Backend;
@@ -77,6 +78,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.addHook("onRequest", async (request, reply) => {
     if (!request.url.startsWith("/api/")) return;
     reply.header("vary", "Origin");
+    if (request.url.split("?", 1)[0] === "/api/profile") reply.header("cache-control", "no-store");
     const origin = request.headers.origin;
     if (request.method !== "OPTIONS" && (origin === "https://localhost" || origin === publicConfig.appOrigin)) {
       reply.header("access-control-allow-origin", origin);
@@ -180,6 +182,26 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.get("/api/config", async (_request, reply) => {
     reply.header("cache-control", "no-store");
     return publicConfig;
+  });
+
+  app.get("/api/profile", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    const identity = await authenticated(request, verifier);
+    if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+    try {
+      const response = await (options.profileFetcher ?? fetch)(`https://${publicConfig.auth0.domain}/userinfo`, {
+        headers: { authorization: request.headers.authorization!, accept: "application/json" },
+        cache: "no-store", redirect: "error", signal: AbortSignal.timeout(5_000),
+      });
+      if (!response.ok) throw new Error("Profile unavailable");
+      const profile: unknown = await response.json();
+      if (!profile || typeof profile !== "object" || !("sub" in profile) || profile.sub !== identity.subject) throw new Error("Profile mismatch");
+      const name = "name" in profile && typeof profile.name === "string" ? profile.name.trim() : "";
+      const email = "email" in profile && typeof profile.email === "string" ? profile.email.trim() : "";
+      return { ...(name ? { name } : {}), ...(email ? { email } : {}) };
+    } catch {
+      return reply.code(502).send({ error: "Account details unavailable" });
+    }
   });
 
   const enrollmentAttempts = new WindowLimit(5);

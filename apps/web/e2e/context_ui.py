@@ -22,7 +22,65 @@ with sync_playwright() as playwright:
     assert not page.locator("vite-error-overlay").count()
     page.screenshot(path=str(SCREENSHOTS / "desktop-light.png"), full_page=True)
 
+    # Density follows the primary pointer, independently of the viewport width.
+    for width in (1440, 390):
+        page.set_viewport_size({"width": width, "height": 920})
+        for selector in (".context-row", ".context-select", ".context-row .icon-button"):
+            assert page.locator(selector).first.evaluate("el => el.getBoundingClientRect().height") == 32, selector
+    page.set_viewport_size({"width": 1440, "height": 920})
+    touch = browser.new_context(has_touch=True, viewport={"width": 1440, "height": 920})
+    touch_page = touch.new_page()
+    touch_page.goto(BASE_URL, wait_until="networkidle")
+    for selector in (".context-row", ".context-select", ".context-row .icon-button"):
+        assert touch_page.locator(selector).first.evaluate("el => el.getBoundingClientRect().height") == 48, selector
+    touch.close()
+
+    separator = page.get_by_role("separator", name="Resize chats sidebar")
+    separator.focus()
+    separator.press("End")
+    expect(separator).to_have_attribute("aria-valuenow", "480")
+    page.goto(BASE_URL, wait_until="networkidle")
+    expect(separator).to_have_attribute("aria-valuenow", "480")
+    page.set_viewport_size({"width": 390, "height": 844})
+    expect(separator).to_have_count(0)
+    page.set_viewport_size({"width": 1440, "height": 920})
+    expect(separator).to_have_attribute("aria-valuenow", "480")
+    boundary = page.locator(".sidebar").bounding_box()
+    x = boundary["x"] + boundary["width"]
+    page.mouse.move(x, 400)
+    page.mouse.down()
+    page.mouse.move(x - 130, 400, steps=5)
+    page.mouse.up()
+    expect(separator).to_have_attribute("aria-valuenow", "350")
+    page.goto(BASE_URL, wait_until="networkidle")
+    expect(separator).to_have_attribute("aria-valuenow", "350")
+    page.mouse.dblclick(350, 400)
+    expect(separator).to_have_attribute("aria-valuenow", "274")
+    page.get_by_role("button", name="Website handoff", exact=True).click()
+
     composer = page.get_by_label("Message to yourself")
+    composer.fill("Keep this draft")
+    target = page.get_by_role("button", name="Useful commands", exact=True)
+    target.click(button="right")
+    menu = page.get_by_role("menu", name="Options for Useful commands")
+    expect(menu).to_be_visible()
+    expect(composer).to_have_value("Keep this draft")
+    expect(page.get_by_role("heading", name="Website handoff")).to_be_visible()
+    menu.press("Escape")
+    expect(target).to_be_focused()
+    target.press("Shift+F10")
+    page.get_by_role("menuitem", name="Rename chat").click()
+    page.get_by_label("Chat name", exact=True).fill("Commands renamed")
+    page.get_by_role("button", name="Save", exact=True).click()
+    expect(page.get_by_role("button", name="Commands renamed", exact=True)).to_be_visible()
+    expect(composer).to_have_value("Keep this draft")
+    # Deliberately open at the viewport edge to exercise menu clamping.
+    page.get_by_role("button", name="Commands renamed", exact=True).evaluate("el => el.dispatchEvent(new MouseEvent('contextmenu', {bubbles:true, cancelable:true, clientX:1438, clientY:918}))")
+    bounds = page.get_by_role("menu").bounding_box()
+    assert bounds["x"] + bounds["width"] <= 1440
+    assert bounds["y"] + bounds["height"] <= 920
+    page.screenshot(path=str(SCREENSHOTS / "context-menu-light.png"), full_page=True)
+    page.get_by_role("menu").press("Escape")
     composer.fill("Browser interaction proof")
     composer.press("Enter")
     page.get_by_text("Browser interaction proof", exact=True).wait_for()
@@ -43,8 +101,8 @@ with sync_playwright() as playwright:
     expect(page.get_by_label("Search chat titles")).not_to_be_in_viewport()
     page.get_by_role("button", name="Open chats menu").click()
     page.get_by_label("Search chat titles").fill("commands")
-    assert page.get_by_role("button", name="Useful commands", exact=True).is_visible()
-    page.get_by_role("button", name="Useful commands", exact=True).click()
+    assert page.get_by_role("button", name="Commands renamed", exact=True).is_visible()
+    page.get_by_role("button", name="Commands renamed", exact=True).click()
     page.get_by_text("git status", exact=False).wait_for()
     assert page.get_by_role("button", name="Open chats menu").get_attribute("aria-expanded") == "false"
     expect(page.locator(".sidebar")).to_have_attribute("inert", "")

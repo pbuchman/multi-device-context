@@ -1,3 +1,4 @@
+import { SidebarResize } from "./sidebar-resize.js";
 import { AccessPage } from "./AccessPage.js";
 import { isAccessPageRequest } from "./browser-identity.js";
 import { applyLocalAccess, readLocalAccess } from "./local-access.js";
@@ -8,23 +9,25 @@ import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent } from "react";
+import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent } from "react";
 
 import { useNavigation } from "./navigation.js";
 
-import { SessionManager, type ActiveSession } from "./auth.js";
+import { SessionManager, type ActiveSession, type SessionProfile } from "./auth.js";
 import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
 import { drainNativeClipboardQueue, type NativeQueueStore } from "./desktop.js";
 import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
 import { DurableOutbox, type QueuedShare } from "./outbox.js";
 import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
 import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, displayTitle, formatFileSize } from "./workspace-view.js";
+import { ChatContextMenu, type ChatMenuAnchor } from "./chat-context-menu.js";
 import { WorkspaceDialog, trapFocus } from "./workspace-overlay.js";
 import { useTimelineScroll } from "./use-timeline-scroll.js";
 import { frozenClipboardParts, insertClipboardText, keyboardSends, type SharePart } from "./workspace-input.js";
 import "./theme.css";
 
 type Unsubscribe = () => void;
+const emptySubscribe = () => () => {};
 
 export type WorkspaceCloud = {
   subscribeDeletedItems?(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe;
@@ -70,6 +73,7 @@ export type WorkspaceServices = {
   activity?: { initialActive: boolean; subscribe(listener: (active: boolean) => void): Unsubscribe };
   subscribeNavigation?: (listener: (id?: Id) => void) => Unsubscribe;
   viewer: Viewer;
+  profile?: SessionProfile;
   device: Device;
   cloud: WorkspaceCloud;
   outbox: WorkspaceOutbox;
@@ -144,6 +148,7 @@ type WorkspacePanel =
   | { kind: "settings" | "signout" };
 
 export function ContextWorkspace({ services }: { services: WorkspaceServices }) {
+  const viewer = useSyncExternalStore(services.profile?.subscribe ?? emptySubscribe, services.profile?.getSnapshot ?? (() => services.viewer));
   const [contexts, setContexts] = useState<ContextRecord[]>([]);
   const confirmedKey = `mdc-confirmed:${services.outbox.namespace}`;
   const [confirmedContextIds, setConfirmedContextIds] = useState(() => readConfirmedContexts(confirmedKey));
@@ -160,6 +165,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const [aiEnabled, setAiEnabled] = useState<boolean>();
   const [panel, setPanel] = useState<WorkspacePanel>();
+  const [chatMenu, setChatMenu] = useState<{ context: ContextRecord; anchor: ChatMenuAnchor; opener: HTMLElement; owner: WorkspaceServices }>();
   const settingsOpen = panel?.kind === "settings";
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [compact, setCompact] = useState(() => window.matchMedia?.("(max-width: 839px)").matches ?? false);
@@ -314,7 +320,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     window.addEventListener("keydown", key); window.addEventListener("mdc:back", back);
     return () => { window.removeEventListener("keydown", key); window.removeEventListener("mdc:back", back); };
   }, [panel, compact, drawerOpen, closePanel, closeDrawer]);
-  useEffect(() => { setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
+  useEffect(() => { setChatMenu(undefined); setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
 
   const refreshers = useRef({ contexts: new ForegroundRefresh(), deleted: new ForegroundRefresh(), deletedItems: new ForegroundRefresh(), items: new ForegroundRefresh() });
   const applyDeleted = useCallback(async (ids: Id[]) => {
@@ -471,6 +477,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [active, isLive, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
 
   const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))];
+  useEffect(() => {
+    if (chatMenu && (chatMenu.owner !== services || accountBlocked || panel || !allContexts.some(context => context.id === chatMenu.context.id))) setChatMenu(undefined);
+  }, [chatMenu, services, accountBlocked, panel, allContexts]);
   const selected = allContexts.find((context) => context.id === selectedId);
   const visibleContexts = allContexts.filter((context) => context.title.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   const visibleItems = [...items.filter(item => item.contextId === selectedId), ...optimisticItems.filter((item) => item.contextId === selectedId)]
@@ -975,6 +984,16 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const syncLabel = queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
     : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
 
+  const openChatMenu = (context: ContextRecord, anchor: ChatMenuAnchor, opener: HTMLElement) => {
+    if (!accountBlocked) setChatMenu({ context, anchor, opener, owner: services });
+  };
+  const renameChat = (context: ContextRecord) => {
+    setRenameText(context.title === "New context" ? "" : context.title);
+    openPanel({ kind: "rename", context });
+  };
+  const copyChatLink = (context: ContextRecord) => {
+    void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${context.id}`).then(() => { if (isLive()) showToast("Chat link copied"); }).catch(cause => { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not copy the link"); });
+  };
   const panelTitle = panel?.kind === "context" ? "Chat options" : panel?.kind === "rename" ? "Rename chat" : panel?.kind === "delete-context" ? "Delete chat?" : panel?.kind === "item" ? "Message options" : panel?.kind === "delete-item" ? "Delete message?" : panel?.kind === "clipboard" ? "Send pasted files?" : panel?.kind === "add" ? "Add to this chat" : panel?.kind === "signout" ? "Sign out?" : "Settings";
   const option = (icon: Parameters<typeof WorkspaceIcon>[0]["name"], label: string, action: () => void, disabled = false, description?: string) => <button type="button" className={`dialog-action ${icon === "trash" ? "danger" : ""}`} onClick={action} disabled={disabled || dialogBusy}><WorkspaceIcon name={icon} /><span>{label}{description ? <small>{description}</small> : null}</span></button>;
   const confirmDelete = async () => {
@@ -993,8 +1012,12 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       <ChatSidebar elementRef={sidebarRef} compact={compact} open={drawerOpen} contexts={visibleContexts} selectedId={selectedId} search={search} onSearch={setSearch}
         onSelect={id => { if (!accountBlocked) { setSelectedId(id); closeDrawer(false); } }}
         onNew={() => { if (!accountBlocked) { setSelectedId(undefined); setError(undefined); closeDrawer(false); window.setTimeout(() => textareaRef.current?.focus(), 0); } }}
-        onClose={() => closeDrawer()} onOptions={context => openPanel({ kind: "context", context })} onSettings={() => openPanel({ kind: "settings" })}
-        onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={services.viewer.name} />
+        onClose={() => closeDrawer()} onOptions={(context, opener) => {
+          if (services.platformKind === "android" || window.matchMedia?.("(pointer: coarse)").matches) openPanel({ kind: "context", context });
+          else { const rect = opener.getBoundingClientRect(); openChatMenu(context, { x: rect.left, y: rect.bottom }, opener); }
+        }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
+        onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={viewer.name} email={viewer.email} />
+      <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh()}
           onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked} />
@@ -1013,12 +1036,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <input ref={fileInput} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; void sharePickedFiles(files); }} />
       </main>
     </div>
+    {chatMenu && chatMenu.owner === services && !panel && !accountBlocked ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
     {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
     {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()}>
       {panel.kind === "context" ? <>
         <p className="dialog-description">{displayTitle(panel.context.title)}</p>
-        {option("edit", "Rename chat", () => { setRenameText(panel.context.title === "New context" ? "" : panel.context.title); setPanel({ kind: "rename", context: panel.context }); })}
-        {!navigation.selectedRef.current.drafts[panel.context.id]?.local ? option("link", "Copy link", () => { const target = panel.context.id; void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${target}`).then(() => { if (isLive()) showToast("Chat link copied"); }).catch(cause => { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not copy the link"); }); closePanel(); }, false, "The link does not give other accounts access.") : null}
+        {option("edit", "Rename chat", () => renameChat(panel.context))}
+        {!navigation.selectedRef.current.drafts[panel.context.id]?.local ? option("link", "Copy link", () => { copyChatLink(panel.context); closePanel(); }, false, "The link does not give other accounts access.") : null}
         {!services.isDesktop && services.platformKind !== "android" && !navigation.selectedRef.current.drafts[panel.context.id]?.local ? <a className="dialog-action" href={`multi-device-context://context/${panel.context.id}`}><WorkspaceIcon name="share" /><span>Open in app</span></a> : null}
         <div className="dialog-divider" />{option("trash", "Delete chat…", () => setPanel({ kind: "delete-context", context: panel.context }))}
       </> : null}
@@ -1041,7 +1065,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <button type="button" className="dialog-action" aria-label="Code mode" aria-pressed={navigation.selectedRef.current.drafts[panel.contextId]?.code ?? false} onClick={() => { if (!deleted.current.has(panel.contextId)) navigation.patchFor(panel.contextId, { code: !navigation.selectedRef.current.drafts[panel.contextId]?.code }); closePanel(); }}><WorkspaceIcon name="code" /><span>Code mode<small>{navigation.selectedRef.current.drafts[panel.contextId]?.code ? "On" : "Off"} · Applies to typed and pasted text</small></span></button>
       </> : null}
       {panel.kind === "settings" ? <>
-        <div className="profile-row"><span className="avatar large">{services.viewer.name.charAt(0).toUpperCase()}</span><span><strong>{services.viewer.name}</strong><small>{services.viewer.email ?? services.viewer.uid}</small></span></div>
+        <div className="profile-row"><span className="avatar large">{viewer.name.charAt(0).toUpperCase()}</span><span><strong>{viewer.name}</strong><small>{viewer.email ?? "Account details unavailable"}</small></span></div>
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
         {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
@@ -1214,6 +1238,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
         return () => { active = false; unsubscribe(); };
       } } : {}),
       viewer: session.viewer,
+      ...(session.profile ? { profile: session.profile } : {}),
       device,
       cloud,
       outbox,

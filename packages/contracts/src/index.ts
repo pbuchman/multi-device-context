@@ -33,6 +33,8 @@ export const AccessDeviceSchema = DeviceSchema.extend({
 }).strict();
 export type AccessDevice = z.infer<typeof AccessDeviceSchema>;
 export const DeviceCredentialSchema = z.object({ deviceId: IdSchema, credential: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
+export const AccountProfileSchema = z.object({ name: z.string().trim().min(1).optional(), email: z.string().trim().min(1).optional() }).strict();
+export type AccountProfile = z.infer<typeof AccountProfileSchema>;
 export const DeviceSessionSchema = z.object({ uid: z.string().min(1), customToken: z.string().min(1), device: AccessDeviceSchema }).strict();
 export type DeviceSession = z.infer<typeof DeviceSessionSchema>;
 export const AccessActionSchema = z.discriminatedUnion("action", [

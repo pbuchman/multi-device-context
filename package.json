@@ -7,14 +7,15 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "test": "vitest run && pnpm test:runtime && pnpm test:mobile && pnpm test:operations",
+    "test": "pnpm test:security && vitest run && pnpm test:runtime && pnpm test:mobile && pnpm test:operations",
     "build:web": "pnpm --filter @mdc/web build",
     "test:web": "vitest run apps/web/src",
     "test:rules": "firebase emulators:exec --project demo-mdc --only firestore,storage \"pnpm vitest run --config vitest.rules.config.ts\"",
     "typecheck": "pnpm -r --if-present typecheck",
     "test:runtime": "node --test scripts/runtime/*.test.mjs",
     "test:mobile": "pnpm --filter @mdc/mobile test",
-    "test:operations": "node --test scripts/operations/*.test.mjs"
+    "test:operations": "node --test scripts/operations/*.test.mjs",
+    "test:security": "node --test scripts/security/*.test.mjs"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "5.0.2",
@@ -35,7 +36,19 @@
       "gaxios>uuid": "11.1.1",
       "firebase-tools>@google-cloud/pubsub": "6.1.0",
       "xcode>uuid": "11.1.1",
-      "get-uri>basic-ftp": "6.2.1"
+      "get-uri>basic-ftp": "6.2.1",
+      "braces": "3.0.3",
+      "http-cache-semantics": "4.2.0"
+    },
+    "patchedDependencies": {
+      "braces@3.0.3": "patches/braces@3.0.3.patch",
+      "http-cache-semantics@4.2.0": "patches/http-cache-semantics@4.2.0.patch"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-vfj7-8cjw-p6xm",
+        "GHSA-ch52-4w7c-c8xp"
+      ]
     }
   }
 }

@@ -19,3 +19,15 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important;animation:none!important}}@media(forced-colors:active){.brand-mark,.login-button,.send,.status-dot,.avatar{border:1px solid ButtonText}.text-card,.code-card,.file-card{border:1px solid CanvasText}}
 
 .signout-counts{margin:16px 0}.signout-counts>div{display:flex;justify-content:space-between;gap:16px;padding:8px 0}.signout-counts dd{font-weight:600;margin:0}
+
+.account-details{min-width:0;overflow:hidden}.account-details>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-details small{white-space:nowrap}.profile-row>span:last-child{min-width:0;overflow-wrap:anywhere}
+
+/* Keep touch targets generous; compact rows depend on pointer precision. */
+@media(pointer:fine){
+  .context-row,.context-select{min-height:32px}
+  .context-row .icon-button{min-height:32px;height:32px;min-width:32px;width:32px;border-radius:10px}
+}
+
+.sidebar-resize{position:relative;flex:0 0 0;width:0;align-self:stretch;z-index:8;touch-action:none;cursor:col-resize;outline:none}
+.sidebar-resize::after{content:"";position:absolute;left:-4px;top:0;bottom:0;width:8px}
+.sidebar-resize:hover::after,.sidebar-resize:focus-visible::after,.sidebar-resize.dragging::after{background:var(--focus);opacity:.55}
