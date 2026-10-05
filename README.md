@@ -9,13 +9,13 @@ passkey confirmation.
 ## Choose how to run it
 
 - Download the published private-preview Windows x64 and Apple Silicon macOS
-  installers from [v0.5.0](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.0).
+  installers from [v0.5.4](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.4).
   Windows builds are unsigned. macOS builds are ad-hoc signed, require macOS 13
   or later, and are not notarized. Follow the [installation guide](docs/installation.md).
 - Android is a private, locally signed APK rather than a store release. Follow
   the [Android build, install, and device guide](docs/android.md).
 - The current source can run as a web service or produce newer local artifacts;
-  it may include changes newer than the v0.5.0 preview. Start with the
+  it may include changes newer than the v0.5.4 preview. Start with the
   [self-hosting guide](docs/self-hosting.md) and [deployment procedure](docs/operations/deployment.md).
 
 The compact chat interface preserves drafts while contexts synchronize. Ordinary

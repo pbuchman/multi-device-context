@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.5.4 — interface polish (2026-10-05)
+
+- Empty new-chat drafts stay out of the chat list until they contain content or
+  receive a name.
+- Every message has a direct, confirmed delete action; deleting the final
+  message also permanently deletes its empty context.
+- Desktop account details load the verified Google profile image in memory, with
+  a bounded image fetch and the existing initial fallback.
+- Search has one aligned clear control and a field-level focus state; refresh and
+  chat action controls share the same alignment.
+- Theme and checkbox controls use compact desktop sizing while keeping usable
+  interaction targets.
+
+## 0.5.3 — account and deletion recovery (2026-10-05)
+
 - Desktop 0.5.3 uses verified sign-in profile claims in memory, avoiding an
   unnecessary dependency on a second Auth0 lookup for account details.
 - Account lookup now supports bounded recovery and an explicit retry in Settings;

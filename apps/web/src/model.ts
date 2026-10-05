@@ -35,6 +35,6 @@ export type ShareDraft = {
   nativeRequestId?: Id;
 };
 
-export type Viewer = { uid: string; name: string; email?: string };
+export type Viewer = { uid: string; name: string; email?: string; avatarUrl?: string };
 
 export type ClipboardContent = { text?: string; files: NativeFile[] };

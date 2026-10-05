@@ -23,7 +23,7 @@ export interface Backend {
   createCustomToken(uid: string, deviceId: string): Promise<string>;
   completeUpload(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void>;
   deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void>;
-  deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void>;
+  deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity, deleteEmptyContext?: boolean): Promise<void>;
   checkReady(): Promise<void>;
   close(): Promise<void>;
 }
@@ -343,8 +343,12 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       const contextId = parseId(request.params.contextId);
       const itemId = parseId(request.params.itemId);
       if (!contextId || !itemId) return reply.code(400).send({ error: "Bad Request" });
+      const body = request.body;
+      const deleteEmptyContext = typeof body === "object" && body !== null && !Array.isArray(body)
+        && Object.keys(body).length === 1 && "deleteEmptyContext" in body && body.deleteEmptyContext === true;
+      if (!hasNoBodyFields(body) && !deleteEmptyContext) return reply.code(400).send({ error: "Bad Request" });
       try {
-        await backend.deleteItem(identity.uid, contextId, itemId, deviceIdentity(identity));
+        await backend.deleteItem(identity.uid, contextId, itemId, deviceIdentity(identity), deleteEmptyContext);
         return reply.code(204).send();
       } catch (error) {
         if (error && typeof error === "object" && "statusCode" in error) throw error;

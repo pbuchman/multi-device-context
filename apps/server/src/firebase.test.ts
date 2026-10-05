@@ -27,22 +27,23 @@ class FakeSnapshot {
 
 class FakeQuery {
   private maximum = Number.POSITIVE_INFINITY;
-  private deletingOnly = false;
+  private deletingValue: boolean | undefined;
   constructor(
     private readonly store: FakeFirestore,
     private readonly matches: (path: string) => boolean,
   ) {}
   where(field: string, operator: string, value: unknown) {
-    if (field === "deleting" && operator === "==" && value === true) this.deletingOnly = true;
+    if (field === "deleting" && operator === "==" && typeof value === "boolean") this.deletingValue = value;
     return this;
   }
+  orderBy() { return this; }
   limit(maximum: number) {
     this.maximum = maximum;
     return this;
   }
   async get() {
     const docs = [...this.store.documents.entries()]
-      .filter(([path, data]) => this.matches(path) && (!this.deletingOnly || data.deleting === true))
+      .filter(([path, data]) => this.matches(path) && (this.deletingValue === undefined || data.deleting === this.deletingValue))
       .slice(0, this.maximum)
       .map(([path, data]) => new FakeSnapshot(this.store.doc(path), data));
     return { docs, empty: docs.length === 0 };
@@ -383,6 +384,62 @@ describe("FirebaseBackend deletion", () => {
     expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true });
     expect(bucket.objects.has(other)).toBe(true);
     await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID)).resolves.toBeUndefined();
+  });
+
+  it("keeps the parent context after an ordinary item deletion", async () => {
+    const { backend, firestore } = fixture();
+    const { context, item } = paths();
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false });
+
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID);
+
+    expect(firestore.documents.has(item)).toBe(false);
+    expect(firestore.documents.has(context)).toBe(true);
+    expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true });
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(false);
+  });
+
+  it("atomically deletes the parent only when a requested final item has no sibling", async () => {
+    const { backend, firestore } = fixture();
+    const { context, item } = paths();
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false });
+
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true);
+
+    expect(firestore.documents.has(item)).toBe(false);
+    expect(firestore.documents.has(context)).toBe(false);
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true });
+  });
+
+  it("does not delete the context when a requested final item has a live sibling", async () => {
+    const { backend, firestore } = fixture();
+    const { context, item } = paths();
+    const sibling = `${context}/items/00000000-0000-4000-8000-000000000099`;
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false, createdAt: 1 });
+    firestore.documents.set(sibling, { deleting: false, ready: true, createdAt: 2 });
+
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true);
+
+    expect(firestore.documents.has(context)).toBe(true);
+    expect(firestore.documents.has(sibling)).toBe(true);
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(false);
+  });
+
+  it("resumes conditional context cleanup after an interrupted object deletion", async () => {
+    const { backend, firestore, bucket } = fixture();
+    const { context, item, object } = paths();
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false });
+    bucket.objects.set(object, { size: 1, contentType: "text/plain", generation: "1", failDeletes: 1 });
+
+    await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true)).rejects.toThrow("transient");
+    expect(firestore.documents.get(context)?.deleting).toBe(true);
+    await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true)).resolves.toBeUndefined();
+    expect(firestore.documents.has(context)).toBe(false);
+    expect(firestore.documents.has(item)).toBe(false);
   });
 });
 

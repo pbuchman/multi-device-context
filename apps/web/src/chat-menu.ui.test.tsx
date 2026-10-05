@@ -65,7 +65,8 @@ it("opens with Control-click and keyboard, then closes when sync removes its tar
 });
 it("hides copying for a local unsent chat and closes on account replacement", async () => {
   const t = fixture(); const view = render(<ContextWorkspace services={t.services} />);
-  await userEvent.click(screen.getByRole("button", { name: "Options for New chat" }));
+  fireEvent.change(composer(), { target: { value: "Local draft" } });
+  await userEvent.click(screen.getByRole("button", { name: "Options for Draft · Local draft" }));
   expect(screen.getByRole("menu")).toBeTruthy();
   expect(screen.queryByRole("menuitem", { name: "Copy link" })).toBeNull();
   const other = fixture(); view.rerender(<ContextWorkspace services={other.services} />);

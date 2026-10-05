@@ -219,8 +219,10 @@ it("does not carry a pending profile into the next account", async () => {
 it("uses verified native profile claims without depending on the userinfo endpoint", async () => {
   const f=fixture("desktop");
   f.platform.native!.getAccountProfile=vi.fn(async()=>({uid:"uid",name:"Alice",email:"alice@example.test"}));
+  f.platform.native!.getAccountAvatar=vi.fn(async()=>({name:"account-avatar",contentType:"image/png",bytes:new Uint8Array([0,1,255])}));
   const session=(await f.manager.login())!;
   await vi.waitFor(()=>expect(session.viewer.email).toBe("alice@example.test"));
+  await vi.waitFor(()=>expect(session.viewer.avatarUrl).toBe("data:image/png;base64,AAH/"));
   expect(f.fetcher.mock.calls.some(([url])=>String(url).endsWith("/api/profile"))).toBe(false);
   await session.signOut();
 });

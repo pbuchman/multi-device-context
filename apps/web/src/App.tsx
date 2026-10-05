@@ -43,7 +43,7 @@ export type WorkspaceCloud = {
   setNetworkEnabled?(enabled: boolean): Promise<void>;
   renameContext(contextId: Id, title: string): Promise<void>;
   deleteContext(contextId: Id): Promise<void>;
-  deleteItem(contextId: Id, itemId: Id): Promise<void>;
+  deleteItem(contextId: Id, itemId: Id, deleteEmptyContext?: boolean): Promise<void>;
   attachmentBytes(contextId: Id, itemId: Id, content: Extract<Content, { kind: "attachment" }>): Promise<Uint8Array>;
 };
 
@@ -62,7 +62,7 @@ export type WorkspaceOutbox = {
 };
 
 export type WorkspaceServices = {
-  remove?(contextId: Id, itemId?: Id): Promise<boolean>;
+  remove?(contextId: Id, itemId?: Id, deleteEmptyContext?: boolean): Promise<boolean>;
   initialContextId?: Id;
   settings?: { getSettings(): Promise<{ aiTitlesEnabled: boolean }>; setSettings(enabled: boolean): Promise<{ aiTitlesEnabled: boolean }> };
   isDesktop?: boolean;
@@ -928,11 +928,11 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   };
 
   const fallbackDeletes = useRef(new Map<string, () => Promise<void>>());
-  const remove = async (contextId: Id, itemId?: Id): Promise<boolean> => {
-    if (services.remove) return services.remove(contextId, itemId);
+  const remove = async (contextId: Id, itemId?: Id, deleteEmptyContext = false): Promise<boolean> => {
+    if (services.remove) return services.remove(contextId, itemId, deleteEmptyContext);
     const key = `${contextId}:${itemId ?? "context"}`;
     const action = async () => {
-      if (itemId) { await services.outbox.removeItem?.(contextId, itemId); await services.cloud.deleteItem(contextId, itemId); }
+      if (itemId) { await services.outbox.removeItem?.(contextId, itemId); await services.cloud.deleteItem(contextId, itemId, deleteEmptyContext); }
       else { await services.outbox.removeContext?.(contextId); await services.cloud.deleteContext(contextId); }
       fallbackDeletes.current.delete(key);
     };
@@ -957,7 +957,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (accountBlocked || !isLive()) return;
     setActiveDeletions(count => count + 1);
     try {
-      const complete = await remove(item.contextId, item.id);
+      const finalVisibleItem = visibleItems.length === 1 && visibleItems[0]?.id === item.id;
+      const complete = await remove(item.contextId, item.id, finalVisibleItem);
       if (!isLive()) return;
       deletedItems.current.add(item.id);
       setItems(current => current.filter(i => i.id !== item.id));
@@ -1077,7 +1078,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           if (services.platformKind === "android" || window.matchMedia?.("(pointer: coarse)").matches) openPanel({ kind: "context", context });
           else { const rect = opener.getBoundingClientRect(); openChatMenu(context, { x: rect.left, y: rect.bottom }, opener); }
         }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
-        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email ?? (profileState.status === "loading" ? "Loading account…" : undefined)} />
+        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email ?? (profileState.status === "loading" ? "Loading account…" : undefined)} avatarUrl={viewer.avatarUrl} />
       <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh(true)}
@@ -1085,7 +1086,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" disabled={accountBlocked} onClick={() => void retry()}>Retry</button>{error ? <button type="button" className="icon-button" aria-label="Dismiss error" onClick={() => setError(undefined)}><WorkspaceIcon name="close" /></button> : null}</div> : null}
         <div className="timeline-region">
           <section ref={scroll.viewport} className="timeline" aria-label="Messages to yourself"><div ref={scroll.content} className="timeline-content">
-            {visibleItems.length ? visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ChatMessage item={item} cloud={services.cloud} blocked={accountBlocked || lifecycleSaving} onCopy={value => void copyItem(value)} onMore={item => openPanel({ kind: "item", item })} /></Fragment>)
+            {visibleItems.length ? visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ChatMessage item={item} cloud={services.cloud} blocked={accountBlocked || lifecycleSaving} onCopy={value => void copyItem(value)} onDelete={item => openPanel({ kind: "delete-item", item })} onMore={item => openPanel({ kind: "item", item })} /></Fragment>)
               : <div className="empty"><WorkspaceIcon name="stack" /><strong>A place for your thoughts.</strong><span>Message yourself. Send it to pick it up on another device.</span></div>}
           </div></section>
           {scroll.newMessages ? <button type="button" className="new-messages" onClick={() => scroll.scrollToBottom(selectedId)}>New messages <WorkspaceIcon name="save" /></button> : null}

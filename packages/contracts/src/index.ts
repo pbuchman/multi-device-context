@@ -152,6 +152,7 @@ export interface DesktopBridge {
   getDevice(): Promise<Device>;
   getAccessToken(interactive?: boolean): Promise<string>;
   getAccountProfile?(): Promise<NativeAccountProfile>;
+  getAccountAvatar?(): Promise<NativeFile | undefined>;
   signOut(): Promise<void>;
   readClipboard(): Promise<ClipboardSnapshot>;
   copyText(text: string): Promise<void>;

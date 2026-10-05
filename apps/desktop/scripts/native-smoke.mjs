@@ -95,14 +95,17 @@ try {
     const bridge = await window.evaluate(async () => ({
       version: window.contextDesktop.version,
       accountProfile: typeof window.contextDesktop.getAccountProfile,
+      accountAvatar: typeof window.contextDesktop.getAccountAvatar,
       device: await window.contextDesktop.getDevice(),
       startup: await window.contextDesktop.getLaunchAtLogin(),
       node: typeof window.require,
     }));
     assert.equal(bridge.version, 1);
     assert.equal(bridge.accountProfile, "function");
+    assert.equal(bridge.accountAvatar, "function");
     await assert.rejects(window.evaluate(() => window.contextDesktop.getAccountProfile()), /Sign in with Google/);
-    report.checks.push("Native account profile API requires a verified signed-in identity");
+    await assert.rejects(window.evaluate(() => window.contextDesktop.getAccountAvatar()), /Sign in with Google/);
+    report.checks.push("Native account profile and avatar APIs require a verified signed-in identity");
     assert.ok(bridge.device.id);
     assert.equal(bridge.node, "undefined");
     assert.equal(bridge.startup, true);

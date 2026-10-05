@@ -397,6 +397,10 @@ function wireBridge(): void {
     if (!auth) throw new Error("Sign-in is unavailable. Reconnect and retry.");
     return auth.getAccountProfile();
   });
+  handle("getAccountAvatar", 0, () => {
+    if (!auth) throw new Error("Sign-in is unavailable. Reconnect and retry.");
+    return auth.getAccountAvatar();
+  });
   handle("getAccessToken", 1, (interactive) => {
     if (typeof interactive !== "boolean")
       throw new Error("Invalid sign-in request.");

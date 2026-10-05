@@ -39,6 +39,7 @@ const itemListeners = new Map<Id, (snapshot: CloudSnapshot<ItemRecord>) => void>
 const emitContexts = () => contextListener?.({ records: contexts, fromCache: false, hasPendingWrites: false });
 const emitItems = (contextId: Id) => itemListeners.get(contextId)?.({ records: items.get(contextId) ?? [], fromCache: false, hasPendingWrites: false });
 const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (character) => character.charCodeAt(0));
+const avatarUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 let refreshGate = Promise.resolve();
 let finishRefresh: (() => void) | undefined;
@@ -49,7 +50,7 @@ Object.assign(window, { mdcRefreshTest: {
 let profileFailure = false;
 const profile = new AccountProfileStore("browser-test", async () => {
   if (profileFailure) { profileFailure = false; throw new ProfileLoadError("Account provider test failure", false); }
-  return { name: "Alex", email: "alex@example.com" };
+  return { name: "Alex", email: "alex@example.com", avatarUrl };
 }, () => true);
 void profile.refresh();
 let deleteGate = Promise.resolve();let finishDelete: (() => void) | undefined;
@@ -59,7 +60,7 @@ Object.assign(window, {
 });
 const services: WorkspaceServices = {
   profile,
-  viewer: { uid: "browser-test", name: "Alex", email: "alex@example.com" },
+  viewer: { uid: "browser-test", name: "Alex", email: "alex@example.com", avatarUrl },
   device: dell,
   cloud: {
     async refreshContexts() { await refreshGate; return { records: contexts, fromCache: false, hasPendingWrites: false }; },

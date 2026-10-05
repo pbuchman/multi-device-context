@@ -1,6 +1,8 @@
 import { AccountProfileSchema, type AccountProfile } from "@mdc/contracts";
 import type { Viewer } from "./model.js";
 
+type LoadedAccountProfile = AccountProfile & { avatarUrl?: string | undefined };
+
 export type ProfileState = { status: "loading" | "ready" | "unavailable"; message?: string; retryAt: number };
 export type SessionProfile = {
   getSnapshot(): Viewer;
@@ -17,11 +19,18 @@ export class AccountProfileStore implements SessionProfile {
   #state: ProfileState = { status: "loading", retryAt: 0 };
   #listeners = new Set<() => void>();
   #flight: Promise<void> | undefined;
+  #avatarFlight: Promise<void> | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #controller: AbortController | undefined;
+  #avatarController: AbortController | undefined;
   #disposed = false;
   #canRecover = true;
-  constructor(private readonly uid: string, private readonly load: (signal: AbortSignal) => Promise<AccountProfile>, private readonly current: () => boolean) {
+  constructor(
+    private readonly uid: string,
+    private readonly load: (signal: AbortSignal) => Promise<LoadedAccountProfile>,
+    private readonly current: () => boolean,
+    private readonly loadAvatar?: (signal: AbortSignal) => Promise<string | undefined>,
+  ) {
     this.#viewer = { uid, name: "Signed in" };
     if (typeof window !== "undefined") { window.addEventListener("online", this.#recover); window.addEventListener("focus", this.#recover); }
   }
@@ -40,10 +49,12 @@ export class AccountProfileStore implements SessionProfile {
     const controller = new AbortController();this.#controller = controller;
     const operation = (async () => {
       try {
-        const data = AccountProfileSchema.parse(await this.load(controller.signal));
+        const loaded = await this.load(controller.signal);
+        const data = AccountProfileSchema.parse({ ...(loaded.name ? { name: loaded.name } : {}), ...(loaded.email ? { email: loaded.email } : {}) });
         if (!this.#live()) return;
         if (!data.name && !data.email) throw new ProfileLoadError("Your sign-in provider did not return a name or email.", false);
-        this.#viewer = { uid: this.uid, name: data.name ?? data.email!, ...(data.email ? { email: data.email } : {}) };
+        const avatarUrl = validAvatarUrl(loaded.avatarUrl) ? loaded.avatarUrl : undefined;
+        this.#viewer = { uid: this.uid, name: data.name ?? data.email!, ...(data.email ? { email: data.email } : {}), ...(avatarUrl ? { avatarUrl } : {}) };
         this.#state = { status: "ready", retryAt: 0 };this.#canRecover = false;
       } catch (cause) {
         if (!this.#live()) return;
@@ -53,16 +64,44 @@ export class AccountProfileStore implements SessionProfile {
         this.#state = { status: "unavailable", message: error.message, retryAt: Date.now() + delay };
         if (error.retryable && retries > 0) this.#timer = setTimeout(() => { void this.#run(retries - 1); }, delay);
       }
-      if (this.#live()) this.#emit();
+      if (this.#live()) {
+        this.#emit();
+        if (this.#state.status === "ready" && !this.#viewer.avatarUrl) void this.#runAvatar();
+      }
     })();
     this.#flight = operation;
     void operation.finally(() => { if (this.#flight === operation) this.#flight = undefined; });
     return operation;
   }
+  #runAvatar(): Promise<void> {
+    if (!this.loadAvatar || !this.#live() || this.#viewer.avatarUrl) return Promise.resolve();
+    if (this.#avatarFlight) return this.#avatarFlight;
+    const controller = new AbortController();this.#avatarController = controller;
+    const operation = (async () => {
+      try {
+        const avatarUrl = await this.loadAvatar!(controller.signal);
+        if (!this.#live() || !validAvatarUrl(avatarUrl)) return;
+        this.#viewer = { ...this.#viewer, avatarUrl };
+        this.#emit();
+      } catch {
+        // Account text remains available when the optional image cannot load.
+      }
+    })();
+    this.#avatarFlight = operation;
+    void operation.finally(() => {
+      if (this.#avatarFlight === operation) this.#avatarFlight = undefined;
+      if (this.#avatarController === controller) this.#avatarController = undefined;
+    });
+    return operation;
+  }
   dispose() {
-    this.#disposed = true;clearTimeout(this.#timer);this.#controller?.abort();this.#listeners.clear();
+    this.#disposed = true;clearTimeout(this.#timer);this.#controller?.abort();this.#avatarController?.abort();this.#listeners.clear();
     if (typeof window !== "undefined") { window.removeEventListener("online", this.#recover);window.removeEventListener("focus", this.#recover); }
   }
+}
+
+function validAvatarUrl(value: unknown): value is string {
+  return typeof value === "string" && /^data:image\/(?:avif|webp|png|jpeg);base64,[A-Za-z0-9+/]*={0,2}$/.test(value);
 }
 
 /** Bind SDK-verified OIDC claims to the same issuer-derived application owner. */

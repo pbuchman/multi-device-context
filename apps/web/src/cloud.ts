@@ -309,8 +309,8 @@ export class FirebaseCloud {
     await this.#api(`/api/contexts/${contextId}`, "DELETE");
   }
 
-  async deleteItem(contextId: Id, itemId: Id): Promise<void> {
-    await this.#api(`/api/contexts/${contextId}/items/${itemId}`, "DELETE");
+  async deleteItem(contextId: Id, itemId: Id, deleteEmptyContext = false): Promise<void> {
+    await this.#api(`/api/contexts/${contextId}/items/${itemId}`, "DELETE", deleteEmptyContext ? { deleteEmptyContext: true } : undefined);
   }
 
   async attachmentBytes(contextId: Id, itemId: Id, content: Extract<Content, { kind: "attachment" }>): Promise<Uint8Array> {

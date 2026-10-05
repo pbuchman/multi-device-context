@@ -25,11 +25,15 @@ type NativeMarker = {
 
 type StoredAction = QueuedShare & { kind: "action" };
 type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
-export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; nextAttemptAt: number; attempts: number; paused: boolean };
+export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
 type ItemMarker = { key: string; kind: "deleted-item"; namespace: string; contextId: Id; itemId: Id };
 type StoredRecord = StoredAction | NativeMarker | DeletedMarker | ItemMarker | Deletion;
 
 const STORE_NAME = "records";
+
+function finalDeletionPending(records: StoredRecord[], contextId: Id): boolean {
+  return records.some(record => record.kind === "deletion" && record.contextId === contextId && record.deleteEmptyContext === true);
+}
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -71,8 +75,10 @@ export class DurableOutbox {
     const transaction = database.transaction(STORE_NAME, "readwrite"); const complete = transactionDone(transaction);
     const store = transaction.objectStore(STORE_NAME);
     try {
+      const existing = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
       for (const draft of drafts) {
         await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
+        if (finalDeletionPending(existing, draft.contextId)) throw new PublishFailure("This context is being deleted", false);
         if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) throw new PublishFailure("This context or item was deleted", false);
         store.put({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
       }
@@ -90,9 +96,11 @@ export class DurableOutbox {
     try {
       const markerKey = `native:${this.namespace}:${requestId}`;
       if (await requestResult(store.get(markerKey))) { await complete; return false; }
+      const existing = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
       store.add({ key: markerKey, kind: "native", namespace: this.namespace, requestId } satisfies NativeMarker);
       for (const draft of drafts) {
         await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
+        if (finalDeletionPending(existing, draft.contextId)) continue;
         if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) continue;
         store.add({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
       }
@@ -151,14 +159,15 @@ export class DurableOutbox {
 
   async removeContext(id: Id): Promise<void> { await this.cancel(id); }
   async removeItem(contextId: Id, itemId: Id): Promise<void> { await this.cancel(contextId, itemId); }
-  async requestDeletion(contextId: Id, itemId?: Id): Promise<void> { await this.cancel(contextId, itemId, true); }
-  private async cancel(contextId: Id, itemId?: Id, request = false): Promise<void> {
+  async requestDeletion(contextId: Id, itemId?: Id, deleteEmptyContext = false): Promise<void> { await this.cancel(contextId, itemId, true, deleteEmptyContext); }
+  private async cancel(contextId: Id, itemId?: Id, request = false, requestedEmptyContext = false): Promise<void> {
     const db = await this.#db();
     const tx = db.transaction([STORE_NAME, "drafts"], "readwrite"); const complete = transactionDone(tx);
     const store = tx.objectStore(STORE_NAME);
     if (request) await assertLocalAccess(store, this.namespace, contextId);
     const records = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
     const actions = records.filter((r): r is StoredAction => r.kind === "action" && r.contextId === contextId);
+    const deleteEmptyContext = Boolean(itemId && requestedEmptyContext && !actions.some(record => record.itemId !== itemId));
     const removed = actions.filter(r => !itemId || r.itemId === itemId);
     for (const record of removed) store.delete(record.key);
     if (itemId) {
@@ -172,7 +181,7 @@ export class DurableOutbox {
       store.put({ key: `deleted:${this.namespace}:${contextId}`, kind: "deleted", namespace: this.namespace, contextId } satisfies DeletedMarker);
       for (const record of records) if (record.kind === "deletion" && record.contextId === contextId && record.itemId) store.delete(record.key);
     }
-    if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId } : {}), attempts: 0, nextAttemptAt: 0, paused: false } satisfies Deletion);
+    if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId, ...(deleteEmptyContext ? { deleteEmptyContext: true } : {}) } : {}), attempts: 0, nextAttemptAt: 0, paused: false } satisfies Deletion);
     await complete; changed();
   }
   async cancelled(): Promise<{ contexts: Id[]; items: Id[] }> {
