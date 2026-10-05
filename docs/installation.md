@@ -88,7 +88,11 @@ Narrowing the window does not replace that preference.
 The sidebar footer shows your account name and email. Open Settings to see the
 full values. If the identity provider is unavailable, sharing remains usable and
 the account area displays **Signed in / Account details unavailable**. Profile
-details are kept only for the current session.
+details are kept only for the current session. Desktop 0.5.3 can use the signed
+profile already verified during sign-in, and the browser uses its Auth0 SDK
+profile. The server lookup is a fallback. Temporary lookup failures retry in the
+background; **Settings → Retry account details** retries without signing out.
+The settings panel explains a failed lookup while chats remain usable.
 
 Right-click a chat, Control-click on macOS, or focus it and press Shift+F10 or the
 Menu key to open its menu. The row's **…** button opens the same desktop menu:
@@ -134,7 +138,9 @@ account-level **Settings → AI context titles** setting and are not requested w
 that setting is disabled. When enabled, only bounded first text or file names and
 types are sent to the title model, never attachment bytes. Rename a context from
 its menu to choose your own title. Use **Chat options → Delete chat** to delete it
-permanently after confirmation; there is no trash or restore.
+permanently after confirmation; there is no trash or restore. **Deleting…** means
+the operation is waiting for confirmation. A failed attempt shows **Deletion
+needs retry** and a retry warning; a pending request by itself is not an error.
 
 For agent access, open **Settings → Agent access**, create a named key and store
 it privately. The [agent API and portable skill guide](https://github.com/pbuchman/multi-device-context/blob/main/docs/agent-api.md)
