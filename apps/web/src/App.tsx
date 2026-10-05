@@ -1,3 +1,4 @@
+import { useWorkspaceCommands, type WorkspaceCommandRequest } from "./workspace-commands.js";
 import { SidebarResize } from "./sidebar-resize.js";
 import { AccessPage } from "./AccessPage.js";
 import { isAccessPageRequest } from "./browser-identity.js";
@@ -9,7 +10,7 @@ import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
-import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent } from "react";
+import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type SyntheticEvent } from "react";
 
 import { useNavigation } from "./navigation.js";
 
@@ -72,6 +73,9 @@ export type WorkspaceServices = {
   openAccessPanel?(): Promise<void>;
   activity?: { initialActive: boolean; subscribe(listener: (active: boolean) => void): Unsubscribe };
   subscribeNavigation?: (listener: (id?: Id) => void) => Unsubscribe;
+  shortcutPlatform?: "darwin" | "win32" | "linux";
+  subscribeCommands?: (listener: (request: WorkspaceCommandRequest) => void) => Unsubscribe;
+  completeCommand?: (id: string, allow: boolean) => Promise<void>;
   viewer: Viewer;
   profile?: SessionProfile;
   device: Device;
@@ -187,6 +191,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const panelOpener = useRef<HTMLElement | null>(null);
   const panelRef = useRef(panel); panelRef.current = panel;
   const pendingPublishes = useRef(new Set<Promise<unknown>>());
+  const pendingLocalInput = useRef(new Set<Promise<unknown>>());
+  const lifecycleLocked = useRef(false);
+  const [lifecycleSaving, setLifecycleSaving] = useState(false);
+  const trackLocalInput = (operation: Promise<unknown>) => {
+    pendingLocalInput.current.add(operation);
+    void operation.finally(() => pendingLocalInput.current.delete(operation));
+  };
   const clipboardBusy = useRef(false);
   const sendsInFlight = useRef(new Set<string>());
   const [, setSendTick] = useState(0);
@@ -956,9 +967,34 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   };
 
   const settleLocalInput = async () => {
-    await Promise.all([...pendingPublishes.current]);
+    // Reads already accepted before the lifecycle lock can still enqueue work.
+    while (pendingLocalInput.current.size || pendingPublishes.current.size) {
+      await Promise.all([...pendingLocalInput.current, ...pendingPublishes.current]);
+    }
     await navigation.flush();
   };
+  const newChat = () => {
+    if (accountBlocked) return;
+    setSelectedId(undefined); setError(undefined); closeDrawer(false);
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+  useWorkspaceCommands({
+    enabled: services.platformKind === "desktop" || services.isDesktop === true,
+    platform: services.shortcutPlatform ?? "win32",
+    subscribe: services.subscribeCommands,
+    complete: services.completeCommand,
+    newChat,
+    deleteChat: () => openPanel({ kind: "delete-context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } }),
+    flush: settleLocalInput,
+    reload: () => window.location.reload(),
+    error: setError,
+    freeze: saving => { lifecycleLocked.current = saving; setLifecycleSaving(saving); },
+    blocked: () => accountBlocked,
+    // Await active rename/delete/sign-out mutations, but let an idle failed
+    // sign-out or access recovery screen be closed/reloaded safely.
+    lifecycleBlocked: () => dialogBusy,
+    modal: () => !!panelRef.current || !!chatMenu,
+  });
   const prepareSignOut = async () => {
     if (dialogBusy) return;
     openPanel({ kind: "signout" }); setDialogBusy(true); setSignOutSummary(undefined);
@@ -1013,38 +1049,43 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     } finally { setDialogBusy(false); }
   };
 
+  const blockLifecycleInput = (event: SyntheticEvent) => {
+    if (lifecycleLocked.current) { event.preventDefault(); event.stopPropagation(); }
+  };
   return <>
+    {lifecycleSaving ? <div className="toast" role="status" aria-live="polite">Saving local work…</div> : null}
+    <div style={{ display: "contents" }} inert={lifecycleSaving} onClickCapture={blockLifecycleInput} onPointerDownCapture={blockLifecycleInput} onKeyDownCapture={blockLifecycleInput} onChangeCapture={blockLifecycleInput} onInputCapture={blockLifecycleInput} onPasteCapture={blockLifecycleInput} onContextMenuCapture={blockLifecycleInput}>
     <div ref={backgroundRef} className={`app-shell ${compact && drawerOpen ? "drawer-open" : ""}`}>
       {compact && drawerOpen ? <button className="drawer-backdrop" type="button" tabIndex={-1} aria-label="Close chats menu backdrop" onClick={() => closeDrawer()} /> : null}
       <ChatSidebar elementRef={sidebarRef} compact={compact} open={drawerOpen} contexts={visibleContexts} selectedId={selectedId} search={search} onSearch={setSearch}
         onSelect={id => { if (!accountBlocked) { setSelectedId(id); closeDrawer(false); } }}
-        onNew={() => { if (!accountBlocked) { setSelectedId(undefined); setError(undefined); closeDrawer(false); window.setTimeout(() => textareaRef.current?.focus(), 0); } }}
+        onNew={newChat}
         onClose={() => closeDrawer()} onOptions={(context, opener) => {
           if (services.platformKind === "android" || window.matchMedia?.("(pointer: coarse)").matches) openPanel({ kind: "context", context });
           else { const rect = opener.getBoundingClientRect(); openChatMenu(context, { x: rect.left, y: rect.bottom }, opener); }
         }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
-        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked} name={viewer.name} email={viewer.email} />
+        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email} />
       <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh(true)}
-          onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked} />
+          onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} />
         {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" disabled={accountBlocked} onClick={() => void retry()}>Retry</button>{error ? <button type="button" className="icon-button" aria-label="Dismiss error" onClick={() => setError(undefined)}><WorkspaceIcon name="close" /></button> : null}</div> : null}
         <div className="timeline-region">
           <section ref={scroll.viewport} className="timeline" aria-label="Messages to yourself"><div ref={scroll.content} className="timeline-content">
-            {visibleItems.length ? visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ChatMessage item={item} cloud={services.cloud} blocked={accountBlocked} onCopy={value => void copyItem(value)} onMore={item => openPanel({ kind: "item", item })} /></Fragment>)
+            {visibleItems.length ? visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ChatMessage item={item} cloud={services.cloud} blocked={accountBlocked || lifecycleSaving} onCopy={value => void copyItem(value)} onMore={item => openPanel({ kind: "item", item })} /></Fragment>)
               : <div className="empty"><WorkspaceIcon name="stack" /><strong>A place for your thoughts.</strong><span>Message yourself. Send it to pick it up on another device.</span></div>}
           </div></section>
           {scroll.newMessages ? <button type="button" className="new-messages" onClick={() => scroll.scrollToBottom(selectedId)}>New messages <WorkspaceIcon name="save" /></button> : null}
         </div>
-        <ChatComposer text={text} code={codeMode} android={services.platformKind === "android"} nativeClipboard={!!services.readClipboard} blocked={accountBlocked} sending={sendsInFlight.current.has(`${selectedId}:${navigation.revisionRef.current}`)} textareaRef={textareaRef}
-          onText={value => { if (!accountBlocked) setText(value); }} onPaste={event => { void receivePaste(event); }} onKey={event => {
+        <ChatComposer text={text} code={codeMode} android={services.platformKind === "android"} nativeClipboard={!!services.readClipboard} blocked={accountBlocked || lifecycleSaving} sending={sendsInFlight.current.has(`${selectedId}:${navigation.revisionRef.current}`)} textareaRef={textareaRef}
+          onText={value => { if (!accountBlocked && !lifecycleLocked.current) setText(value); }} onPaste={event => { trackLocalInput(receivePaste(event)); }} onKey={event => {
             if (keyboardSends({ key: event.key, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, isComposing: event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 }, services.platformKind === "android", codeMode)) { event.preventDefault(); sendText(); }
-          }} onAdd={() => openPanel({ kind: "add", contextId: selectedId, title: displayTitle(selected?.title) })} onCodeOff={() => setCodeMode(() => false)} onFastPaste={() => void fastPaste()} onSend={sendText} />
-        <input ref={fileInput} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; void sharePickedFiles(files); }} />
+          }} onAdd={() => openPanel({ kind: "add", contextId: selectedId, title: displayTitle(selected?.title) })} onCodeOff={() => setCodeMode(() => false)} onFastPaste={() => trackLocalInput(fastPaste())} onSend={sendText} />
+        <input ref={fileInput} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; trackLocalInput(sharePickedFiles(files)); }} />
       </main>
     </div>
-    {chatMenu && chatMenu.owner === services && !panel && !accountBlocked ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
-    {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
+    {chatMenu && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
+    {toast && !lifecycleSaving ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
     {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()}>
       {panel.kind === "context" ? <>
         <p className="dialog-description">{displayTitle(panel.context.title)}</p>
@@ -1090,6 +1131,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       </> : null}
       {dialogError ? <p className="dialog-error" role="alert">{dialogError}</p> : null}
     </WorkspaceDialog> : null}
+    </div>
   </>;
 }
 
@@ -1244,6 +1286,13 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
         void native.takeNavigation?.().then(event => { if (active && event) listener(event.contextId); }).catch(() => {});
         return () => { active = false; unsubscribe(); };
       } } : {}),
+      ...(session.platform.kind === "desktop" && session.bridge ? {
+        shortcutPlatform: session.bridge.platform,
+        ...(session.bridge.onCommand && session.bridge.completeCommand ? {
+          subscribeCommands: (listener: (request: WorkspaceCommandRequest) => void) => session.bridge!.onCommand!(listener),
+          completeCommand: (id: string, allow: boolean) => session.bridge!.completeCommand!(id, allow),
+        } : {}),
+      } : {}),
       viewer: session.viewer,
       ...(session.profile ? { profile: session.profile } : {}),
       device,
