@@ -194,6 +194,33 @@ at the top of this page. Older releases cannot discover the new catalog. A manua
 download from the versioned release remains the recovery path on either platform;
 compare `SHA256SUMS.txt` before installing it. Updating does not clear app data.
 
+Maintainers run the native A→B updater acceptance only on ephemeral Windows x64
+and Apple Silicon macOS CI runners with an interactive desktop and OS secure
+storage available; `openssl` must be on `PATH`. First build the normal B
+installer, retaining its canonical release filename and exact bytes. Run the
+platform-neutral boundary tests with
+`pnpm --filter @mdc/desktop test:update-harness`. On the matching native runner,
+set `MDC_NATIVE_UPDATE_A_TO_B=1`, `MDC_NATIVE_UPDATE_B_VERSION` to B's numeric
+version, and `MDC_NATIVE_UPDATE_B_ARTIFACT` to the canonical B `.exe` or `.dmg`,
+then run `pnpm --filter @mdc/desktop test:update-native`. CI already supplies
+`CI=true`. The runner writes `apps/desktop/release/native-update-a-to-b.json`.
+
+The harness creates test A in a private temporary source copy, substitutes only
+compile-time localhost HTTPS catalog/feed constants in that copy, generates a
+short-lived test certificate and pins its SPKI, and forces electron-builder to
+`--publish never`. Normal
+package checks reject the test marker and local URLs. The production source and
+the B artifact are hashed before and after the run. Windows installs A to a
+non-default per-user directory, proves ordinary Quit does not install the cached
+update, then exercises the acknowledged NSIS restart in place. macOS opens the
+verified B DMG, performs the explicit quit/mount/manual application replacement,
+and restarts B. Both variants check that the installation path, encrypted native
+sentinel, and synthetic draft, outbox, and settings data survive. The report is
+native CI evidence; it is not a claim that a physical user device was tested.
+Before a later normal B installation, the Windows run disables the test login
+item, runs the isolated NSIS uninstaller, and verifies that the executable and
+non-default uninstall-registry reference are gone.
+
 Before uninstalling, finish or deliberately discard pending shares, sign out,
 turn off **Launch at login**, and quit. Use Windows Installed Apps to uninstall,
 or move the macOS application from Applications to Trash. Uninstalling the app

@@ -11,6 +11,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json",
+    "test:update-harness": "node --test scripts/native-update-fixture.test.mjs",
+    "test:update-native": "node scripts/native-update-a-to-b.mjs",
     "package:win": "pnpm build && electron-builder --win nsis --x64 --publish never",
     "package:mac": "pnpm build && electron-builder --mac dmg zip --arm64 --publish never"
   },

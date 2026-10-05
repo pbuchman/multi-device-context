@@ -1,6 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
+import { assertProductionUpdateBoundary } from './production-update-boundary.mjs';
 const root = process.argv[2] ?? 'bundle';
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 assert.equal(manifest.license, 'MIT');
@@ -10,6 +11,9 @@ const files = (await readdir(root, { recursive: true })).map(path => path.replac
 assert(!files.some(path => /(^|[/\\])node_modules([/\\]|$)|\.map$/.test(path)));
 for (const file of ['dist/main.cjs', 'dist/preload.cjs', 'LICENSE', 'THIRD_PARTY_NOTICES.txt']) assert(files.includes(file));
 const main = await readFile(join(root, 'dist/main.cjs'), 'utf8');
+const preload = await readFile(join(root, 'dist/preload.cjs'), 'utf8');
+const buildInfoText = await readFile(join(root, 'dist/build-info.json'), 'utf8');
+assertProductionUpdateBoundary(manifest, main, preload, buildInfoText);
 assert(main.includes('https://pbuchman.github.io/multi-device-context/updates/preview.json'));
 assert(main.includes('https://pbuchman.github.io/multi-device-context/updates/preview/'));
 const notices = await readFile(join(root, 'THIRD_PARTY_NOTICES.txt'), 'utf8');

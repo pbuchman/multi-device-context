@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
+import { assertProductionUpdateBoundary } from './production-update-boundary.mjs';
 const require = createRequire(import.meta.url);
 const builder = createRequire(require.resolve('electron-builder'));
 const packager = createRequire(builder.resolve('app-builder-lib'));
@@ -22,6 +23,9 @@ for (const name of ['dist/main.cjs', 'dist/preload.cjs']) {
   assert(!/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----|sk-or-v1-[a-f0-9]{32,}|ghp_[A-Za-z0-9]{30,}|mdc_[a-f0-9-]{36}_[A-Za-z0-9_-]{43}/.test(text), 'Credential pattern in installed code');
 }
 const installedMain = extractFile(archive, 'dist/main.cjs').toString();
+const installedPreload = extractFile(archive, 'dist/preload.cjs').toString();
+const installedBuildInfoText = extractFile(archive, 'dist/build-info.json').toString();
+assertProductionUpdateBoundary(manifest, installedMain, installedPreload, installedBuildInfoText);
 assert(installedMain.includes('autoInstallOnAppQuit = false'), 'Bundled NSIS ordinary-quit guard missing');
 assert(installedMain.includes('https://pbuchman.github.io/multi-device-context/updates/preview.json'));
 assert(installedMain.includes('https://pbuchman.github.io/multi-device-context/updates/preview/'));
