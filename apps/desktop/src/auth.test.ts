@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import {
   AuthManager,
@@ -247,6 +247,30 @@ it.each(["valid", "missing", "empty claims", "multi audience valid", "wrong subj
   else if (variant === "missing" || variant === "empty claims") expect(await manager.getAccountProfile()).toEqual({ uid: saved!.uid });
   else await expect(manager.getAccountProfile()).rejects.toThrow(/identity/);
   expect(saved).not.toHaveProperty("email");
+});
+
+it("loads a bounded Google profile image from the verified identity claim", async () => {
+  const { privateKey, publicKey } = await generateKeyPair("RS256");
+  const subject = "google-oauth2|one";
+  let saved: StoredSession | undefined = { uid: createHash("sha256").update(issuer + "\0" + subject).digest("base64url"), subject, refreshToken: "old", authScope: authenticationScope(settings) };
+  const sign = (payload: JWTPayload, audience: string) => new SignJWT(payload).setProtectedHeader({ alg: "RS256" }).setIssuer(issuer).setAudience(audience).setIssuedAt().setExpirationTime("1h").sign(privateKey);
+  const access = await sign({ sub: subject, azp: settings.nativeClientId }, settings.audience);
+  const picture = "https://lh3.googleusercontent.com/a/example";
+  const id = await sign({ sub: subject, name: "Verified", picture }, settings.nativeClientId);
+  const request = vi.fn(async (input: RequestInfo | URL) => String(input) === picture
+    ? new Response(new Uint8Array([0, 1, 255]), { headers: { "content-type": "image/png", "content-length": "3" } })
+    : new Response(JSON.stringify({ access_token: access, id_token: id, refresh_token: "new", token_type: "Bearer", expires_in: 3600 })));
+  const manager = new AuthManager(settings, {
+    readSession: () => saved, writeSession: async value => { saved = value; }, clearSession: async () => { saved = undefined; }, openBrowser: async () => {}, key: publicKey, fetch: request,
+  });
+
+  expect(await manager.getAccountProfile()).toEqual({
+    uid: saved!.uid,
+    name: "Verified",
+    avatar: { name: "account-avatar", contentType: "image/png", bytes: new Uint8Array([0, 1, 255]) },
+  });
+  expect(request).toHaveBeenCalledWith(new URL(picture), expect.objectContaining({ headers: { accept: "image/avif,image/webp,image/png,image/jpeg" }, redirect: "error" }));
+  expect(saved).not.toHaveProperty("picture");
 });
 
 it("does not repopulate a signed-out profile from a late refresh response", async () => {

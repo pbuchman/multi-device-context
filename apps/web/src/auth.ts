@@ -14,6 +14,14 @@ import type { Viewer } from "./model.js";
 type Fetcher = typeof fetch;
 type SessionResponse = DeviceSession;
 
+function nativeAvatarDataUrl(profile: Awaited<ReturnType<NonNullable<DesktopBridge["getAccountProfile"]>>>): string | undefined {
+  const avatar = profile.avatar;
+  if (!avatar || avatar.bytes.byteLength > 524_288 || !["image/avif", "image/webp", "image/png", "image/jpeg"].includes(avatar.contentType)) return undefined;
+  let binary = "";
+  for (let offset = 0; offset < avatar.bytes.byteLength; offset += 8192) binary += String.fromCharCode(...avatar.bytes.subarray(offset, offset + 8192));
+  return `data:${avatar.contentType};base64,${btoa(binary)}`;
+}
+
 
 export type ActiveSession = {
   config: RuntimeConfig;
@@ -230,14 +238,15 @@ export class SessionManager {
     const disposeFirebaseData = firebaseDisposer(firebaseApp);
     let firstProfileRequest = true;
     const profile = new AccountProfileStore(exchanged.uid, async signal => {
-      let known: { name?: string | undefined; email?: string | undefined } = {};
+      let known: { name?: string | undefined; email?: string | undefined; avatarUrl?: string | undefined } = {};
       // These claims come from the native verifier or Auth0 SDK, never a decoded
       // unverified token. Bind them to the installation session's owner.
       try {
         if (platform.native?.getAccountProfile) {
           const result = await platform.native.getAccountProfile();
           if (result.uid !== exchanged.uid) throw new ProfileLoadError("Account details do not match this session. Sign in again.", false);
-          known = AccountProfileSchema.parse({ ...(result.name ? { name: result.name } : {}), ...(result.email ? { email: result.email } : {}) });
+          const avatarUrl = nativeAvatarDataUrl(result);
+          known = { ...AccountProfileSchema.parse({ ...(result.name ? { name: result.name } : {}), ...(result.email ? { email: result.email } : {}) }), ...(avatarUrl ? { avatarUrl } : {}) };
         } else if (!platform.native) {
           const result = await this.#auth0?.getUser?.();
           if (result?.sub) {

@@ -140,7 +140,7 @@ export type PendingClipboardShare = {
   snapshot: ClipboardSnapshot;
 };
 
-export type NativeAccountProfile = { uid: string; name?: string; email?: string };
+export type NativeAccountProfile = { uid: string; name?: string; email?: string; avatar?: NativeFile };
 
 export type DesktopCommandRequest = { id: string; command: "new-chat" | "delete-chat" | "reload" | "quit" };
 

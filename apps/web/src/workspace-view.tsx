@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, type ClipboardEvent, type KeyboardEvent, type 
 import type { ContextRecord, ItemRecord } from "./model.js";
 import type { WorkspaceCloud } from "./App.js";
 import { AttachmentPreview } from "./media.js";
+import { AccountAvatar } from "./account-avatar.js";
 
 const paths = {
   menu: "M4 7h16M4 16h11", close: "m6 6 12 12M18 6 6 18", plus: "M12 5v14M5 12h14",
@@ -21,14 +22,14 @@ export function WorkspaceIcon({ name }: { name: IconName }) {
 export function displayTitle(title?: string) { return !title || title === "New context" ? "New chat" : title; }
 export function formatFileSize(size: number) { return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`; }
 
-export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, search, onSearch, onSelect, onNew, onClose, onOptions, onContextMenu, onSettings, onRefresh, refreshing, blocked, name, email }: {
+export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, search, onSearch, onSelect, onNew, onClose, onOptions, onContextMenu, onSettings, onRefresh, refreshing, blocked, name, email, avatarUrl }: {
   elementRef: RefObject<HTMLElement | null>; compact: boolean; open: boolean; contexts: ContextRecord[]; selectedId: string; search: string; onSearch(value: string): void;
-  onSelect(id: string): void; onNew(): void; onClose(): void; onOptions(context: ContextRecord, opener: HTMLElement): void; onContextMenu(context: ContextRecord, anchor: { x: number; y: number }, opener: HTMLElement): void; onSettings(): void; onRefresh(): void; refreshing: boolean; blocked: boolean; name: string; email?: string | undefined;
+  onSelect(id: string): void; onNew(): void; onClose(): void; onOptions(context: ContextRecord, opener: HTMLElement): void; onContextMenu(context: ContextRecord, anchor: { x: number; y: number }, opener: HTMLElement): void; onSettings(): void; onRefresh(): void; refreshing: boolean; blocked: boolean; name: string; email?: string | undefined; avatarUrl?: string | undefined;
 }) {
   return <aside ref={elementRef} className="sidebar" aria-label="Chats sidebar" role={compact && open ? "dialog" : undefined} aria-modal={compact && open ? true : undefined}>
     <div className="brand"><span className="brand-mark"><WorkspaceIcon name="stack" /></span><span>Multi Device Context<small>Chat with yourself</small></span><button type="button" className="icon-button drawer-close" aria-label="Close chats menu" onClick={onClose}><WorkspaceIcon name="close" /></button></div>
     <button type="button" className="new-context" aria-label="New chat" onClick={onNew} disabled={blocked}><WorkspaceIcon name="edit" />New chat</button>
-    <div className="search"><WorkspaceIcon name="search" /><input type="search" aria-label="Search chat titles" placeholder="Search chats" value={search} onChange={event => onSearch(event.target.value)} /><button className="icon-button" aria-label="Clear search" onClick={() => onSearch("")}><WorkspaceIcon name="close" /></button></div>
+    <div className="search"><WorkspaceIcon name="search" /><input type="text" role="searchbox" aria-label="Search chat titles" placeholder="Search chats" value={search} onChange={event => onSearch(event.target.value)} />{search ? <button type="button" className="icon-button" aria-label="Clear search" onClick={() => onSearch("")}><WorkspaceIcon name="close" /></button> : null}</div>
     <div className="context-list-wrap"><div className="sidebar-label"><span>{refreshing ? "Refreshing…" : "Your chats"}</span><button className="icon-button refresh" type="button" aria-label="Refresh chats and messages" disabled={refreshing || blocked} aria-busy={refreshing} onClick={onRefresh}><WorkspaceIcon name="refresh" /></button></div>
       <nav className="context-list" aria-label="Your chats">{contexts.length ? contexts.map(context => <div className={`context-row ${context.id === selectedId ? "selected" : ""}`} key={context.id}
         onContextMenu={event => { if (blocked) return; event.preventDefault(); event.stopPropagation(); const opener = (event.target as HTMLElement).closest("button") ?? event.currentTarget.querySelector("button")!; onContextMenu(context, { x: event.clientX, y: event.clientY }, opener); }}
@@ -37,7 +38,7 @@ export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, s
         <button type="button" className="icon-button" aria-label={`Options for ${displayTitle(context.title)}`} onClick={event => onOptions(context, event.currentTarget)} disabled={blocked}><WorkspaceIcon name="more" /></button>
       </div>) : <p className="no-results">No chats match this title. Clear your search to see all chats.</p>}</nav>
     </div>
-    <div className="sidebar-footer"><button type="button" className="account" aria-label="Open settings" onClick={onSettings} disabled={blocked}><span className="avatar">{name.charAt(0).toUpperCase()}</span><span className="account-details"><span title={name}>{name}</span><small title={email}>{email ?? "Account details unavailable"}</small></span><WorkspaceIcon name="settings" /></button></div>
+    <div className="sidebar-footer"><button type="button" className="account" aria-label="Open settings" onClick={onSettings} disabled={blocked}><AccountAvatar name={name} avatarUrl={avatarUrl} /><span className="account-details"><span title={name}>{name}</span><small title={email}>{email ?? "Account details unavailable"}</small></span><WorkspaceIcon name="settings" /></button></div>
   </aside>;
 }
 
@@ -51,7 +52,7 @@ export function ChatTopbar({ title, status, offline, drawerOpen, menuRef, onMenu
   </header>;
 }
 
-export function ChatMessage({ item, cloud, onCopy, onMore, blocked }: { item: ItemRecord; cloud: WorkspaceCloud; onCopy(item: ItemRecord): void; onMore(item: ItemRecord): void; blocked: boolean }) {
+export function ChatMessage({ item, cloud, onCopy, onDelete, onMore, blocked }: { item: ItemRecord; cloud: WorkspaceCloud; onCopy(item: ItemRecord): void; onDelete(item: ItemRecord): void; onMore(item: ItemRecord): void; blocked: boolean }) {
   const attachment = item.content.kind === "attachment" ? item.content : undefined;
   const text = item.content.kind !== "attachment" ? item.content.text : "";
   const isUrl = item.content.kind === "text" && /^https?:\/\/\S+$/.test(text);
@@ -62,6 +63,7 @@ export function ChatMessage({ item, cloud, onCopy, onMore, blocked }: { item: It
         : isUrl ? <a className="text-card link-card" href={text} target="_blank" rel="noreferrer">{text}</a> : <div className="text-card">{text}</div>}
     <div className="item-actions"><span className="item-meta" title={`${item.device.name} · ${time}`}>{item.syncState === "pending" ? "Pending · " : item.syncState === "failed" || item.syncState === "paused" ? "Not sent · " : ""}{item.device.name} · {time}</span>
       <button type="button" className="icon-button" aria-label={attachment ? `Copy ${attachment.name}` : "Copy message"} title="Copy to this device" disabled={blocked || (!!attachment && !item.ready)} onClick={() => onCopy(item)}><WorkspaceIcon name="copy" /></button>
+      <button type="button" className="icon-button danger" aria-label={attachment ? `Delete ${attachment.name}` : "Delete message"} title="Delete" disabled={blocked} onClick={() => onDelete(item)}><WorkspaceIcon name="trash" /></button>
       <button type="button" className="icon-button" aria-label={attachment ? `Options for ${attachment.name}` : "Message options"} disabled={blocked} onClick={() => onMore(item)}><WorkspaceIcon name="more" /></button>
     </div>
   </article>;

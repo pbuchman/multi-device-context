@@ -1,6 +1,8 @@
 import { AccountProfileSchema, type AccountProfile } from "@mdc/contracts";
 import type { Viewer } from "./model.js";
 
+type LoadedAccountProfile = AccountProfile & { avatarUrl?: string | undefined };
+
 export type ProfileState = { status: "loading" | "ready" | "unavailable"; message?: string; retryAt: number };
 export type SessionProfile = {
   getSnapshot(): Viewer;
@@ -21,7 +23,7 @@ export class AccountProfileStore implements SessionProfile {
   #controller: AbortController | undefined;
   #disposed = false;
   #canRecover = true;
-  constructor(private readonly uid: string, private readonly load: (signal: AbortSignal) => Promise<AccountProfile>, private readonly current: () => boolean) {
+  constructor(private readonly uid: string, private readonly load: (signal: AbortSignal) => Promise<LoadedAccountProfile>, private readonly current: () => boolean) {
     this.#viewer = { uid, name: "Signed in" };
     if (typeof window !== "undefined") { window.addEventListener("online", this.#recover); window.addEventListener("focus", this.#recover); }
   }
@@ -40,10 +42,12 @@ export class AccountProfileStore implements SessionProfile {
     const controller = new AbortController();this.#controller = controller;
     const operation = (async () => {
       try {
-        const data = AccountProfileSchema.parse(await this.load(controller.signal));
+        const loaded = await this.load(controller.signal);
+        const data = AccountProfileSchema.parse({ ...(loaded.name ? { name: loaded.name } : {}), ...(loaded.email ? { email: loaded.email } : {}) });
         if (!this.#live()) return;
         if (!data.name && !data.email) throw new ProfileLoadError("Your sign-in provider did not return a name or email.", false);
-        this.#viewer = { uid: this.uid, name: data.name ?? data.email!, ...(data.email ? { email: data.email } : {}) };
+        const avatarUrl = typeof loaded.avatarUrl === "string" && /^data:image\/(?:avif|webp|png|jpeg);base64,[A-Za-z0-9+/]*={0,2}$/.test(loaded.avatarUrl) ? loaded.avatarUrl : undefined;
+        this.#viewer = { uid: this.uid, name: data.name ?? data.email!, ...(data.email ? { email: data.email } : {}), ...(avatarUrl ? { avatarUrl } : {}) };
         this.#state = { status: "ready", retryAt: 0 };this.#canRecover = false;
       } catch (cause) {
         if (!this.#live()) return;

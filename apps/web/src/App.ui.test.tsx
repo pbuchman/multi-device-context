@@ -354,9 +354,11 @@ describe("ContextWorkspace", () => {
   it("keeps context navigation and settings usable while filtering", async () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
+    expect(screen.queryByRole("button", { name: "Clear search" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
     const search = await screen.findByLabelText("Search chat titles");
     await userEvent.type(search, "Beta");
+    expect(screen.getAllByRole("button", { name: "Clear search" })).toHaveLength(1);
     expect(screen.queryByRole("button", { name: /Alpha/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Beta" })).toBeTruthy();
 
@@ -421,6 +423,7 @@ describe("ContextWorkspace", () => {
     const test = services();
     render(<ContextWorkspace services={test.value} />);
     expect(screen.getByRole("heading", { name: "New chat" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open new chat" })).toBeNull();
     const composer = screen.getByLabelText("Message to yourself");
     fireEvent.change(composer, { target: { value: "Unsent local work" } });
     await userEvent.click(screen.getByRole("button", { name: "Add files or code" }));
@@ -499,7 +502,7 @@ it("R5: removing an optimistic queued message removes the displayed content", as
   const record = vi.mocked(test.value.outbox.enqueue).mock.calls[0]![0];
   await userEvent.click(screen.getByRole("button", { name: "Message options" }));
   await userEvent.click(screen.getByRole("button", { name: "Delete message…" }));
-  await userEvent.click(screen.getByRole("button", { name: "Delete message" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Delete message?" })).getByRole("button", { name: "Delete message" }));
   await waitFor(() => expect(screen.queryByText("Queued synthetic text")).toBeNull());
   expect(test.value.outbox.removeItem).toHaveBeenCalledWith(record.contextId, record.itemId);
 });
@@ -512,13 +515,28 @@ it("updates account details in the footer and settings when the session profile 
   render(<ContextWorkspace services={test.value} />);
   expect(screen.getByText("Account details unavailable")).toBeTruthy();
   expect(screen.queryByText("technical-id")).toBeNull();
-  act(() => { viewer = { uid: "technical-id", name: "Full Name", email: "full@example.test" }; notify(); });
+  act(() => { viewer = { uid: "technical-id", name: "Full Name", email: "full@example.test", avatarUrl: "data:image/png;base64,iVBORw0KGgo=" }; notify(); });
   const footer = screen.getByRole("button", { name: "Open settings" });
   expect(within(footer).getByText("Full Name")).toBeTruthy();
   expect(within(footer).getByText("full@example.test")).toBeTruthy();
+  expect(footer.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
   await userEvent.click(footer);
   expect(within(screen.getByRole("dialog")).getByText("Full Name")).toBeTruthy();
   expect(within(screen.getByRole("dialog")).getByText("full@example.test")).toBeTruthy();
+  expect(screen.getByRole("dialog").querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+});
+
+it("offers direct deletion beside copy for every message", async () => {
+  const test = services();
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  act(() => test.items.get(alpha)!({ records: [{ id: beta, contextId: alpha, content: { kind: "text", text: "Delete directly" }, createdAt: 1, device: test.value.device, ready: true, syncState: "synced" }], fromCache: false, hasPendingWrites: false }));
+
+  const copy = screen.getByRole("button", { name: "Copy message" });
+  const remove = screen.getByRole("button", { name: "Delete message" });
+  expect(copy.nextElementSibling).toBe(remove);
+  await userEvent.click(remove);
+  expect(screen.getByRole("dialog", { name: "Delete message?" })).toBeTruthy();
 });
 
 it("routes desktop New chat and Delete chat menu commands through existing draft and confirmation flows", async () => {
@@ -591,7 +609,7 @@ it.each([false, true])("shows neutral deletion progress until confirmation (item
     act(() => test.items.get(alpha)!({ records: [{ id: beta, contextId: alpha, content: { kind: "text", text: "Delete me" }, createdAt: 1, device: test.value.device, ready: true, syncState: "synced" }], fromCache: false, hasPendingWrites: false }));
     await userEvent.click(screen.getByRole("button", { name: "Message options" }));
     await userEvent.click(screen.getByRole("button", { name: "Delete message…" }));
-    await userEvent.click(screen.getByRole("button", { name: "Delete message" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Delete message?" })).getByRole("button", { name: "Delete message" }));
   } else {
     await userEvent.click(screen.getByRole("button", { name: "Options for Alpha" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Delete chat…" }));

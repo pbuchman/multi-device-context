@@ -1,4 +1,4 @@
-import type { NativeAccountProfile } from "@mdc/contracts";
+import type { NativeAccountProfile, NativeFile } from "@mdc/contracts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   createRemoteJWKSet,
@@ -87,7 +87,7 @@ export class AuthManager {
   private readonly request: typeof fetch;
   private readonly key: CryptoKey | JWTVerifyGetKey;
   private readonly issuer: string;
-  private profile: NativeAccountProfile | undefined;
+  private profile: (NativeAccountProfile & { picture?: string }) | undefined;
   private cached: { token: string; expiresAt: number; uid: string } | undefined;
   private flight: Promise<string> | undefined;
   private generation = 0;
@@ -116,7 +116,33 @@ export class AuthManager {
     await this.getAccessToken(false);
     const session = this.dependencies.readSession();
     if (generation !== this.generation || !this.cached || !session || session.uid !== this.cached.uid || session.authScope !== authenticationScope(this.settings)) throw new Error("Sign-in was cancelled.");
-    return this.profile?.uid === session.uid ? { ...this.profile } : { uid: session.uid };
+    const profile = this.profile?.uid === session.uid ? this.profile : undefined;
+    if (profile?.picture && !profile.avatar) {
+      const avatar = await this.loadAccountAvatar(profile.picture).catch(() => undefined);
+      if (avatar && generation === this.generation && this.profile === profile) profile.avatar = avatar;
+    }
+    if (!profile) return { uid: session.uid };
+    const { picture: _picture, ...verified } = profile;
+    return { ...verified };
+  }
+
+  private async loadAccountAvatar(source: string): Promise<NativeFile | undefined> {
+    const url = new URL(source);
+    if (url.protocol !== "https:" || url.username || url.password || !(url.hostname === "googleusercontent.com" || url.hostname.endsWith(".googleusercontent.com"))) return undefined;
+    const response = await this.request(url, {
+      headers: { accept: "image/avif,image/webp,image/png,image/jpeg" },
+      cache: "no-store",
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return undefined;
+    const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    if (!contentType || !["image/avif", "image/webp", "image/png", "image/jpeg"].includes(contentType)) return undefined;
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > 524_288) return undefined;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.byteLength || bytes.byteLength > 524_288) return undefined;
+    return { name: "account-avatar", contentType, bytes };
   }
   getAccessToken(interactive = false): Promise<string> {
     const session = this.dependencies.readSession();
@@ -258,7 +284,7 @@ export class AuthManager {
       throw new Error("Invalid sign-in response.");
     let subject: string;
     let expiresAt: number;
-    let profile: { name?: string; email?: string } = {};
+    let profile: { name?: string; email?: string; picture?: string } = {};
     try {
       const verified = await jwtVerify(
         data.access_token,
@@ -303,7 +329,8 @@ export class AuthManager {
           throw new Error();
         const name = typeof identity.payload.name === "string" ? identity.payload.name.trim() : "";
         const email = typeof identity.payload.email === "string" ? identity.payload.email.trim() : "";
-        profile = { ...(name && name.length <= 256 ? { name } : {}), ...(email && email.length <= 320 ? { email } : {}) };
+        const picture = typeof identity.payload.picture === "string" ? identity.payload.picture.trim() : "";
+        profile = { ...(name && name.length <= 256 ? { name } : {}), ...(email && email.length <= 320 ? { email } : {}), ...(picture && picture.length <= 2048 ? { picture } : {}) };
       }
     } catch {
       throw new Error("Could not verify the Google sign-in identity.");
