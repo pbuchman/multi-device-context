@@ -206,6 +206,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("mdc-theme") as Theme | null) ?? "system");
   const [launchAtLogin, setLaunchAtLoginState] = useState<boolean>();
   const [refreshing, setRefreshing] = useState(false);
+  const refreshError = useRef<string | undefined>(undefined);
   const [active, setActive] = useState(() => services.activity?.initialActive ?? true);
   const fileInput = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number | undefined>(undefined);
@@ -376,6 +377,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [deletionCleanup, isLive, services.outbox]);
   useEffect(() => {
     live.current.mounted = true;
+    setRefreshing(false);
     return () => {
       live.current.mounted = false;
       catchup.current.invalidate();
@@ -487,13 +489,16 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const scroll = useTimelineScroll(selectedId, visibleItems.map(item => item.id));
 
-  const refresh = useCallback((): Promise<void> => {
+  const refresh = useCallback((manual = false): Promise<void> => {
     if (!isLive() || !services.cloud.refreshContexts || !services.cloud.refreshDeletedContexts) return Promise.resolve();
     const selectedAtStart = navigation.selectedRef.current.id;
-    const scope = `${services.viewer.uid}:${selectedAtStart}`;
+    const scope = services.viewer.uid;
+    let complete = false;
+    const reportRefreshError = (message: string) => { refreshError.current = message; setError(message); };
     return catchup.current.run(scope, async owns => {
       const current = () => owns() && isLive();
       if (!current()) return;
+      setRefreshing(true);
       if (services.checkAccess) {
         services.pause?.();
         await services.checkAccess();
@@ -502,7 +507,6 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       for (const refresher of Object.values(refreshers.current)) refresher.invalidate();
       const versionsAtStart = { ...streamVersions.current };
       suppressCatchupAutoSelect.current = true;
-      setRefreshing(true);
       const tasks: Promise<void>[] = [
         refreshers.current.contexts.run(`${services.viewer.uid}:contexts`, () => services.cloud.refreshContexts!(), snapshot => {
           if (!current() || streamVersions.current.contexts !== versionsAtStart.contexts) return;
@@ -516,7 +520,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
             const incoming = snapshot.records.filter(context => !current.has(context.id));
             return incoming.length ? new Set([...current, ...incoming.map(context => context.id)]) : current;
           });
-          setSyncStreams(current => ({ ...current, contexts: { fromCache: false, pending: snapshot.hasPendingWrites, failed: false } }));
+          setSyncStreams(current => ({ ...current, contexts: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: false } }));
         }),
         refreshers.current.deleted.run(`${services.viewer.uid}:deleted`, () => services.cloud.refreshDeletedContexts!(), async ids => {
           if (!current()) return;
@@ -548,9 +552,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (!deletionReady) setSyncStreams(state => ({ ...state, deleted: { confirmed: false, failed: true } }));
       if (results[2]?.status !== "fulfilled") setSyncStreams(state => ({ ...state, deletedItems: { confirmed: false, failed: true } }));
       if (results.some(result => result.status === "rejected")) {
-        setError(results.every(result => result.status === "rejected") ? "Could not refresh from the server" : "Some data could not be refreshed");
+        reportRefreshError(results.every(result => result.status === "rejected") ? "Could not refresh from the server" : "Some data could not be refreshed");
       } else {
-        setError(message => message === "Could not refresh from the server" || message === "Some data could not be refreshed" || message === "Refresh timed out" ? undefined : message);
+        const previousError = refreshError.current;
+        setError(message => message === previousError ? undefined : message);
       }
       if (deletionReady) {
         await deletionCleanup.finish(current, () => {
@@ -558,16 +563,18 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           if (services.platformKind === "android" || services.checkAccess) services.resume?.();
         });
       }
+      complete = deletionReady && results.every(result => result.status === "fulfilled");
     }, cause => {
       if (!isLive()) return;
       if (cause) {
         setSyncStreams(state => ({ ...state, deleted: { confirmed: false, failed: true } }));
-        setError(cause instanceof Error ? cause.message : "Could not refresh from the server");
+        reportRefreshError(cause instanceof Error ? cause.message : "Could not refresh from the server");
       }
       setRefreshing(false);
+      if (manual && !cause && complete) showToast("Refresh complete");
       suppressCatchupAutoSelect.current = backgroundInactive.current;
     });
-  }, [applyDeleted, applyDeletedItems, deletionCleanup, isLive, navigation.selectedRef, services]);
+  }, [applyDeleted, applyDeletedItems, deletionCleanup, isLive, navigation.selectedRef, services, showToast]);
 
   useEffect(() => {
     if ((!services.checkAccess && services.platformKind !== "android") || signingOut.current) return;
@@ -981,7 +988,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const pendingWrites = syncStreams.contexts.pending || syncStreams.items.pending;
   const fromCache = syncStreams.contexts.fromCache || syncStreams.items.fromCache;
-  const syncLabel = queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
+  const syncLabel = refreshing ? "Refreshing…" : queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
     : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
 
   const openChatMenu = (context: ContextRecord, anchor: ChatMenuAnchor, opener: HTMLElement) => {
@@ -1016,10 +1023,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           if (services.platformKind === "android" || window.matchMedia?.("(pointer: coarse)").matches) openPanel({ kind: "context", context });
           else { const rect = opener.getBoundingClientRect(); openChatMenu(context, { x: rect.left, y: rect.bottom }, opener); }
         }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
-        onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={viewer.name} email={viewer.email} />
+        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked} name={viewer.name} email={viewer.email} />
       <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
-        <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh()}
+        <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh(true)}
           onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked} />
         {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" disabled={accountBlocked} onClick={() => void retry()}>Retry</button>{error ? <button type="button" className="icon-button" aria-label="Dismiss error" onClick={() => setError(undefined)}><WorkspaceIcon name="close" /></button> : null}</div> : null}
         <div className="timeline-region">
