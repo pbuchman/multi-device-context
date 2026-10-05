@@ -1,3 +1,4 @@
+import { SidebarResize } from "./sidebar-resize.js";
 import { AccessPage } from "./AccessPage.js";
 import { isAccessPageRequest } from "./browser-identity.js";
 import { applyLocalAccess, readLocalAccess } from "./local-access.js";
@@ -998,6 +999,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         onNew={() => { if (!accountBlocked) { setSelectedId(undefined); setError(undefined); closeDrawer(false); window.setTimeout(() => textareaRef.current?.focus(), 0); } }}
         onClose={() => closeDrawer()} onOptions={context => openPanel({ kind: "context", context })} onSettings={() => openPanel({ kind: "settings" })}
         onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={viewer.name} email={viewer.email} />
+      <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh()}
           onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked} />

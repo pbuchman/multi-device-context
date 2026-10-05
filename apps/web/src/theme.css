@@ -27,3 +27,7 @@
   .context-row,.context-select{min-height:32px}
   .context-row .icon-button{min-height:32px;height:32px;min-width:32px;width:32px;border-radius:10px}
 }
+
+.sidebar-resize{position:relative;flex:0 0 0;width:0;align-self:stretch;z-index:8;touch-action:none;cursor:col-resize;outline:none}
+.sidebar-resize::after{content:"";position:absolute;left:-4px;top:0;bottom:0;width:8px}
+.sidebar-resize:hover::after,.sidebar-resize:focus-visible::after,.sidebar-resize.dragging::after{background:var(--focus);opacity:.55}
