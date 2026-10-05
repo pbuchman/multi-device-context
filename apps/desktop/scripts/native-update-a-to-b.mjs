@@ -230,16 +230,31 @@ async function containsMarkers(root, markers) {
   return markers.every(marker => found.has(marker));
 }
 
-async function captureMacLaunchDiagnostic(screenshotPath) {
+async function sampleMacLaunch(executable, samplePath) {
+  const output = await runCapture("ps", ["-axo", "pid=,command="], { deadlineMs: 10_000 });
+  const main = output.split("\n").map(line => line.match(/^\s*(\d+)\s+(.+)$/u)).find(match => {
+    const command = match?.[2];
+    return command === executable || command?.startsWith(`${executable} `);
+  });
+  if (!main) throw new Error("The exact B main process was not present for sampling");
+  await run("sample", [main[1], "1", "1", "-file", samplePath], { deadlineMs: 10_000 });
+}
+
+async function captureMacLaunchDiagnostic(executable, screenshotPath) {
   const processes = await runCapture("ps", ["-axo", "pid=,ppid=,state=,etime=,comm="], { deadlineMs: 10_000 })
     .then(output => output.split("\n").filter(line => /Multi Device Context|SecurityAgent|CoreServicesUIAgent|UserNotificationCenter/iu.test(line)))
     .catch(error => [`Process inspection failed: ${error instanceof Error ? error.message : String(error)}`]);
-  let screenshotError;
+  let screenshotError, sampleError;
   try { await run("screencapture", ["-x", screenshotPath], { deadlineMs: 10_000 }); }
   catch (error) { screenshotError = error instanceof Error ? error.message : String(error); }
+  const samplePath = join(dirname(screenshotPath), "native-update-launch-sample.txt");
+  try { await sampleMacLaunch(executable, samplePath); }
+  catch (error) { sampleError = error instanceof Error ? error.message : String(error); }
   report.launchDiagnostic = {
     screenshot: screenshotError ? undefined : basename(screenshotPath),
     ...(screenshotError ? { screenshotError } : {}),
+    sample: sampleError ? undefined : basename(samplePath),
+    ...(sampleError ? { sampleError } : {}),
     processes,
   };
   await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");
@@ -249,7 +264,7 @@ async function launch(executable, playwright, environment, spki, diagnosticScree
   let diagnosticPromise, diagnosticTimer;
   if (process.platform === "darwin" && diagnosticScreenshot) {
     diagnosticTimer = setTimeout(() => {
-      diagnosticPromise = captureMacLaunchDiagnostic(diagnosticScreenshot);
+      diagnosticPromise = captureMacLaunchDiagnostic(executable, diagnosticScreenshot);
     }, 15_000);
   }
   try {
