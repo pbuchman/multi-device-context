@@ -252,4 +252,13 @@ describe("native update lifecycle", () => {
       expect(UpdateStateSchema.safeParse(state).success).toBe(false);
     }
   });
+
+  it.each(["available", "ready"] as const)("requires a version and installer size for %s", status => {
+    const base = { status, platform: "win32", currentVersion: "0.5.4" };
+    expect(UpdateStateSchema.safeParse(base).success).toBe(false);
+    expect(UpdateStateSchema.safeParse({ ...base, availableVersion: "0.5.5" }).success).toBe(false);
+    expect(UpdateStateSchema.safeParse({ ...base, progress: { transferred: 0, total: 100, percent: 0 } }).success).toBe(false);
+    expect(UpdateStateSchema.safeParse({ ...base, availableVersion: "0.5.5", progress: { transferred: 0, total: 0, percent: 0 } }).success).toBe(false);
+    expect(UpdateStateSchema.safeParse({ ...base, availableVersion: "0.5.5", progress: { transferred: 0, total: 100, percent: 0 } }).success).toBe(true);
+  });
 });

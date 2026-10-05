@@ -222,7 +222,16 @@ export const UpdateStateSchema = z
     progress: UpdateProgressSchema.optional(),
     message: z.string().min(1).max(2_048).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((state, context) => {
+    if (state.status !== "available" && state.status !== "ready") return;
+    if (!state.availableVersion) {
+      context.addIssue({ code: "custom", path: ["availableVersion"], message: "An available installer must identify its version" });
+    }
+    if (!state.progress || state.progress.total <= 0) {
+      context.addIssue({ code: "custom", path: ["progress"], message: "An available installer must identify its positive download size" });
+    }
+  });
 export type UpdateState = z.infer<typeof UpdateStateSchema>;
 
 export interface NativeUpdates {
