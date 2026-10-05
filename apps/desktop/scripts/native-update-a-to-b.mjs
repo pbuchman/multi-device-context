@@ -24,6 +24,7 @@ import {
   buildMacKeychainConsentScript,
   findSafeStorageKeychainItem,
   launchWithRequiredConsent,
+  macSafeStorageAccountName,
   parseSecurityKeychains,
   redactSecret,
 } from "./native-update-mac-keychain.mjs";
@@ -208,6 +209,7 @@ async function createMacTestKeychain(executable, appName) {
   const path = join(privateRoot, `${name}.keychain-db`);
   const password = randomBytes(24).toString("hex");
   const serviceName = `${appName} Safe Storage`;
+  const accountName = macSafeStorageAccountName(appName);
   const state = { name, path, password, appName, serviceName, priorDefault: priorDefault[0], priorSearch, created: false };
   try {
     await run("security", ["create-keychain", "-p", password, path], { deadlineMs: 10_000 });
@@ -227,15 +229,15 @@ async function createMacTestKeychain(executable, appName) {
       "The private test Keychain is not the user default",
     );
     await run("security", buildMacSafeStorageSeedArgs({
-      accountName: appName,
+      accountName,
       serviceName,
       password: randomBytes(16).toString("base64"),
       trustedApplication: executable,
       keychainPath: path,
     }), { deadlineMs: 10_000 });
     const dump = await runCapture("security", ["dump-keychain", path], { deadlineMs: 10_000 });
-    state.safeStorageItem = findSafeStorageKeychainItem(dump, serviceName);
-    assert.equal(state.safeStorageItem.accountName, appName, "The private Safe Storage item account differs from the packaged app name");
+    state.seededSafeStorageItem = findSafeStorageKeychainItem(dump, serviceName);
+    assert.equal(state.seededSafeStorageItem.accountName, accountName, "The private Safe Storage item account differs from Electron's pinned non-MAS account");
     return state;
   } catch (error) {
     try { await restoreMacTestKeychain(state); }
@@ -519,7 +521,7 @@ try {
       privateUserData: true,
       privateKeychain: true,
       accessibilityConsentAutomation: true,
-      safeStorageItem: macKeychain.safeStorageItem,
+      seededSafeStorageItem: macKeychain.seededSafeStorageItem,
     };
     checkpoint("Isolated Mac fixture data and Safe Storage in a private user-data directory and test Keychain");
   }
@@ -553,7 +555,9 @@ try {
   }, { path: runtimeA.sentinelPath, sentinel: nativeSentinel });
   if (macKeychain) {
     const dump = await runCapture("security", ["dump-keychain", macKeychain.path], { deadlineMs: 10_000 });
-    assert.deepEqual(findSafeStorageKeychainItem(dump, macKeychain.serviceName), macKeychain.safeStorageItem);
+    macKeychain.safeStorageItem = findSafeStorageKeychainItem(dump, macKeychain.serviceName);
+    assert.deepEqual(macKeychain.safeStorageItem, macKeychain.seededSafeStorageItem);
+    report.macIsolation.safeStorageItem = macKeychain.safeStorageItem;
   }
   await window.evaluate(values => {
     localStorage.setItem("mdc-test-draft", values[0]);
@@ -626,6 +630,14 @@ try {
     return safeStorage.decryptString(await fs.readFile(path));
   }, runtimeA.sentinelPath);
   assert.equal(sentinel, nativeSentinel);
+  if (macKeychain) {
+    const dump = await runCapture("security", ["dump-keychain", macKeychain.path], { deadlineMs: 10_000 });
+    assert.deepEqual(
+      findSafeStorageKeychainItem(dump, macKeychain.serviceName),
+      macKeychain.safeStorageItem,
+      "Exact B changed the owned Safe Storage Keychain item metadata",
+    );
+  }
   assert.deepEqual(await hashFile(runtimeA.nativeStatePath), nativeStateBefore, "Encrypted native startup state changed during A→B");
   assert.deepEqual(await hashFile(runtimeA.sentinelPath), nativeSentinelBefore, "Safe Storage ciphertext changed during Keychain consent");
   assert(await containsMarkers(runtimeBIdentity.userData, markers), "Synthetic draft/outbox/settings sentinels did not survive A→B");

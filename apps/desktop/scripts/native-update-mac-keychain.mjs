@@ -22,6 +22,12 @@ function keychainAttribute(block, name) {
   return match ? JSON.parse(match[1]) : undefined;
 }
 
+export function macSafeStorageAccountName(appName) {
+  assert(typeof appName === "string" && appName.length > 0 && !/[\r\n]/u.test(appName), "Invalid macOS app name");
+  // Electron 44's pinned non-MAS Safe Storage patch appends this exact suffix.
+  return `${appName} Key`;
+}
+
 export function findSafeStorageKeychainItem(output, serviceName) {
   const matches = output.split(/(?=^keychain:\s)/mu).flatMap(block => {
     if (!/^class:\s*"genp"\s*$/mu.test(block)) return [];

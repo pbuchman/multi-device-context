@@ -20,6 +20,7 @@ import {
   buildMacKeychainConsentScript,
   findSafeStorageKeychainItem,
   launchWithRequiredConsent,
+  macSafeStorageAccountName,
   parseSecurityKeychains,
   redactSecret,
 } from "./native-update-mac-keychain.mjs";
@@ -69,6 +70,8 @@ test("builds an exact local catalog around the immutable selected B bytes", () =
 });
 
 test("scopes macOS Keychain consent to the exact app item and private keychain", () => {
+  assert.equal(macSafeStorageAccountName("Multi Device Context"), "Multi Device Context Key");
+  assert.throws(() => macSafeStorageAccountName("Multi Device Context\nOther"), /Invalid macOS app name/u);
   assert.deepEqual(parseSecurityKeychains(`    "/Users/runner/Library/Keychains/login.keychain-db"\n    "/tmp/MDC Native Update Test.keychain-db"\n`), [
     "/Users/runner/Library/Keychains/login.keychain-db",
     "/tmp/MDC Native Update Test.keychain-db",
@@ -92,7 +95,7 @@ keychain: "/tmp/MDC Native Update Test.keychain-db"
 version: 512
 class: "genp"
 attributes:
-    "acct"<blob>="Multi Device Context"
+    "acct"<blob>="Multi Device Context Key"
     "svce"<blob>="Multi Device Context Safe Storage"
 keychain: "/tmp/MDC Native Update Test.keychain-db"
 version: 512
@@ -102,7 +105,7 @@ attributes:
     "svce"<blob>="Other Service"
 `, "Multi Device Context Safe Storage");
   assert.deepEqual(item, {
-    accountName: "Multi Device Context",
+    accountName: "Multi Device Context Key",
     serviceName: "Multi Device Context Safe Storage",
   });
   assert.throws(() => findSafeStorageKeychainItem(`class: "genp"\n`, "Multi Device Context Safe Storage"), /not found/u);
@@ -115,7 +118,7 @@ attributes:
     keychainPath: "/tmp/MDC Native Update Test.keychain-db",
   }), [
     "add-generic-password",
-    "-a", "Multi Device Context",
+    "-a", "Multi Device Context Key",
     "-s", "Multi Device Context Safe Storage",
     "-w", "fixture-secret",
     "-T", "/tmp/Applications/Multi Device Context.app/Contents/MacOS/Multi Device Context",
