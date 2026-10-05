@@ -64,12 +64,15 @@ test("rewrites only a private source copy and marks it so production validation 
   const parent = await mkdtemp(join(tmpdir(), "mdc-update-fixture-unit-"));
   const destination = join(parent, "source");
   const productionContracts = join(sourceRoot, "packages/contracts/src/updates.ts");
+  const productionMain = join(sourceRoot, "apps/desktop/src/main.ts");
   const before = await hashFile(productionContracts);
+  const mainBefore = await hashFile(productionMain);
   try {
     const result = await preparePrivateTestWorkspace({
       sourceRoot,
       destination,
       origin: "https://localhost:48765",
+      appOrigin: "https://release.example.test",
       version: "0.5.3",
     });
     const copiedContracts = await readFile(join(destination, "packages/contracts/src/updates.ts"), "utf8");
@@ -77,6 +80,10 @@ test("rewrites only a private source copy and marks it so production validation 
     assert(!copiedContracts.includes("https://pbuchman.github.io/multi-device-context/updates/preview.json"));
     const manifest = JSON.parse(await readFile(join(result.appDirectory, "package.json"), "utf8"));
     assert.equal(manifest.mdcNativeUpdateTestOnly, TEST_FIXTURE_MARKER);
+    const copiedMain = await readFile(join(result.appDirectory, "src/main.ts"), "utf8");
+    assert.match(copiedMain, /NativeStore\.open\(directory, "https:\/\/release\.example\.test", hostname\(\), \{/u);
+    assert.match(copiedMain, /isTrustedAppUrl\([^\n]+MDC_APP_ORIGIN/u);
+    assert.equal(result.appOrigin, "https://release.example.test");
     assert.throws(() => assertProductionUpdateBoundary(
       manifest,
       "https://localhost:48765/updates/preview.json",
@@ -84,6 +91,7 @@ test("rewrites only a private source copy and marks it so production validation 
       JSON.stringify({ appOrigin: "https://localhost:48765", bridgeVersion: 1, nativeUpdateTestOnly: TEST_FIXTURE_MARKER }),
     ), /nativeUpdateTestOnly|test-only|deep-equal/i);
     assert.deepEqual(await hashFile(productionContracts), before);
+    assert.deepEqual(await hashFile(productionMain), mainBefore);
     const output = join(parent, "download.mjs");
     await build({ entryPoints: [join(result.appDirectory, "src/update-files.ts")], outfile: output,
       bundle: true, platform: "node", format: "esm",

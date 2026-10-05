@@ -272,7 +272,16 @@ try {
   checkpoint("Fixture source is local HTTPS with a certificate-specific browser pin and no runtime URL override");
 
   const copiedWorkspace = join(privateRoot, "source");
-  const fixture = await preparePrivateTestWorkspace({ sourceRoot, destination: copiedWorkspace, origin, version: aVersion });
+  assert(process.env.MDC_APP_ORIGIN, "MDC_APP_ORIGIN must identify the exact B build configuration");
+  const fixture = await preparePrivateTestWorkspace({
+    sourceRoot,
+    destination: copiedWorkspace,
+    origin,
+    appOrigin: process.env.MDC_APP_ORIGIN,
+    version: aVersion,
+  });
+  assert.notEqual(fixture.appOrigin, origin, "Exact B must not use the isolated test origin");
+  checkpoint("Marked test A uses exact B's private-state scope while its renderer and update feed remain isolated local HTTPS");
   const builderCli = require.resolve("electron-builder/cli.js");
   const buildEnvironment = {
     ...process.env,

@@ -51,6 +51,14 @@ export async function preparePrivateTestWorkspace({
   appOrigin = origin,
   version,
 }) {
+  const appOriginUrl = new URL(appOrigin);
+  assert.equal(appOriginUrl.protocol, "https:", "B application origin must use HTTPS");
+  assert.equal(appOriginUrl.username, "", "B application origin must not include credentials");
+  assert.equal(appOriginUrl.password, "", "B application origin must not include credentials");
+  assert.equal(appOriginUrl.pathname, "/", "B application origin must not include a path");
+  assert.equal(appOriginUrl.search, "", "B application origin must not include a query");
+  assert.equal(appOriginUrl.hash, "", "B application origin must not include a fragment");
+  assert.equal(appOriginUrl.origin, appOrigin, "B application origin must be canonical");
   assert.equal((await lstat(destination).catch(() => undefined)), undefined, "Private fixture destination already exists");
   await mkdir(destination, { recursive: false, mode: 0o700 });
   const filter = source => !/[\\/](?:node_modules|bundle|dist|release|coverage|test-results|playwright-report)(?:[\\/]|$)/u.test(source);
@@ -84,6 +92,14 @@ export async function preparePrivateTestWorkspace({
     join(destination, "apps/desktop/src/update-files.ts"),
     'url.protocol !== "https:" || url.username || url.password || url.port || url.hash',
     `url.protocol !== "https:" || url.username || url.password || (url.port && url.origin !== ${JSON.stringify(origin)}) || url.hash`,
+  );
+  // A uses the isolated localhost renderer and update feed, but writes the
+  // private-state scope that exact B expects. This test-only source copy is
+  // marked below and rejected by normal package validation.
+  await replaceExact(
+    join(destination, "apps/desktop/src/main.ts"),
+    "store = await NativeStore.open(directory, MDC_APP_ORIGIN, hostname(), {",
+    `store = await NativeStore.open(directory, ${JSON.stringify(appOrigin)}, hostname(), {`,
   );
 
   const packagePath = join(destination, "apps/desktop/package.json");
