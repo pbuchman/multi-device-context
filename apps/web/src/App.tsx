@@ -20,6 +20,7 @@ import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
 import { DurableOutbox, type QueuedShare } from "./outbox.js";
 import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
 import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, displayTitle, formatFileSize } from "./workspace-view.js";
+import { ChatContextMenu, type ChatMenuAnchor } from "./chat-context-menu.js";
 import { WorkspaceDialog, trapFocus } from "./workspace-overlay.js";
 import { useTimelineScroll } from "./use-timeline-scroll.js";
 import { frozenClipboardParts, insertClipboardText, keyboardSends, type SharePart } from "./workspace-input.js";
@@ -164,6 +165,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const [aiEnabled, setAiEnabled] = useState<boolean>();
   const [panel, setPanel] = useState<WorkspacePanel>();
+  const [chatMenu, setChatMenu] = useState<{ context: ContextRecord; anchor: ChatMenuAnchor; opener: HTMLElement; owner: WorkspaceServices }>();
   const settingsOpen = panel?.kind === "settings";
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [compact, setCompact] = useState(() => window.matchMedia?.("(max-width: 839px)").matches ?? false);
@@ -318,7 +320,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     window.addEventListener("keydown", key); window.addEventListener("mdc:back", back);
     return () => { window.removeEventListener("keydown", key); window.removeEventListener("mdc:back", back); };
   }, [panel, compact, drawerOpen, closePanel, closeDrawer]);
-  useEffect(() => { setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
+  useEffect(() => { setChatMenu(undefined); setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
 
   const refreshers = useRef({ contexts: new ForegroundRefresh(), deleted: new ForegroundRefresh(), deletedItems: new ForegroundRefresh(), items: new ForegroundRefresh() });
   const applyDeleted = useCallback(async (ids: Id[]) => {
@@ -475,6 +477,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [active, isLive, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
 
   const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))];
+  useEffect(() => {
+    if (chatMenu && (chatMenu.owner !== services || accountBlocked || panel || !allContexts.some(context => context.id === chatMenu.context.id))) setChatMenu(undefined);
+  }, [chatMenu, services, accountBlocked, panel, allContexts]);
   const selected = allContexts.find((context) => context.id === selectedId);
   const visibleContexts = allContexts.filter((context) => context.title.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   const visibleItems = [...items.filter(item => item.contextId === selectedId), ...optimisticItems.filter((item) => item.contextId === selectedId)]
@@ -979,6 +984,16 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const syncLabel = queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
     : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
 
+  const openChatMenu = (context: ContextRecord, anchor: ChatMenuAnchor, opener: HTMLElement) => {
+    if (!accountBlocked) setChatMenu({ context, anchor, opener, owner: services });
+  };
+  const renameChat = (context: ContextRecord) => {
+    setRenameText(context.title === "New context" ? "" : context.title);
+    openPanel({ kind: "rename", context });
+  };
+  const copyChatLink = (context: ContextRecord) => {
+    void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${context.id}`).then(() => { if (isLive()) showToast("Chat link copied"); }).catch(cause => { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not copy the link"); });
+  };
   const panelTitle = panel?.kind === "context" ? "Chat options" : panel?.kind === "rename" ? "Rename chat" : panel?.kind === "delete-context" ? "Delete chat?" : panel?.kind === "item" ? "Message options" : panel?.kind === "delete-item" ? "Delete message?" : panel?.kind === "clipboard" ? "Send pasted files?" : panel?.kind === "add" ? "Add to this chat" : panel?.kind === "signout" ? "Sign out?" : "Settings";
   const option = (icon: Parameters<typeof WorkspaceIcon>[0]["name"], label: string, action: () => void, disabled = false, description?: string) => <button type="button" className={`dialog-action ${icon === "trash" ? "danger" : ""}`} onClick={action} disabled={disabled || dialogBusy}><WorkspaceIcon name={icon} /><span>{label}{description ? <small>{description}</small> : null}</span></button>;
   const confirmDelete = async () => {
@@ -997,7 +1012,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       <ChatSidebar elementRef={sidebarRef} compact={compact} open={drawerOpen} contexts={visibleContexts} selectedId={selectedId} search={search} onSearch={setSearch}
         onSelect={id => { if (!accountBlocked) { setSelectedId(id); closeDrawer(false); } }}
         onNew={() => { if (!accountBlocked) { setSelectedId(undefined); setError(undefined); closeDrawer(false); window.setTimeout(() => textareaRef.current?.focus(), 0); } }}
-        onClose={() => closeDrawer()} onOptions={context => openPanel({ kind: "context", context })} onSettings={() => openPanel({ kind: "settings" })}
+        onClose={() => closeDrawer()} onOptions={(context, opener) => {
+          if (services.platformKind === "android" || window.matchMedia?.("(pointer: coarse)").matches) openPanel({ kind: "context", context });
+          else { const rect = opener.getBoundingClientRect(); openChatMenu(context, { x: rect.left, y: rect.bottom }, opener); }
+        }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
         onRefresh={() => void refresh()} refreshing={refreshing} blocked={accountBlocked} name={viewer.name} email={viewer.email} />
       <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
@@ -1018,12 +1036,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <input ref={fileInput} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; void sharePickedFiles(files); }} />
       </main>
     </div>
+    {chatMenu && chatMenu.owner === services && !panel && !accountBlocked ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
     {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
     {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()}>
       {panel.kind === "context" ? <>
         <p className="dialog-description">{displayTitle(panel.context.title)}</p>
-        {option("edit", "Rename chat", () => { setRenameText(panel.context.title === "New context" ? "" : panel.context.title); setPanel({ kind: "rename", context: panel.context }); })}
-        {!navigation.selectedRef.current.drafts[panel.context.id]?.local ? option("link", "Copy link", () => { const target = panel.context.id; void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${target}`).then(() => { if (isLive()) showToast("Chat link copied"); }).catch(cause => { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not copy the link"); }); closePanel(); }, false, "The link does not give other accounts access.") : null}
+        {option("edit", "Rename chat", () => renameChat(panel.context))}
+        {!navigation.selectedRef.current.drafts[panel.context.id]?.local ? option("link", "Copy link", () => { copyChatLink(panel.context); closePanel(); }, false, "The link does not give other accounts access.") : null}
         {!services.isDesktop && services.platformKind !== "android" && !navigation.selectedRef.current.drafts[panel.context.id]?.local ? <a className="dialog-action" href={`multi-device-context://context/${panel.context.id}`}><WorkspaceIcon name="share" /><span>Open in app</span></a> : null}
         <div className="dialog-divider" />{option("trash", "Delete chat…", () => setPanel({ kind: "delete-context", context: panel.context }))}
       </> : null}

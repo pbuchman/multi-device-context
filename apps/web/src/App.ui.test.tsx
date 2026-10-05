@@ -483,7 +483,7 @@ it("R4: Retry repeats the failed deletion instead of only draining shares", asyn
   vi.mocked(test.value.cloud.deleteContext).mockRejectedValueOnce(new TypeError("offline"));
   render(<ContextWorkspace services={test.value} />);
   await userEvent.click(screen.getByRole("button", { name: "Options for Alpha" }));
-  await userEvent.click(screen.getByRole("button", { name: "Delete chat…" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Delete chat…" }));
   await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
   expect((await screen.findByRole("alert")).textContent).toContain("not confirmed");
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
