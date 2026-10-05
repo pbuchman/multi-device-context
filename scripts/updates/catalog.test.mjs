@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { buildCatalog, renderWindowsFeed, writePages } from './catalog.mjs';
+import { buildCatalog, renderWindowsFeed, writePages, validateCatalog } from './catalog.mjs';
 
 const version = '0.5.5', commit = 'a'.repeat(40), androidVersionCode = 10;
 async function fixture(t) {
@@ -50,6 +50,15 @@ test('Windows metadata pins the same EXE and digest as the complete Preview cata
   assert.ok(feed.includes(artifact.sha512));
   assert.ok(feed.includes(String(artifact.size)));
   assert.ok(!feed.includes('.dmg'));
+});
+
+test('producer and publisher enforce the same 1 GiB installer limit as clients', async t => {
+  const input = await fixture(t);
+  const catalog = await buildCatalog(input);
+  catalog.artifacts[0].size = 1_073_741_825;
+  assert.throws(() => validateCatalog(catalog));
+  await truncate(join(input.directory, catalog.artifacts[0].name), 1_073_741_825);
+  await assert.rejects(buildCatalog(input));
 });
 
 test('publishing rejects a catalog with a different repository or a mismatched release URL', async t => {

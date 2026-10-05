@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = 'https://github.com/pbuchman/multi-device-context';
+const maximumArtifactBytes = 1_073_741_824;
 const versionPattern = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/;
 function identity(version, commit, androidVersionCode) {
   assert.equal(typeof version, 'string');
@@ -35,6 +36,7 @@ export async function buildCatalog({ directory, version, commit, androidVersionC
     const path = join(directory, definition.name);
     const stat = await lstat(path);
     assert(stat.isFile() && stat.size > 0, `Missing ordinary installer: ${definition.name}`);
+    assert(stat.size <= maximumArtifactBytes, `Installer exceeds the 1 GiB client limit: ${definition.name}`);
     artifacts.push({ ...definition, url: `${repository}/releases/download/v${version}/${definition.name}`, size: stat.size, ...await digests(path) });
   }
   return { schemaVersion: 1, channel: 'preview', version, commit, publishedAt, releaseUrl: `${repository}/releases/tag/v${version}`, artifacts };
@@ -57,7 +59,7 @@ export function validateCatalog(catalog) {
     assert.deepEqual(Object.keys(asset).sort(), [...Object.keys(expected), 'url', 'size', 'sha256', 'sha512'].sort());
     for (const [key, value] of Object.entries(expected)) assert.equal(asset[key], value);
     assert.equal(asset.url, `${repository}/releases/download/v${catalog.version}/${expected.name}`);
-    assert(Number.isSafeInteger(asset.size) && asset.size > 0);
+    assert(Number.isSafeInteger(asset.size) && asset.size > 0 && asset.size <= maximumArtifactBytes);
     assert.match(asset.sha256, /^[a-f0-9]{64}$/);
     assert.match(asset.sha512, /^[A-Za-z0-9+/]{86}==$/);
   }
