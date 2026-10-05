@@ -17,6 +17,39 @@ export function parseSecurityKeychains(output) {
   return paths;
 }
 
+function keychainAttribute(block, name) {
+  const match = block.match(new RegExp(`^\\s*"${name}"<blob>=("(?:\\\\.|[^"])*")\\s*$`, "mu"));
+  return match ? JSON.parse(match[1]) : undefined;
+}
+
+export function findSafeStorageKeychainItem(output, serviceName) {
+  const matches = output.split(/(?=^keychain:\s)/mu).flatMap(block => {
+    if (!/^class:\s*"genp"\s*$/mu.test(block)) return [];
+    const service = keychainAttribute(block, "svce");
+    if (service !== serviceName) return [];
+    const account = keychainAttribute(block, "acct");
+    assert(typeof account === "string" && account.length > 0, "Safe Storage Keychain item has no account metadata");
+    return [{ accountName: account, serviceName: service }];
+  });
+  assert.equal(matches.length, 1, `Safe Storage Keychain item was ${matches.length === 0 ? "not found" : "not unique"}`);
+  return matches[0];
+}
+
+export function buildMacSafeStorageSeedArgs({ accountName, serviceName, password, trustedApplication, keychainPath }) {
+  for (const [name, value] of Object.entries({ accountName, serviceName, password }))
+    assert(typeof value === "string" && value.length > 0 && !/[\r\n]/u.test(value), `Invalid ${name}`);
+  assert(isAbsolute(trustedApplication), "The trusted Safe Storage application must be absolute");
+  assert(isAbsolute(keychainPath), "The Safe Storage Keychain path must be absolute");
+  return [
+    "add-generic-password",
+    "-a", accountName,
+    "-s", serviceName,
+    "-w", password,
+    "-T", trustedApplication,
+    keychainPath,
+  ];
+}
+
 export function redactSecret(message, secret) {
   assert(typeof secret === "string" && secret.length > 0, "A non-empty secret is required for redaction");
   return String(message).replaceAll(secret, "[redacted]");

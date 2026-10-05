@@ -20,7 +20,9 @@ import {
   startFixtureServer,
 } from "./native-update-fixture.mjs";
 import {
+  buildMacSafeStorageSeedArgs,
   buildMacKeychainConsentScript,
+  findSafeStorageKeychainItem,
   launchWithRequiredConsent,
   parseSecurityKeychains,
   redactSecret,
@@ -196,15 +198,17 @@ async function replaceMacWithB(executable) {
   return sourceIdentity;
 }
 
-async function createMacTestKeychain() {
+async function createMacTestKeychain(executable, appName) {
   if (process.platform !== "darwin") return undefined;
+  assert(typeof appName === "string" && appName.length > 0, "The packaged macOS app name is missing");
   const priorDefault = parseSecurityKeychains(await runCapture("security", ["default-keychain", "-d", "user"], { deadlineMs: 10_000 }));
   assert.equal(priorDefault.length, 1, "macOS returned more than one default user Keychain");
   const priorSearch = parseSecurityKeychains(await runCapture("security", ["list-keychains", "-d", "user"], { deadlineMs: 10_000 }));
   const name = "MDC Native Update Test";
   const path = join(privateRoot, `${name}.keychain-db`);
   const password = randomBytes(24).toString("hex");
-  const state = { name, path, password, priorDefault: priorDefault[0], priorSearch, created: false };
+  const serviceName = `${appName} Safe Storage`;
+  const state = { name, path, password, appName, serviceName, priorDefault: priorDefault[0], priorSearch, created: false };
   try {
     await run("security", ["create-keychain", "-p", password, path], { deadlineMs: 10_000 });
     state.created = true;
@@ -222,6 +226,16 @@ async function createMacTestKeychain() {
       [path],
       "The private test Keychain is not the user default",
     );
+    await run("security", buildMacSafeStorageSeedArgs({
+      accountName: appName,
+      serviceName,
+      password: randomBytes(16).toString("base64"),
+      trustedApplication: executable,
+      keychainPath: path,
+    }), { deadlineMs: 10_000 });
+    const dump = await runCapture("security", ["dump-keychain", path], { deadlineMs: 10_000 });
+    state.safeStorageItem = findSafeStorageKeychainItem(dump, serviceName);
+    assert.equal(state.safeStorageItem.accountName, appName, "The private Safe Storage item account differs from the packaged app name");
     return state;
   } catch (error) {
     try { await restoreMacTestKeychain(state); }
@@ -264,8 +278,8 @@ async function requireMacAccessibilityAutomation() {
 async function authorizeMacKeychainPrompt(state, signal) {
   assert(state && process.platform === "darwin", "Keychain consent is macOS-only");
   const script = buildMacKeychainConsentScript({
-    appName: "Multi Device Context",
-    serviceName: "Multi Device Context Safe Storage",
+    appName: state.appName,
+    serviceName: state.serviceName,
     keychainName: state.name,
   });
   let output;
@@ -499,8 +513,14 @@ try {
   if (macUserDataDirectory) {
     await mkdir(macUserDataDirectory, { recursive: true });
     await requireMacAccessibilityAutomation();
-    macKeychain = await createMacTestKeychain();
-    report.macIsolation = { privateUserData: true, privateKeychain: true, accessibilityConsentAutomation: true };
+    const appName = installedManifest(executable).productName;
+    macKeychain = await createMacTestKeychain(executable, appName);
+    report.macIsolation = {
+      privateUserData: true,
+      privateKeychain: true,
+      accessibilityConsentAutomation: true,
+      safeStorageItem: macKeychain.safeStorageItem,
+    };
     checkpoint("Isolated Mac fixture data and Safe Storage in a private user-data directory and test Keychain");
   }
 
@@ -519,23 +539,22 @@ try {
     const userData = electronApp.getPath("userData");
     const path = process.getBuiltinModule("path").join(userData, "native-update-a-to-b.safe");
     return {
-      version: electronApp.getVersion(), executable: process.execPath, userData, sentinelPath: path,
+      name: electronApp.getName(), version: electronApp.getVersion(), executable: process.execPath, userData, sentinelPath: path,
       nativeStatePath: process.getBuiltinModule("path").join(userData, "private", "private-state.bin"),
     };
   });
   assert.equal(runtimeA.version, aVersion);
+  if (macKeychain) assert.equal(runtimeA.name, macKeychain.appName, "Electron's runtime app name differs from the private Safe Storage item");
   assert.equal(resolve(runtimeA.executable), resolve(executable));
   if (macUserDataDirectory) assert.equal(await realpath(runtimeA.userData), await realpath(macUserDataDirectory));
   await app.evaluate(async ({ safeStorage }, { path, sentinel }) => {
     const fs = process.getBuiltinModule("fs").promises;
     await fs.writeFile(path, safeStorage.encryptString(sentinel));
   }, { path: runtimeA.sentinelPath, sentinel: nativeSentinel });
-  if (macKeychain) await runCapture("security", [
-    "find-generic-password",
-    "-a", "Multi Device Context",
-    "-s", "Multi Device Context Safe Storage",
-    macKeychain.path,
-  ], { deadlineMs: 10_000 });
+  if (macKeychain) {
+    const dump = await runCapture("security", ["dump-keychain", macKeychain.path], { deadlineMs: 10_000 });
+    assert.deepEqual(findSafeStorageKeychainItem(dump, macKeychain.serviceName), macKeychain.safeStorageItem);
+  }
   await window.evaluate(values => {
     localStorage.setItem("mdc-test-draft", values[0]);
     localStorage.setItem("mdc-test-outbox", values[1]);
@@ -591,10 +610,12 @@ try {
   const bWindow = app.windows()[0];
   await bWindow.waitForLoadState("domcontentloaded");
   const runtimeBIdentity = await app.evaluate(({ app: electronApp }) => ({
+    name: electronApp.getName(),
     version: electronApp.getVersion(),
     executable: process.execPath,
     userData: electronApp.getPath("userData"),
   }));
+  if (macKeychain) assert.equal(runtimeBIdentity.name, macKeychain.appName, "Exact B changed the Safe Storage app identity");
   assert.deepEqual(
     { version: runtimeBIdentity.version, executable: resolve(runtimeBIdentity.executable), userData: runtimeBIdentity.userData },
     { version: bVersion, executable: resolve(executable), userData: runtimeA.userData },

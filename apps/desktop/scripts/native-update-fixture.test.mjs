@@ -16,7 +16,9 @@ import {
   readArchiveManifest,
 } from "./native-update-fixture.mjs";
 import {
+  buildMacSafeStorageSeedArgs,
   buildMacKeychainConsentScript,
+  findSafeStorageKeychainItem,
   launchWithRequiredConsent,
   parseSecurityKeychains,
   redactSecret,
@@ -84,6 +86,41 @@ test("scopes macOS Keychain consent to the exact app item and private keychain",
   assert.match(script, /Multi Device Context wants to use/u);
   assert.match(script, /click button "Allow"/u);
   assert.doesNotMatch(script, /Always Allow/u);
+
+  const item = findSafeStorageKeychainItem(`
+keychain: "/tmp/MDC Native Update Test.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<blob>="Multi Device Context"
+    "svce"<blob>="Multi Device Context Safe Storage"
+keychain: "/tmp/MDC Native Update Test.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<blob>="unrelated"
+    "svce"<blob>="Other Service"
+`, "Multi Device Context Safe Storage");
+  assert.deepEqual(item, {
+    accountName: "Multi Device Context",
+    serviceName: "Multi Device Context Safe Storage",
+  });
+  assert.throws(() => findSafeStorageKeychainItem(`class: "genp"\n`, "Multi Device Context Safe Storage"), /not found/u);
+
+  assert.deepEqual(buildMacSafeStorageSeedArgs({
+    accountName: item.accountName,
+    serviceName: item.serviceName,
+    password: "fixture-secret",
+    trustedApplication: "/tmp/Applications/Multi Device Context.app/Contents/MacOS/Multi Device Context",
+    keychainPath: "/tmp/MDC Native Update Test.keychain-db",
+  }), [
+    "add-generic-password",
+    "-a", "Multi Device Context",
+    "-s", "Multi Device Context Safe Storage",
+    "-w", "fixture-secret",
+    "-T", "/tmp/Applications/Multi Device Context.app/Contents/MacOS/Multi Device Context",
+    "/tmp/MDC Native Update Test.keychain-db",
+  ]);
 });
 
 test("owns the native application across launch and Keychain consent failures", async () => {
