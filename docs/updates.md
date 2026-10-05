@@ -124,7 +124,7 @@ different installer bytes.
 
 If no safe catalog exists, unpublish Pages until a replacement is ready.
 Applications continue working and report an update-check error. Withdrawing a
-catalog does not undo an installation already completed or a download already
-handed to a system installer. Keep the server and hosted interface compatible
+catalog does not revoke an installer already downloaded to a device or undo an
+installation already completed. Keep the server and hosted interface compatible
 with installed clients; follow the deployment guide's rollback restrictions and
 never restore deleted user content as part of a rollback.
