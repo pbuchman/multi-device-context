@@ -78,6 +78,25 @@ shared as text. Files retain their original bytes.
 
 Below 840 CSS pixels, **Open chats menu** reveals the searchable chat list,
 **New chat**, refresh, and Settings. Wider windows keep that same sidebar open.
+With a mouse or trackpad, chat rows are 32 px high; touch devices retain 48 px
+hit targets. In wide windows, drag the separator beside the sidebar to resize it
+between 220 and 480 px. The main panel keeps at least 360 px. Focus the separator
+and use Left/Right arrows for 10 px steps or Home/End for its limits; double-click
+it to restore 274 px. The preferred width is saved locally for each account.
+Narrowing the window does not replace that preference.
+
+The sidebar footer shows your account name and email. Open Settings to see the
+full values. If the identity provider is unavailable, sharing remains usable and
+the account area displays **Signed in / Account details unavailable**. Profile
+details are kept only for the current session.
+
+Right-click a chat, Control-click on macOS, or focus it and press Shift+F10 or the
+Menu key to open its menu. The row's **…** button opens the same desktop menu:
+**Rename chat**, **Copy link**, and **Delete chat…**. Opening the menu leaves the
+current conversation and its draft unchanged. Unsent local chats have no copyable
+link. Use arrow keys and Enter to choose an action, or Escape to close the menu.
+Phones retain the chat options sheet.
+
 Both refresh controls update chats, messages, and deletions. Message **Copy** and
 **Message options** remain reachable without hovering.
 
@@ -85,7 +104,7 @@ Both refresh controls update chats, messages, and deletions. Message **Copy** an
 
 Every manual opening starts a fresh context. Unsent drafts remain accessible in
 the sidebar. Existing contexts can be opened by their copied HTTPS link; the
-context menu also offers **Open in app** in the browser. Sign-in preserves the target.
+**Chat options** panel also offers **Open in app** in the browser. Sign-in preserves the target.
 
 Every context starts with a fallback name. AI-generated names require the
 account-level **Settings → AI context titles** setting and are not requested when

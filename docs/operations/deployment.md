@@ -176,6 +176,33 @@ Publish or update the hostname through the separately managed tunnel only after
 the local Caddy origin is healthy. Preserve all unrelated routes and access
 policies.
 
+## Roll out account profile support before the interface
+
+The desktop loads the hosted interface; replacing its installer alone does not
+update the chat UI. Android bundles the interface into its APK.
+
+For the profile/sidebar update, prepare both server and web outputs from the
+same reviewed commit. Before changing the service, retain a complete copy of the
+currently served `apps/web/dist` outside the checkout, including its hashed
+assets. Keep the new web build separately as well. Serve the retained old web
+build from `apps/web/dist` while installing and restarting the new server with
+the procedure above. The runtime launcher fixes this web path; changing
+`MDC_WEB_DIST` alone does not override it.
+
+Verify that `GET /api/profile` rejects unauthenticated requests with 401 and
+`Cache-Control: no-store`. Using an authenticated session, verify the response
+contains only the current account's optional name/email and works before an
+installation receives full chat access. Do not put bearer tokens in commands,
+logs or reports. Only after this check, switch the served web directory to the
+prepared new build and restart this application's service so static routes are
+registered for the new hashed assets. Reopen the desktop interface and verify
+account details, menus and sidebar resizing. Keep the old web build available
+for rollback; retain the compatible profile endpoint when reverting the UI.
+
+Preparation and successful CI do not authorize production deployment or release
+publication. A physical Mac install/upgrade check is separate from CI's runner
+installation check and must be reported as unverified if it has not been done.
+
 ## Verify the deployment
 
 Set verification variables to the private configured hostname and port. Any `.map`

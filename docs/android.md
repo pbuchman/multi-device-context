@@ -69,11 +69,11 @@ signing. A debug build without it uses Android's generic debug key and cannot
 update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
-increase it for each update. The current default is 1; it is not automatically
+increase it for each update. The current default is 8; it is not automatically
 incremented. Keep the application ID and signing key unchanged.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=4
+export MDC_ANDROID_VERSION_CODE=8
 pnpm --filter @mdc/mobile android:release
 ```
 
