@@ -34,7 +34,7 @@ function api(path, paginate = false) {
 }
 
 /** No Authorization header is sent to public release assets or CDN redirects. */
-async function download(url, destination, maximumBytes) {
+export async function downloadPublicAsset(url, destination, maximumBytes) {
   let response;
   for (let hop = 0; hop <= 5; hop++) {
     const current = new URL(url);
@@ -68,7 +68,7 @@ export async function preparePublishedFeed(tag, output) {
   const temporary = await mkdtemp(join(tmpdir(), 'mdc-published-release-'));
   try {
     const catalogPath = join(temporary, 'catalog.json');
-    await download(`https://github.com/${repo}/releases/download/${tag}/update-catalog.json`, catalogPath, 64 * 1024);
+    await downloadPublicAsset(`https://github.com/${repo}/releases/download/${tag}/update-catalog.json`, catalogPath, 64 * 1024);
     const catalog = validateCatalog(JSON.parse(await readFile(catalogPath, 'utf8')));
     assert.equal(tag, `v${catalog.version}`);
     const release = api(`releases/tags/${tag}`);
@@ -78,7 +78,7 @@ export async function preparePublishedFeed(tag, output) {
     const runs = api(`actions/runs?head_sha=${catalog.commit}&per_page=100`, true).flatMap(page => page.workflow_runs);
     assertReleaseReady(catalog, release, tagCommit, runs);
     for (const artifact of catalog.artifacts) {
-      const actual = await download(artifact.url, join(temporary, artifact.name), artifact.size);
+      const actual = await downloadPublicAsset(artifact.url, join(temporary, artifact.name), artifact.size);
       assert.deepEqual(actual, { size: artifact.size, sha256: artifact.sha256, sha512: artifact.sha512 }, `Installer verification failed: ${artifact.name}`);
     }
     await writePages(catalog, output);
