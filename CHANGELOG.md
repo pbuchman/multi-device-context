@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Clicking an image opens an in-app enlarged preview; right-click and
-  Control-click expose a direct **Copy image** action.
+  Control-click expose a direct **Copy image** action, with non-PNG formats
+  decoded to PNG for reliable clipboard support.
 - AI titles can inspect supported first images up to 5 MiB, use the language of
   meaningful visible text, and default to English when the language is unclear.
 

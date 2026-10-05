@@ -9,6 +9,7 @@ import { prepareHistory } from "./history.js";
 import { ContextOperations } from "./operations.js";
 import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
+import { browserCopyFile, clipboardImageFile } from "./clipboard-image.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
 import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type SyntheticEvent } from "react";
@@ -888,7 +889,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (item.content.kind === "attachment") {
         const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
         if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
-        await services.copyFile({ name: item.content.name, contentType: item.content.contentType, bytes });
+        await services.copyFile(await clipboardImageFile({ name: item.content.name, contentType: item.content.contentType, bytes }));
       } else await services.copyText(item.content.text);
       showToast("Copied to this device");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Copy failed"); }
@@ -1149,14 +1150,6 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   </>;
 }
 
-
-async function browserCopyFile(file: NativeFile): Promise<void> {
-  if (!file.contentType.startsWith("image/") || file.contentType === "image/svg+xml" || !("ClipboardItem" in window)) {
-    throw new Error("File copying is available in the desktop app. Use Save in this browser.");
-  }
-  const item = new ClipboardItem({ [file.contentType]: new Blob([bytesBuffer(file.bytes)], { type: file.contentType }) });
-  await navigator.clipboard.write([item]);
-}
 
 async function browserSaveFile(file: NativeFile): Promise<boolean> {
   const url = URL.createObjectURL(new Blob([bytesBuffer(file.bytes)], { type: file.contentType }));

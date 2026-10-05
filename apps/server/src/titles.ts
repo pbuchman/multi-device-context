@@ -114,6 +114,14 @@ export class TitleWorker {
       if (!(await this.settings?.get(uid))?.aiTitlesEnabled) {
         await this.db.runTransaction(async tx => { const current = (await tx.get(ref)).data(); if (current?.titleState === "pending" && current.titleLease === lease) tx.update(ref, { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() }); }); return;
       }
+      const current = await this.db.runTransaction(async tx => {
+        const context = await tx.get(ref); const contextData = context.data();
+        if (!context.exists || contextData?.deleting !== false || contextData.titleState !== "pending" || contextData.titleLease !== lease || contextData.firstItemId !== job.itemId) return false;
+        const item = await tx.get(ref.collection("items").doc(job.itemId)); const itemData = item.data();
+        const content = ContentSchema.safeParse(itemData?.content);
+        return item.exists && itemData?.deleting === false && itemData.ready === true && content.success && titleInput(content.data) === titleInput(job.content);
+      });
+      if (!current) return;
       title = await generateTitle(this.key!, this.model, input);
     }
     catch (error) { retry = !(error instanceof TitleFailure) || error.retryable; diagnostic("ai-title", retry ? "provider-retry" : "provider-rejected"); }

@@ -83,6 +83,21 @@ describe("agent persistence and title races", () => {
     expect((await store.getContext(owner, id)).title).toBe("Polski raport wdrożenia");
     vi.unstubAllGlobals();
   });
+  it("does not send image bytes deleted while the title worker is reading them", async () => {
+    const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: true });
+    const id = randomUUID(), itemId = randomUUID(), bytes = new Uint8Array([137, 80, 78, 71]);
+    await store.writeItem(owner, id, { id: itemId, content: { kind: "attachment", name: "private.png", contentType: "image/png", size: bytes.byteLength } }, true);
+    await store.upload(owner, id, itemId, Readable.from([Buffer.from(bytes)]));
+    let release!: () => void;
+    const reader = vi.fn(() => new Promise<Uint8Array>(resolve => { release = () => resolve(bytes); }));
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const pending = new TitleWorker(db, "test-only", undefined, settings, reader).process(store.context(owner, id));
+    await vi.waitFor(() => expect(reader).toHaveBeenCalled());
+    await backend.deleteItem(owner, id, itemId);
+    release(); await pending;
+    expect(fetcher).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
   it("R5: deleting the unfinished first attachment promotes a ready sibling", async () => {
     const id = randomUUID(), first = randomUUID(), next = randomUUID();
     await store.writeItem(owner, id, { id: first, content: { kind: "attachment", name: "cancel.bin", contentType: "application/octet-stream", size: 3 } }, true);

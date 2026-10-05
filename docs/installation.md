@@ -82,6 +82,11 @@ An empty new chat stays out of the list until it has content or a name. Search
 shows a single clear control only while a query is present. Each message has
 Copy, Delete, and More controls; deleting the final message also deletes the
 empty context after confirmation.
+Click an image message to open a full-window preview inside the application.
+Right-click or Control-click the thumbnail or enlarged image and choose **Copy
+image**. PNG images keep their bytes; other browser-renderable image formats are
+decoded to PNG for consistent clipboard support. Saving still preserves the
+original file.
 With a mouse or trackpad, chat rows are 32 px high; touch devices retain 48 px
 hit targets. In wide windows, drag the separator beside the sidebar to resize it
 between 220 and 480 px. The main panel keeps at least 360 px. Focus the separator
