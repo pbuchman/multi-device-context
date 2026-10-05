@@ -17,6 +17,7 @@ export function useNavigation(namespace: string, initialId?: Id) {
   const failed = useRef<(() => Promise<unknown>)[]>([]);
   const initialized = useRef(false);
   const revisionRef = useRef(0);
+  const reloadSequence = useRef(0);
   const update = useCallback((fn: (s: typeof state) => typeof state) => {
     const before = latest.current; const next = fn(before);
     const a = before.drafts[before.id], b = next.drafts[next.id];
@@ -24,8 +25,12 @@ export function useNavigation(namespace: string, initialId?: Id) {
     latest.current = next; setState(next);
   }, []);
   const reload = useCallback(async () => {
+    const sequence = ++reloadSequence.current;
     const drafts = await store.list();
     const removed = await store.isRemoved(latest.current.id);
+    // A completed write may already have started a newer reload. Its snapshot
+    // must not be replaced by this older read after the write queue is idle.
+    if (sequence !== reloadSequence.current) return;
     if (!busy.current && removed) {
       const id = crypto.randomUUID(); update(() => ({ id, drafts: { ...drafts, [id]: emptyDraft() } })); history.replaceState({}, "", "/"); return;
     }

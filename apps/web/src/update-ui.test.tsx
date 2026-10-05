@@ -70,6 +70,27 @@ it("does not restore an old ready result after a newer event arrives", async () 
   expect(installUpdate).not.toHaveBeenCalled();
 });
 
+it("retries a failed download without treating its existing error as a new failure", async () => {
+  const native = nativeClient();
+  const view = renderHook(() => useUpdateController(options(native.value)));
+  act(() => native.emit({ ...ready("win32"), status: "error", message: "Download interrupted" }));
+  await act(async () => view.result.current.updateNative());
+  expect(native.value.startUpdate).toHaveBeenCalledOnce();
+  expect(native.value.installUpdate).toHaveBeenCalledOnce();
+  expect(view.result.current.error).toBeUndefined();
+});
+
+it("retries catalog discovery instead of installing when no version was discovered", () => {
+  const check = vi.fn(); const updateNative = vi.fn();
+  render(<HostedUpdateNotice updates={{
+    uiBuild: "dev", checking: false, updating: false, check, updateNative, reloadHosted: vi.fn(),
+    nativeState: { status: "error", platform: "android", currentVersion: "1.0.0", message: "Check failed" },
+  }} />);
+  screen.getByRole("button", { name: "Retry check" }).click();
+  expect(check).toHaveBeenCalledOnce();
+  expect(updateNative).not.toHaveBeenCalled();
+});
+
 it("does not install after unmount or session replacement during download", async () => {
   for (const replacement of [false, true]) {
     const download = deferred<UpdateState>();

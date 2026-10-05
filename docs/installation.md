@@ -174,18 +174,18 @@ the result appear in the app's update banner and Settings. The updater does not
 send a GitHub token or other account credential with its public catalog and
 release downloads.
 
-On Windows, choose **Download update**, then **Update and restart** after the
-download has been verified. The app waits for local draft and pending-send writes,
+On Windows, choose **Update and restart**. The app downloads and verifies the
+installer, then waits for local draft and pending-send writes,
 then runs the verified per-user NSIS update in the existing installation location.
 Closing the window or using ordinary Quit never installs a downloaded update.
 The protected login, startup preference and retained application data stay in
 place. If the update is cancelled or fails verification, the installed version
 continues to run and can be retried.
 
-On macOS, choose **Download update**, then **Install update**. The app verifies
-the complete DMG again and opens it. Quit Multi Device Context, drag the new app
+On macOS, choose **Download DMG**. The app downloads, verifies, and opens the
+DMG; **Open DMG** reopens an already verified download. Quit Multi Device Context, drag the new app
 over **Multi Device Context** in Applications, eject the disk image and reopen the
-app. This manual replacement is required because the private macOS build is
+app. This manual replacement is required because the macOS build is
 ad-hoc signed and not notarized. Keep using the per-app Gatekeeper steps above;
 the updater does not remove quarantine attributes or bypass Gatekeeper.
 

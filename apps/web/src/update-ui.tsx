@@ -123,6 +123,7 @@ export function useUpdateController(options: {
   const updateNative = useCallback(async () => {
     if (!options.nativeUpdates || updating) return;
     const generation = nativeGeneration.current;
+    const initialRevision = nativeRevision.current;
     const current = () => nativeGeneration.current === generation && options.current();
     const owner = Symbol("native update");
     const freeze = (value: boolean) => {
@@ -141,7 +142,8 @@ export function useUpdateController(options: {
         current,
         canInstall: () => {
           const status = latestNativeState.current?.status;
-          return options.canInstall() && status !== "error" && status !== "installing";
+          return options.canInstall() && status !== "installing"
+            && (status !== "error" || nativeRevision.current === initialRevision);
         },
       });
     } catch (cause) {
@@ -186,7 +188,7 @@ export function useUpdateController(options: {
 }
 
 function nativeActionLabel(state: UpdateState): string {
-  if (state.status === "error") return "Retry update";
+  if (state.status === "error") return state.availableVersion ? "Retry update" : "Retry check";
   if (state.platform === "win32") return "Update and restart";
   if (state.platform === "darwin") return state.status === "ready" ? "Open DMG" : "Download DMG";
   return "Download and install";
@@ -194,6 +196,7 @@ function nativeActionLabel(state: UpdateState): string {
 
 export function HostedUpdateNotice({ updates }: { updates: UpdateController }) {
   const native = updates.nativeState;
+  const retryCheck = native?.status === "error" && !native.availableVersion;
   const nativeNotice = native && ["available", "downloading", "ready", "installing", "error"].includes(native.status);
   const nativeFailure = native?.status === "error" ? native.message ?? "The native update failed."
     : updates.errorAction === "update" ? updates.error : undefined;
@@ -210,7 +213,7 @@ export function HostedUpdateNotice({ updates }: { updates: UpdateController }) {
           : <><span>Native version {native.availableVersion}{native.progress?.total ? ` · ${bytes(native.progress.total)}` : ""} is {native.status === "ready" ? "ready" : "available"}.</span>
             {native.message ? <small>{native.message}</small> : null}</>}
       </div>
-      {nativeFailure || native.status === "available" || native.status === "ready" || native.status === "error" ? <button type="button" disabled={updates.updating} onClick={() => void updates.updateNative()}>{nativeFailure ? "Retry update" : nativeActionLabel(native)}</button> : null}
+      {nativeFailure || native.status === "available" || native.status === "ready" || native.status === "error" ? <button type="button" disabled={updates.updating || updates.checking} onClick={() => void (retryCheck ? updates.check() : updates.updateNative())}>{retryCheck ? "Retry check" : nativeFailure ? "Retry update" : nativeActionLabel(native)}</button> : null}
     </div> : null}
     {updates.hostedBuild ? <div className="update-notice" role={hostedFailure ? "alert" : "status"}>
       <span>{hostedFailure ?? "A newer UI build is available."}</span>
@@ -242,7 +245,7 @@ export function UpdateSettings({ updates, platformKind, hasNativeHost }: {
     <div className="update-actions">
       <button type="button" disabled={updates.checking || updates.updating} onClick={() => void updates.check()}>{updates.checking ? "Checking…" : "Check for updates"}</button>
       {updates.hostedBuild ? <button type="button" className="primary" disabled={updates.updating} onClick={() => void updates.reloadHosted()}>Reload to update</button> : null}
-      {nativeAvailable && state?.status !== "downloading" ? <button type="button" className="primary" disabled={updates.updating} onClick={() => void updates.updateNative()}>{updates.updating ? "Updating…" : nativeActionLabel(state)}</button> : null}
+      {nativeAvailable && state?.status !== "downloading" ? <button type="button" className="primary" disabled={updates.updating || updates.checking} onClick={() => void (state.status === "error" && !state.availableVersion ? updates.check() : updates.updateNative())}>{updates.updating ? "Updating…" : nativeActionLabel(state)}</button> : null}
     </div>
     {platformKind === "android" && !hasNativeHost ? <p className="update-detail">Install the current Android app to enable native updates.</p> : null}
   </section>;

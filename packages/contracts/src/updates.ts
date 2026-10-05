@@ -224,7 +224,7 @@ export const UpdateStateSchema = z
   })
   .strict()
   .superRefine((state, context) => {
-    if (state.status !== "available" && state.status !== "ready") return;
+    if (state.status !== "available" && state.status !== "downloading" && state.status !== "ready") return;
     if (!state.availableVersion) {
       context.addIssue({ code: "custom", path: ["availableVersion"], message: "An available installer must identify its version" });
     }
