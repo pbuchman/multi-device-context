@@ -171,7 +171,7 @@ async function uninstallWindowsFixture(required = false) {
   let registryPending = false;
   while (Date.now() < deadline) {
     if (!await access(installedExecutable).then(() => true, () => false)) {
-      const uninstallRegistry = await runCapture("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall", "/s"]).catch(() => "");
+      const uninstallRegistry = await runCapture("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall", "/s"]);
       registryPending = uninstallRegistry.toLocaleLowerCase("en-US").includes(directory.toLocaleLowerCase("en-US"));
       if (!registryPending) {
         installedExecutable = undefined;
@@ -398,7 +398,19 @@ try {
   report.failure = error instanceof Error ? error.stack ?? error.message : String(error);
   process.exitCode = 1;
 } finally {
-  await app?.close().catch(() => {});
+  if (app) {
+    let closeDeadline;
+    const closed = await Promise.race([
+      app.close().then(() => true, () => false),
+      new Promise(resolvePromise => { closeDeadline = setTimeout(() => resolvePromise(false), 20_000); }),
+    ]);
+    clearTimeout(closeDeadline);
+    if (!closed) {
+      app.process().kill("SIGKILL");
+      report.passed = false; process.exitCode = 1;
+      report.cleanupFailure = "The test application did not close; its fixture process was terminated.";
+    }
+  }
   await detachVolumes();
   await server?.close().catch(() => {});
   try { await uninstallWindowsFixture(false); }
