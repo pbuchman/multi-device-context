@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { access, mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +32,7 @@ const aVersion = previousVersion(bVersion);
 const port = Number(process.env.MDC_NATIVE_UPDATE_TEST_PORT ?? "48765");
 assert(Number.isSafeInteger(port) && port >= 1024 && port <= 65535, "Invalid fixture HTTPS port");
 const reportPath = resolve(process.env.MDC_NATIVE_UPDATE_REPORT ?? join(desktopDirectory, "release/native-update-a-to-b.json"));
-const privateRoot = await mkdtemp(join(tmpdir(), "mdc-native-update-a-to-b-"));
+const privateRoot = await realpath(await mkdtemp(join(tmpdir(), "mdc-native-update-a-to-b-")));
 await mkdir(dirname(reportPath), { recursive: true });
 const report = {
   platform: process.platform,
