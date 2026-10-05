@@ -168,17 +168,21 @@ async function uninstallWindowsFixture(required = false) {
   }
   await run(join(directory, uninstaller), ["/S"], { deadlineMs: 60_000 });
   const deadline = Date.now() + 60_000;
+  let registryPending = false;
   while (Date.now() < deadline) {
     if (!await access(installedExecutable).then(() => true, () => false)) {
       const uninstallRegistry = await runCapture("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall", "/s"]).catch(() => "");
-      if (uninstallRegistry.toLocaleLowerCase("en-US").includes(directory.toLocaleLowerCase("en-US")))
-        throw new Error("The isolated NSIS uninstall registry still references the non-default test location.");
-      installedExecutable = undefined;
-      return;
+      registryPending = uninstallRegistry.toLocaleLowerCase("en-US").includes(directory.toLocaleLowerCase("en-US"));
+      if (!registryPending) {
+        installedExecutable = undefined;
+        return;
+      }
     }
     await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
   }
-  throw new Error("The isolated NSIS uninstaller did not remove the test installation.");
+  throw new Error(registryPending
+    ? "The isolated NSIS uninstall registry still references the non-default test location."
+    : "The isolated NSIS uninstaller did not remove the test installation.");
 }
 
 async function findOpenSsl() {
