@@ -83,9 +83,11 @@ jobs:
         run: pnpm --filter @mdc/mobile android:lint
       - name: Start isolated Android update-test emulator
         run: |
+          trap 'code=$?; if [ "$code" -ne 0 ]; then tail -150 "$RUNNER_TEMP/mdc-update-emulator.log" 2>/dev/null || true; fi; exit "$code"' EXIT
           sdkmanager "emulator" "system-images;android-36;google_apis;x86_64"
           printf 'no\n' | avdmanager create avd --force --name mdc_update_ci --package "system-images;android-36;google_apis;x86_64"
           sudo chmod a+rw /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
           "$ANDROID_HOME/emulator/emulator" -avd mdc_update_ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader > "$RUNNER_TEMP/mdc-update-emulator.log" 2>&1 &
           timeout 180 adb wait-for-device
           timeout 180 bash -c 'until adb shell getprop sys.boot_completed | tr -d "\r" | grep -q "^1$"; do sleep 2; done'
@@ -96,6 +98,14 @@ jobs:
         run: |
           apps/mobile/android/gradlew -p apps/mobile/android connectedDebugAndroidTest \
             -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest
+      - name: Preserve Android emulator diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: android-emulator-diagnostics
+          path: ${{ runner.temp }}/mdc-update-emulator.log
+          if-no-files-found: ignore
+          retention-days: 7
       # Configuration tests assert that fixture mode rejects release generation;
       # Gradle independently rejects fixture release tasks and private signing.
       # No production configuration, private key, or APK publication belongs here.
