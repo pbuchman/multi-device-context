@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-import type { NativeUpdates } from "./updates.js";
+import type { NativeUpdates } from "./updates.ts";
 
-export * from "./updates.js";
+export * from "./updates.ts";
 
 export const MAX_TEXT_BYTES = 262_144;
 export const MAX_ATTACHMENT_BYTES = 104_857_600;
