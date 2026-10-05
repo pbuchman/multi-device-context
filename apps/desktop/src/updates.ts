@@ -119,9 +119,12 @@ export class NativeUpdateManager implements NativeUpdates {
       }
     } catch {
       this.#setState({
-        status: "error",
-        availableVersion: this.#state.availableVersion,
-        message: "The verified update could not be opened. Download it again and retry.",
+        status: "ready",
+        availableVersion: version,
+        progress: { transferred: verified.artifact.size, total: verified.artifact.size, percent: 100 },
+        message: this.#options.platform === "darwin"
+          ? "The verified update could not be opened. Retry when you are ready."
+          : "The verified update installer could not be started. Retry when you are ready.",
       });
       throw new Error("The verified update could not be installed.");
     }

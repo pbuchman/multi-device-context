@@ -180,7 +180,9 @@ then runs the verified per-user NSIS update in the existing installation locatio
 Closing the window or using ordinary Quit never installs a downloaded update.
 The protected login, startup preference and retained application data stay in
 place. If the update is cancelled or fails verification, the installed version
-continues to run and can be retried.
+continues to run and can be retried. If Windows refuses to start the verified
+installer, the app stays open, reports the failure and keeps the verified update
+ready for another attempt.
 
 On macOS, choose **Download DMG**. The app downloads, verifies, and opens the
 DMG; **Open DMG** reopens an already verified download. Quit Multi Device Context, drag the new app

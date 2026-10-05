@@ -1,11 +1,18 @@
 import { EventEmitter } from "node:events";
+import type { ChildProcess, spawn as nodeSpawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CancellationToken, UpdateInfo } from "electron-updater";
 import { NsisUpdater } from "electron-updater";
-import { WindowsUpdateBackend, validateWindowsUpdateInfo, type WindowsUpdater } from "./windows-updates.js";
+import {
+  AwaitedWindowsInstaller,
+  WindowsUpdateBackend,
+  validateWindowsUpdateInfo,
+  type WindowsInstallerLauncher,
+  type WindowsUpdater,
+} from "./windows-updates.js";
 import { windowsUpdateFixture } from "./update-test-fixtures.js";
 
 const directories: string[] = [];
@@ -44,9 +51,11 @@ function updaterFixture(info: ReturnType<typeof updateInfo>, path: string) {
       emitter.emit("update-downloaded", { ...info, downloadedFile: path });
       return [path];
     }),
-    quitAndInstall: vi.fn(),
   });
   return emitter;
+}
+function installerFixture(): WindowsInstallerLauncher & { launch: ReturnType<typeof vi.fn> } {
+  return { launch: vi.fn(async () => {}) };
 }
 
 describe("Windows NSIS metadata", () => {
@@ -68,7 +77,7 @@ describe("Windows NSIS metadata", () => {
   it("disables automatic download/install, downgrade, auth and web installers", async () => {
     const { artifact, path } = await downloadedInstaller();
     const updater = updaterFixture(updateInfo(artifact), path);
-    new WindowsUpdateBackend(updater);
+    new WindowsUpdateBackend(updater, installerFixture());
     expect(updater).toMatchObject({
       autoDownload: false,
       autoInstallOnAppQuit: false,
@@ -91,7 +100,7 @@ describe("Windows NSIS metadata", () => {
       whenReady: async () => {}, relaunch: vi.fn(), quit: vi.fn(), onQuit,
     };
     const updater = new InspectedNsisUpdater(null, app);
-    new WindowsUpdateBackend(updater as unknown as WindowsUpdater);
+    new WindowsUpdateBackend(updater as unknown as WindowsUpdater, installerFixture());
     expect(updater.channel).toBeNull();
     expect(updater.allowPrerelease).toBe(false);
     expect(updater.allowDowngrade).toBe(false);
@@ -103,34 +112,35 @@ describe("Windows NSIS metadata", () => {
   it("cross-checks the fixed feed before download and re-verifies before explicit install", async () => {
     const { artifact, path } = await downloadedInstaller();
     const updater = updaterFixture(updateInfo(artifact), path);
-    const backend = new WindowsUpdateBackend(updater);
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer);
     await backend.prepare(artifact, "0.5.5");
     const verified = await backend.download(artifact, vi.fn());
     expect(updater.downloadUpdate).toHaveBeenCalledOnce();
     await backend.install(verified);
-    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
+    expect(installer.launch).toHaveBeenCalledWith(verified.path);
   });
 
   it("never invokes NSIS when the verified cache changes after download", async () => {
     const { artifact, path } = await downloadedInstaller();
     const updater = updaterFixture(updateInfo(artifact), path);
-    const backend = new WindowsUpdateBackend(updater);
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer);
     await backend.prepare(artifact, "0.5.5");
     const verified = await backend.download(artifact, vi.fn());
     await writeFile(path, "tampered");
     await expect(backend.install(verified)).rejects.toThrow(/changed|size|checksum/i);
-    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(installer.launch).not.toHaveBeenCalled();
   });
 
-  it("rejects a synchronous updater error instead of swallowing a failed install", async () => {
+  it("awaits an installer launch failure instead of closing the application", async () => {
     const { artifact, path } = await downloadedInstaller();
     const updater = updaterFixture(updateInfo(artifact), path);
-    const backend = new WindowsUpdateBackend(updater);
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer);
     await backend.prepare(artifact, "0.5.5");
     const verified = await backend.download(artifact, vi.fn());
-    (updater.quitAndInstall as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
-      updater.emit("error", new Error("NSIS launch failed"));
-    });
+    installer.launch.mockRejectedValueOnce(new Error("NSIS launch failed"));
     await expect(backend.install(verified)).rejects.toThrow(/NSIS launch failed/i);
   });
 
@@ -141,10 +151,11 @@ describe("Windows NSIS metadata", () => {
       updater.emit("update-cancelled", updateInfo(artifact));
       return [path];
     });
-    const backend = new WindowsUpdateBackend(updater);
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer);
     await backend.prepare(artifact, "0.5.5");
     await expect(backend.download(artifact, vi.fn())).rejects.toThrow(/cancelled/i);
-    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(installer.launch).not.toHaveBeenCalled();
   });
 
   it("cancels download progress that exceeds or disagrees with the selected artifact", async () => {
@@ -160,11 +171,12 @@ describe("Windows NSIS metadata", () => {
       });
       return [path];
     });
-    const backend = new WindowsUpdateBackend(updater);
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer);
     await backend.prepare(artifact, "0.5.5");
     await expect(backend.download(artifact, vi.fn())).rejects.toThrow(/size|progress/i);
     expect(token?.cancelled).toBe(true);
-    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(installer.launch).not.toHaveBeenCalled();
   });
 
   it("cancels a stalled updater download at the fixed deadline", async () => {
@@ -175,11 +187,96 @@ describe("Windows NSIS metadata", () => {
       token = value;
       return new Promise<string[]>(() => {});
     });
-    const backend = new WindowsUpdateBackend(updater, 5);
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer, 5);
     await backend.prepare(artifact, "0.5.5");
     await expect(backend.download(artifact, vi.fn())).rejects.toThrow(/timed out/i);
     expect(token?.cancelled).toBe(true);
-    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+    expect(installer.launch).not.toHaveBeenCalled();
   });
 
+});
+
+type SpawnedChild = ChildProcess & EventEmitter & { unref: ReturnType<typeof vi.fn> };
+function spawnFixture() {
+  const children: SpawnedChild[] = [];
+  const spawn = vi.fn(() => {
+    const child = new EventEmitter() as SpawnedChild;
+    child.unref = vi.fn<() => void>(() => {});
+    children.push(child);
+    return child;
+  }) as unknown as typeof nodeSpawn;
+  return { spawn, children };
+}
+function launchFixture() {
+  const { spawn, children } = spawnFixture();
+  const events: string[] = [];
+  const scheduled: Array<() => void> = [];
+  const openPath = vi.fn(async () => "");
+  const launcher = new AwaitedWindowsInstaller({
+    resourcesPath: "C:\\Program Files\\Multi Device Context\\resources",
+    spawn,
+    openPath,
+    beforeQuitForUpdate: () => { events.push("before-quit-for-update"); },
+    quit: () => { events.push("quit"); },
+    scheduleQuit: task => { scheduled.push(task); },
+  });
+  return { launcher, children, events, scheduled, openPath, spawn };
+}
+function launchError(code: string, message = "launch failed"): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
+describe("awaited Windows NSIS launch", () => {
+  it("waits for the OS spawn acknowledgement before scheduling the update quit", async () => {
+    const fixture = launchFixture();
+    const launched = fixture.launcher.launch("C:\\cache\\selected-setup.exe");
+    expect(fixture.spawn).toHaveBeenCalledWith(
+      "C:\\cache\\selected-setup.exe",
+      ["--updated", "--force-run"],
+      { detached: true, shell: false, stdio: "ignore" },
+    );
+    expect(fixture.scheduled).toHaveLength(0);
+    fixture.children[0]!.emit("spawn");
+    await launched;
+    expect(fixture.children[0]!.unref).toHaveBeenCalledOnce();
+    expect(fixture.events).toEqual([]);
+    expect(fixture.scheduled).toHaveLength(1);
+    fixture.scheduled[0]!();
+    expect(fixture.events).toEqual(["before-quit-for-update", "quit"]);
+  });
+
+  it("rejects a deferred spawn failure without scheduling application quit", async () => {
+    const fixture = launchFixture();
+    const launched = fixture.launcher.launch("C:\\cache\\selected-setup.exe");
+    fixture.children[0]!.emit("error", launchError("ENOEXEC"));
+    await expect(launched).rejects.toThrow(/launch failed/i);
+    expect(fixture.scheduled).toHaveLength(0);
+    expect(fixture.events).toEqual([]);
+  });
+
+  it("awaits the fixed elevate helper fallback and rejects its deferred failure", async () => {
+    const fixture = launchFixture();
+    const launched = fixture.launcher.launch("C:\\cache\\selected-setup.exe");
+    fixture.children[0]!.emit("error", launchError("EACCES"));
+    await vi.waitFor(() => expect(fixture.children).toHaveLength(2));
+    expect(fixture.spawn).toHaveBeenLastCalledWith(
+      join("C:\\Program Files\\Multi Device Context\\resources", "elevate.exe"),
+      ["C:\\cache\\selected-setup.exe", "--updated", "--force-run"],
+      { detached: true, shell: false, stdio: "ignore" },
+    );
+    fixture.children[1]!.emit("error", launchError("EACCES", "elevation failed"));
+    await expect(launched).rejects.toThrow(/elevation failed/i);
+    expect(fixture.scheduled).toHaveLength(0);
+  });
+
+  it("awaits the shell fallback and rejects its asynchronous error result", async () => {
+    const fixture = launchFixture();
+    fixture.openPath.mockResolvedValueOnce("The system refused the installer");
+    const launched = fixture.launcher.launch("C:\\cache\\selected-setup.exe");
+    fixture.children[0]!.emit("error", launchError("ENOENT"));
+    await expect(launched).rejects.toThrow(/system refused/i);
+    expect(fixture.openPath).toHaveBeenCalledWith("C:\\cache\\selected-setup.exe");
+    expect(fixture.scheduled).toHaveLength(0);
+  });
 });

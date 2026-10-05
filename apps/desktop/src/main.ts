@@ -43,7 +43,7 @@ import {
 } from "./security.js";
 import { MacUpdateBackend } from "./mac-updates.js";
 import { NativeUpdateManager } from "./updates.js";
-import { WindowsUpdateBackend, type WindowsUpdater } from "./windows-updates.js";
+import { AwaitedWindowsInstaller, WindowsUpdateBackend, type WindowsUpdater } from "./windows-updates.js";
 import { installDesktopUpdate } from "./update-install.js";
 import { completeCommandAction, registerTrustedIpcHandler } from "./desktop-ipc.js";
 
@@ -165,10 +165,18 @@ async function start(): Promise<void> {
     throw new Error("This desktop package does not support native updates on this platform.");
   const backend = process.platform === "darwin"
     ? new MacUpdateBackend(join(directory, "updates"), shell)
-    : new WindowsUpdateBackend(new NsisUpdater({
-      provider: "generic",
-      url: WINDOWS_UPDATE_FEED_URL,
-    }) as unknown as WindowsUpdater);
+    : new WindowsUpdateBackend(
+      new NsisUpdater({
+        provider: "generic",
+        url: WINDOWS_UPDATE_FEED_URL,
+      }) as unknown as WindowsUpdater,
+      new AwaitedWindowsInstaller({
+        resourcesPath: process.resourcesPath,
+        openPath: path => shell.openPath(path),
+        beforeQuitForUpdate: () => { electronAutoUpdater.emit("before-quit-for-update"); },
+        quit: () => { app.quit(); },
+      }),
+    );
   updates = new NativeUpdateManager({
     platform: process.platform,
     arch: process.arch,

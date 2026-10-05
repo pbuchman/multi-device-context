@@ -1,5 +1,6 @@
 import type { EventEmitter } from "node:events";
-import { basename } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+import { basename, join } from "node:path";
 import { CancellationToken, type ProgressInfo, type UpdateCheckResult, type UpdateDownloadedEvent, type UpdateInfo } from "electron-updater";
 import { MAX_UPDATE_ARTIFACT_BYTES, type WindowsUpdateArtifact } from "@mdc/contracts";
 import {
@@ -21,7 +22,83 @@ export interface WindowsUpdater extends EventEmitter {
   requestHeaders: Record<string, string> | null;
   checkForUpdates(): Promise<UpdateCheckResult | null>;
   downloadUpdate(cancellationToken?: CancellationToken): Promise<string[]>;
-  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+}
+
+export interface WindowsInstallerLauncher {
+  launch(installerPath: string): Promise<void>;
+}
+
+interface AwaitedWindowsInstallerOptions {
+  resourcesPath: string;
+  openPath(path: string): Promise<string>;
+  beforeQuitForUpdate(): void;
+  quit(): void;
+  spawn?: typeof spawn;
+  scheduleQuit?: (task: () => void) => void;
+}
+
+function spawnAcknowledged(
+  spawnProcess: typeof spawn,
+  command: string,
+  args: string[],
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let child: ChildProcess;
+    try {
+      child = spawnProcess(command, args, { detached: true, shell: false, stdio: "ignore" });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
+function launchErrorCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+}
+
+// electron-updater 6.8.9's NsisUpdater returns from doInstall before its
+// detached spawn can fail, while BaseUpdater schedules app.quit immediately.
+// Keep its feed/download cache, but await the same NSIS launch here.
+export class AwaitedWindowsInstaller implements WindowsInstallerLauncher {
+  readonly #options: AwaitedWindowsInstallerOptions;
+
+  constructor(options: AwaitedWindowsInstallerOptions) {
+    this.#options = options;
+  }
+
+  async launch(installerPath: string): Promise<void> {
+    const args = ["--updated", "--force-run"];
+    const spawnProcess = this.#options.spawn ?? spawn;
+    try {
+      await spawnAcknowledged(spawnProcess, installerPath, args);
+    } catch (error) {
+      const code = launchErrorCode(error);
+      if (code === "UNKNOWN" || code === "EACCES") {
+        await spawnAcknowledged(
+          spawnProcess,
+          join(this.#options.resourcesPath, "elevate.exe"),
+          [installerPath, ...args],
+        );
+      } else if (code === "ENOENT") {
+        const message = await this.#options.openPath(installerPath);
+        if (message) throw new Error(`Windows could not open the update installer: ${message}`);
+      } else {
+        throw error;
+      }
+    }
+    (this.#options.scheduleQuit ?? setImmediate)(() => {
+      this.#options.beforeQuitForUpdate();
+      this.#options.quit();
+    });
+  }
 }
 
 function windowsArtifact(artifact: DesktopUpdateArtifact): WindowsUpdateArtifact {
@@ -56,12 +133,18 @@ export function validateWindowsUpdateInfo(
 
 export class WindowsUpdateBackend implements UpdateBackend {
   readonly #updater: WindowsUpdater;
+  readonly #installer: WindowsInstallerLauncher;
   readonly #downloadTimeoutMs: number;
   #artifact: WindowsUpdateArtifact | undefined;
   #version: string | undefined;
 
-  constructor(updater: WindowsUpdater, downloadTimeoutMs = 15 * 60_000) {
+  constructor(
+    updater: WindowsUpdater,
+    installer: WindowsInstallerLauncher,
+    downloadTimeoutMs = 15 * 60_000,
+  ) {
     this.#updater = updater;
+    this.#installer = installer;
     if (!Number.isSafeInteger(downloadTimeoutMs) || downloadTimeoutMs <= 0)
       throw new Error("Invalid Windows update download deadline.");
     this.#downloadTimeoutMs = downloadTimeoutMs;
@@ -148,17 +231,7 @@ export class WindowsUpdateBackend implements UpdateBackend {
   async install(verified: VerifiedUpdate): Promise<void> {
     if (verified.artifact.platform !== "win32" || !this.#artifact || verified.artifact.url !== this.#artifact.url)
       throw new Error("The cached Windows update is no longer selected.");
-    await reverifyDownloadedArtifact(verified);
-    let installError: Error | undefined;
-    const onError = (error: unknown) => {
-      installError = error instanceof Error ? error : new Error("Windows updater could not start the installer.");
-    };
-    this.#updater.on("error", onError);
-    try {
-      this.#updater.quitAndInstall(false, true);
-      if (installError) throw installError;
-    } finally {
-      this.#updater.off("error", onError);
-    }
+    const path = await reverifyDownloadedArtifact(verified);
+    await this.#installer.launch(path);
   }
 }

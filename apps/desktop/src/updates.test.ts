@@ -130,4 +130,26 @@ describe("native update state", () => {
     await expect(downloadFailure.manager.startUpdate()).resolves.toMatchObject({ status: "error" });
     await expect(downloadFailure.manager.installUpdate()).rejects.toThrow(/ready/i);
   });
+
+  it("keeps a verified update ready for retry when installer launch fails", async () => {
+    const { manager, backend, finishDownload } = fixture({ platform: "win32", arch: "x64", systemVersion: "10.0.0" });
+    (backend.install as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error("spawn failed"))
+      .mockResolvedValueOnce(undefined);
+    await manager.checkForUpdates();
+    const download = manager.startUpdate();
+    await vi.waitFor(() => expect(backend.download).toHaveBeenCalledOnce());
+    finishDownload();
+    await download;
+    await expect(manager.installUpdate()).rejects.toThrow(/installed/i);
+    await expect(manager.getUpdateState()).resolves.toMatchObject({
+      status: "ready",
+      availableVersion: "0.5.5",
+      progress: { percent: 100 },
+      message: expect.stringMatching(/retry/i),
+    });
+    expect(manager.isReadyToInstall()).toBe(true);
+    await manager.installUpdate();
+    expect(backend.install).toHaveBeenCalledTimes(2);
+  });
 });
