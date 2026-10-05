@@ -1,7 +1,7 @@
 {
   "name": "@mdc/desktop",
   "productName": "Multi Device Context",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "Private contexts shared across your computers",
   "author": "Multi Device Context contributors",
