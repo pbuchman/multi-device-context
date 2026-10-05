@@ -48,6 +48,25 @@ it("subscribes trusted commands without exposing IPC and unregisters readiness",
   await expect(bridge.completeCommand!(request.id, true)).rejects.toThrow("expired");
 });
 
+it("rejects command completion when the trusted main IPC handler reports an async failure", async () => {
+  vi.stubGlobal("process", { ...process, isMainFrame: true });
+  vi.stubGlobal("location", { origin: "https://app.example.test", protocol: "https:" });
+  vi.stubGlobal("MDC_APP_ORIGIN", "https://app.example.test");
+  electron.invoke.mockImplementation(async (method: string) => method === "mdc:completeCommand"
+    ? { ok: false, message: "NSIS launch failed" }
+    : { ok: true, value: undefined });
+  await import("./preload.js");
+  const bridge = electron.expose.mock.calls[0]![1] as DesktopBridge;
+  bridge.onCommand!(() => {});
+  await expect(bridge.completeCommand!("00000000-0000-4000-8000-000000000099", true)).rejects.toThrow("NSIS launch failed");
+  expect(electron.invoke).toHaveBeenLastCalledWith(
+    "mdc:completeCommand",
+    expect.stringMatching(/^[0-9a-f-]{36}$/i),
+    "00000000-0000-4000-8000-000000000099",
+    true,
+  );
+});
+
 it("validates update states, exposes parameterless update actions, and unsubscribes", async () => {
   vi.stubGlobal("process", { ...process, isMainFrame: true, platform: "win32" });
   vi.stubGlobal("location", { origin: "https://app.example.test", protocol: "https:" });
