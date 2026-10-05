@@ -1,21 +1,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import {
   ACCEPTANCE_PORT,
   acceptanceEnvironment,
   catalogForArtifact,
+  prepareMobile,
   uiTarget,
 } from '../scripts/android-update-acceptance.mjs';
 
-test('acceptance environment always forces the fixture and nonexistent signing config', () => {
-  const env = acceptanceEnvironment('/repo', { PATH: '/bin' }, '90.0.1', 10001);
+test('acceptance environment always forces the fixture and strips private signing configuration', () => {
+  const env = acceptanceEnvironment('/repo', {
+    PATH: '/bin',
+    MDC_ANDROID_KEYSTORE: '/private/release.jks',
+    MDC_ANDROID_KEY_ALIAS: 'private',
+    MDC_ANDROID_STORE_PASSWORD: 'private',
+    MDC_ANDROID_KEY_PASSWORD: 'private',
+  }, '90.0.1', 10001);
   assert.equal(env.CI, 'true');
+  assert.equal(env.MDC_APP_ORIGIN, 'https://context.example.com');
   assert.equal(env.MDC_MOBILE_CONFIG_FIXTURE, '/repo/apps/mobile/tests/fixtures/runtime-config.json');
   assert.equal(env.MDC_ANDROID_SIGNING_CONFIG, '/tmp/mdc-android-acceptance-no-signing.json');
   assert.equal(env.MDC_ANDROID_ACCEPTANCE_VERSION_NAME, '90.0.1');
   assert.equal(env.MDC_ANDROID_ACCEPTANCE_VERSION_CODE, '10001');
   assert.equal(env.MDC_ANDROID_KEYSTORE, undefined);
+  assert.equal(env.MDC_ANDROID_KEY_ALIAS, undefined);
   assert.equal(env.MDC_ANDROID_STORE_PASSWORD, undefined);
+  assert.equal(env.MDC_ANDROID_KEY_PASSWORD, undefined);
+});
+
+test('standalone acceptance prepares fixture web assets and synchronizes Capacitor before Gradle', async () => {
+  const calls = [];
+  const environment = { CI: 'true', MDC_ANDROID_SIGNING_CONFIG: '/tmp/no-signing.json' };
+
+  await prepareMobile('/repo', environment, async (program, args, options) => {
+    calls.push({ program, args, options });
+  });
+
+  const mobile = join('/repo', 'apps/mobile');
+  assert.deepEqual(calls, [
+    {
+      program: process.execPath,
+      args: ['--experimental-strip-types', 'scripts/build.mjs'],
+      options: { cwd: mobile, env: environment, echo: true },
+    },
+    {
+      program: 'pnpm',
+      args: ['exec', 'cap', 'sync', 'android'],
+      options: { cwd: mobile, env: environment, echo: true },
+    },
+  ]);
 });
 
 test('catalog pins the exact synthetic B bytes and fixed loopback HTTPS feed', () => {

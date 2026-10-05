@@ -15,6 +15,7 @@ const VERSION_B = '90.0.2';
 const CODE_A = 10001;
 const CODE_B = 10002;
 const FIXED_ORIGIN = `https://127.0.0.1:${ACCEPTANCE_PORT}`;
+const FIXTURE_APP_ORIGIN = 'https://context.example.com';
 const NO_SIGNING = '/tmp/mdc-android-acceptance-no-signing.json';
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY = resolve(SCRIPT_DIR, '../../..');
@@ -29,6 +30,7 @@ export function acceptanceEnvironment(repository, source, versionName, versionCo
   return {
     ...env,
     CI: 'true',
+    MDC_APP_ORIGIN: FIXTURE_APP_ORIGIN,
     MDC_MOBILE_CONFIG_FIXTURE: join(repository, 'apps/mobile/tests/fixtures/runtime-config.json'),
     MDC_ANDROID_SIGNING_CONFIG: NO_SIGNING,
     MDC_ANDROID_ACCEPTANCE_VERSION_NAME: versionName,
@@ -87,6 +89,12 @@ async function command(program, args, options = {}) {
   return result;
 }
 
+export async function prepareMobile(repository, environment, runCommand = command) {
+  const mobile = join(repository, 'apps/mobile');
+  await runCommand(process.execPath, ['--experimental-strip-types', 'scripts/build.mjs'], { cwd: mobile, env: environment, echo: true });
+  await runCommand('pnpm', ['exec', 'cap', 'sync', 'android'], { cwd: mobile, env: environment, echo: true });
+}
+
 async function waitFor(operation, description, timeout = 30_000) {
   const started = Date.now(); let last;
   while (Date.now() - started < timeout) {
@@ -122,6 +130,8 @@ async function main() {
     stage('ephemeral-test-ca', { certificate, privateKeyUsedForAppSigning: false });
 
     const baseEnvironment = { ...process.env, ANDROID_SERIAL: process.env.ANDROID_SERIAL };
+    await prepareMobile(REPOSITORY, acceptanceEnvironment(REPOSITORY, baseEnvironment, VERSION_A, CODE_A));
+    stage('prepared-fixture-web-and-capacitor');
     const build = async (version, code) => {
       const env = acceptanceEnvironment(REPOSITORY, baseEnvironment, version, code);
       await command('./gradlew', [':app:clean', ':app:assembleAcceptance'], { cwd: ANDROID, env, echo: true });
