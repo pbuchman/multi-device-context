@@ -30,7 +30,7 @@ describe("hosted UI metadata", () => {
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
     await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1_000);
 
-    expect(fetcher).toHaveBeenNthCalledWith(1, "/api/version", { cache: "no-store" });
+    expect(fetcher).toHaveBeenNthCalledWith(1, "/api/version", { cache: "no-store", signal: expect.any(AbortSignal) });
     expect(changes).toEqual([undefined, "b".repeat(40)]);
     monitor.dispose();
   });
@@ -46,6 +46,24 @@ describe("hosted UI metadata", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("coalesces overlapping checks into one bounded network request", async () => {
+    let resolve!: (response: Response) => void;
+    const fetcher = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Promise<Response>(done => { resolve = done; });
+    });
+    const monitor = new HostedUpdateMonitor("a".repeat(40), fetcher, vi.fn());
+    monitor.start();
+
+    const manual = monitor.check(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    resolve(new Response(JSON.stringify({ uiBuild: "b".repeat(40) })));
+    await manual;
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    monitor.dispose();
   });
 });
 
@@ -93,9 +111,26 @@ describe("optional native updates", () => {
     await prepareAndInstallNativeUpdate(native, "desktop", {
       freeze(value) { events.push(value ? "freeze" : "unfreeze"); },
       async settle() { events.push("settle"); },
+      current: () => true,
+      canInstall: () => true,
     });
 
     expect(events).toEqual(["download", "freeze", "settle", "unfreeze", "install"]);
+  });
+
+  it("stays unlocked when the desktop installer handoff rejects", async () => {
+    const events: string[] = [];
+    const native = {
+      startUpdate: async () => ({ status: "ready", platform: "win32", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 10, total: 10, percent: 100 } }) satisfies UpdateState,
+      installUpdate: async () => { events.push("install"); throw new Error("Installer launch failed"); },
+    };
+
+    await expect(prepareAndInstallNativeUpdate(native, "desktop", {
+      freeze(value) { events.push(value ? "freeze" : "unfreeze"); },
+      async settle() { events.push("settle"); }, current: () => true, canInstall: () => true,
+    })).rejects.toThrow("Installer launch failed");
+
+    expect(events).toEqual(["freeze", "settle", "unfreeze", "install"]);
   });
 
   it("keeps Android input frozen through system-installer handoff and always unlocks", async () => {
@@ -108,8 +143,28 @@ describe("optional native updates", () => {
     await expect(prepareAndInstallNativeUpdate(native, "android", {
       freeze(value) { events.push(value ? "freeze" : "unfreeze"); },
       async settle() { events.push("settle"); },
+      current: () => true,
+      canInstall: () => true,
     })).rejects.toThrow("Installation declined");
 
     expect(events).toEqual(["freeze", "settle", "install", "unfreeze"]);
+  });
+
+  it.each(["sign-out", "deletion"])("does not install after %s starts during download", async () => {
+    let finish!: (state: UpdateState) => void;
+    let safe = true;
+    const installUpdate = vi.fn(async () => undefined);
+    const pending = prepareAndInstallNativeUpdate({
+      startUpdate: () => new Promise<UpdateState>(resolve => { finish = resolve; }),
+      installUpdate,
+    }, "desktop", {
+      freeze: vi.fn(), settle: vi.fn(async () => undefined), current: () => true, canInstall: () => safe,
+    });
+
+    safe = false;
+    finish({ status: "ready", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 10, total: 10, percent: 100 } });
+
+    await expect(pending).rejects.toThrow(/Finish the current operation/);
+    expect(installUpdate).not.toHaveBeenCalled();
   });
 });

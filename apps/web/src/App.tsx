@@ -216,6 +216,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [deletionCount, setDeletionCount] = useState(0);
   const [deletionFailed, setDeletionFailed] = useState(false);
   const [activeDeletions, setActiveDeletions] = useState(0);
+  const unsafeLifecycle = useRef(false);
+  unsafeLifecycle.current = dialogBusy || accountBlocked || activeDeletions > 0;
   const [syncStreams, setSyncStreams] = useState({
     contexts: { fromCache: false, pending: false, failed: false },
     items: { fromCache: false, pending: false, failed: false },
@@ -1000,6 +1002,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     settle: settleLocalInput,
     freeze: saving => { lifecycleLocked.current = saving; setLifecycleSaving(saving); },
     reload: services.reloadPage ?? (() => window.location.reload()),
+    current: isLive,
+    canInstall: () => isLive() && !unsafeLifecycle.current && !signingOut.current
+      && (!panelRef.current || panelRef.current.kind === "settings"),
+    scope: services,
   });
   const newChat = () => {
     if (accountBlocked) return;
@@ -1105,6 +1111,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           </div></section>
           {scroll.newMessages ? <button type="button" className="new-messages" onClick={() => scroll.scrollToBottom(selectedId)}>New messages <WorkspaceIcon name="save" /></button> : null}
         </div>
+        <HostedUpdateNotice updates={updateController} />
         <ChatComposer text={text} code={codeMode} android={services.platformKind === "android"} nativeClipboard={!!services.readClipboard} blocked={accountBlocked || lifecycleSaving} sending={sendsInFlight.current.has(`${selectedId}:${navigation.revisionRef.current}`)} textareaRef={textareaRef}
           onText={value => { if (!accountBlocked && !lifecycleLocked.current) setText(value); }} onPaste={event => { trackLocalInput(receivePaste(event)); }} onKey={event => {
             if (keyboardSends({ key: event.key, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, isComposing: event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 }, services.platformKind === "android", codeMode)) { event.preventDefault(); sendText(); }
@@ -1113,7 +1120,6 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       </main>
     </div>
     {chatMenu && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
-    <HostedUpdateNotice updates={updateController} />
     {toast && !lifecycleSaving ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
     {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()}>
       {panel.kind === "context" ? <>

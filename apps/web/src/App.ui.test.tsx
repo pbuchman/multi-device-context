@@ -70,6 +70,12 @@ function services(initialContexts = contexts) {
   } };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 it.each([
   [1280, "light"],
   [360, "dark"],
@@ -105,10 +111,61 @@ it("shows native download progress and keeps update failures separate from sync 
   await waitFor(() => expect(screen.getByRole("status").textContent).toContain("1.1.0 · 2 KB"));
   await act(async () => listener?.({ status: "downloading", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 1024, total: 2048, percent: 50 } }));
 
-  expect(screen.getByText(/50%/)).toBeTruthy();
+  expect(screen.getAllByText(/50%/)).toHaveLength(2);
   await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
-  expect(screen.getByRole("alert").textContent).toContain("Signature verification failed");
+  expect(screen.getAllByRole("alert")).toHaveLength(2);
+  expect(screen.getAllByRole("alert").every(alert => alert.textContent?.includes("Signature verification failed"))).toBe(true);
   expect(screen.queryByText(/Operation is not confirmed/)).toBeNull();
+});
+
+it("does not install a downloaded update after sign-out starts", async () => {
+  const t = services();
+  const download = deferred<UpdateState>();
+  const available: UpdateState = { status: "available", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 0, total: 2048, percent: 0 } };
+  const installUpdate = vi.fn(async () => undefined);
+  t.value.platformKind = "desktop";
+  t.value.nativeUpdates = {
+    getUpdateState: vi.fn(async () => available), checkForUpdates: vi.fn(async () => available),
+    startUpdate: vi.fn(() => download.promise), installUpdate,
+    onUpdateState: vi.fn(), subscribe: vi.fn(() => () => undefined),
+  } as unknown as NativeUpdateClient;
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ uiBuild: "dev" }))));
+  render(<ContextWorkspace services={t.value} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Download DMG" }));
+  await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
+  await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  expect(await screen.findByRole("dialog", { name: "Sign out?" })).toBeTruthy();
+  await act(async () => download.resolve({ status: "ready", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 2048, total: 2048, percent: 100 } }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Retry update" }).hasAttribute("disabled")).toBe(false));
+  expect(installUpdate).not.toHaveBeenCalled();
+});
+
+it("does not install a downloaded update while deletion is awaiting confirmation", async () => {
+  const t = services();
+  const download = deferred<UpdateState>();
+  const deletion = deferred<boolean>();
+  const available: UpdateState = { status: "available", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 0, total: 2048, percent: 0 } };
+  const installUpdate = vi.fn(async () => undefined);
+  t.value.platformKind = "desktop";
+  t.value.remove = vi.fn(() => deletion.promise);
+  t.value.nativeUpdates = {
+    getUpdateState: vi.fn(async () => available), checkForUpdates: vi.fn(async () => available),
+    startUpdate: vi.fn(() => download.promise), installUpdate,
+    onUpdateState: vi.fn(), subscribe: vi.fn(() => () => undefined),
+  } as unknown as NativeUpdateClient;
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ uiBuild: "dev" }))));
+  render(<ContextWorkspace services={t.value} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Download DMG" }));
+  await userEvent.click(screen.getByRole("button", { name: "Options for Alpha" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Delete chat…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+  expect(screen.getByText("Deleting…")).toBeTruthy();
+  await act(async () => download.resolve({ status: "ready", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 2048, total: 2048, percent: 100 } }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Retry update" }).hasAttribute("disabled")).toBe(false));
+  expect(installUpdate).not.toHaveBeenCalled();
+  await act(async () => deletion.resolve(true));
 });
 
 it("flushes the active draft before reloading a newer hosted UI", async () => {
@@ -119,10 +176,10 @@ it("flushes the active draft before reloading a newer hosted UI", async () => {
   render(<ContextWorkspace services={t.value} />);
   await userEvent.type(screen.getByLabelText("Message to yourself"), "Keep this draft");
   await userEvent.click(await screen.findByRole("button", { name: "Reload to update" }));
+  await waitFor(() => expect(t.value.reloadPage).toHaveBeenCalledOnce());
 
   const drafts = await new DraftStore(t.value.outbox.namespace).list();
   expect(Object.values(drafts).some(draft => draft.text === "Keep this draft")).toBe(true);
-  expect(t.value.reloadPage).toHaveBeenCalledOnce();
 });
 
 describe("ContextWorkspace", () => {
