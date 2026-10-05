@@ -78,6 +78,10 @@ shared as text. Files retain their original bytes.
 
 Below 840 CSS pixels, **Open chats menu** reveals the searchable chat list,
 **New chat**, refresh, and Settings. Wider windows keep that same sidebar open.
+An empty new chat stays out of the list until it has content or a name. Search
+shows a single clear control only while a query is present. Each message has
+Copy, Delete, and More controls; deleting the final message also deletes the
+empty context after confirmation.
 With a mouse or trackpad, chat rows are 32 px high; touch devices retain 48 px
 hit targets. In wide windows, drag the separator beside the sidebar to resize it
 between 220 and 480 px. The main panel keeps at least 360 px. Focus the separator
@@ -88,9 +92,10 @@ Narrowing the window does not replace that preference.
 The sidebar footer shows your account name and email. Open Settings to see the
 full values. If the identity provider is unavailable, sharing remains usable and
 the account area displays **Signed in / Account details unavailable**. Profile
-details are kept only for the current session. Desktop 0.5.3 can use the signed
-profile already verified during sign-in, and the browser uses its Auth0 SDK
-profile. The server lookup is a fallback. Temporary lookup failures retry in the
+details are kept only for the current session. Desktop 0.5.4 uses the signed
+profile already verified during sign-in and loads a bounded Google profile image
+without saving it to the account store. The browser uses its Auth0 SDK profile,
+and the server lookup is a fallback. Temporary lookup failures retry in the
 background; **Settings → Retry account details** retries without signing out.
 The settings panel explains a failed lookup while chats remain usable.
 
