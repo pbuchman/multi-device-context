@@ -7,6 +7,7 @@ import {
   type UpdateState,
 } from "@mdc/contracts";
 import { fetchUpdateCatalog, type DesktopUpdateArtifact, type VerifiedUpdate } from "./update-files.js";
+import { UpdateHandoffError } from "./update-errors.js";
 
 export interface UpdateBackend {
   prepare(artifact: DesktopUpdateArtifact, version: string): Promise<void>;
@@ -117,15 +118,25 @@ export class NativeUpdateManager implements NativeUpdates {
           message: "The verified update was opened. Quit the app, then replace it from the disk image.",
         });
       }
-    } catch {
-      this.#setState({
-        status: "ready",
-        availableVersion: version,
-        progress: { transferred: verified.artifact.size, total: verified.artifact.size, percent: 100 },
-        message: this.#options.platform === "darwin"
-          ? "The verified update could not be opened. Retry when you are ready."
-          : "The verified update installer could not be started. Retry when you are ready.",
-      });
+    } catch (error) {
+      if (error instanceof UpdateHandoffError) {
+        this.#setState({
+          status: "ready",
+          availableVersion: version,
+          progress: { transferred: verified.artifact.size, total: verified.artifact.size, percent: 100 },
+          message: this.#options.platform === "darwin"
+            ? "The verified update could not be opened. Retry when you are ready."
+            : "The verified update installer could not be started. Retry when you are ready.",
+        });
+      } else {
+        this.#available = undefined;
+        this.#verified = undefined;
+        this.#setState({
+          status: "error",
+          availableVersion: version,
+          message: "The cached update changed or is no longer available. Download it again.",
+        });
+      }
       throw new Error("The verified update could not be installed.");
     }
   }

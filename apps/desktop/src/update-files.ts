@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath, rename, rm, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   MAX_UPDATE_ARTIFACT_BYTES,
@@ -183,6 +183,20 @@ export async function reverifyDownloadedArtifact(verified: VerifiedUpdate): Prom
   const current = await verifyDownloadedArtifact(verified.path, verified.artifact);
   if (current.identity !== verified.identity) throw new Error("The cached update identity changed.");
   return current.path;
+}
+
+export async function reverifyDownloadedArtifactForInstall(verified: VerifiedUpdate): Promise<string> {
+  try {
+    return await reverifyDownloadedArtifact(verified);
+  } catch (error) {
+    try {
+      await unlink(verified.path);
+    } catch (removalError) {
+      if (!(removalError instanceof Error && "code" in removalError && removalError.code === "ENOENT"))
+        throw removalError;
+    }
+    throw error;
+  }
 }
 
 async function writeAll(

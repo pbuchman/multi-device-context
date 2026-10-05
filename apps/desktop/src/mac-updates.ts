@@ -1,12 +1,13 @@
 import type { DarwinUpdateArtifact } from "@mdc/contracts";
 import {
   downloadVerifiedArtifact,
-  reverifyDownloadedArtifact,
+  reverifyDownloadedArtifactForInstall,
   type DesktopUpdateArtifact,
   type UpdateFetch,
   type VerifiedUpdate,
 } from "./update-files.js";
 import type { UpdateBackend } from "./updates.js";
+import { UpdateHandoffError } from "./update-errors.js";
 
 interface OpenPath {
   openPath(path: string): Promise<string>;
@@ -37,8 +38,13 @@ export class MacUpdateBackend implements UpdateBackend {
 
   async install(verified: VerifiedUpdate): Promise<void> {
     if (verified.artifact.platform !== "darwin") throw new Error("The cached update is not a macOS DMG.");
-    const path = await reverifyDownloadedArtifact(verified);
-    const failure = await this.shell.openPath(path);
-    if (failure) throw new Error("macOS could not open the verified update.");
+    const path = await reverifyDownloadedArtifactForInstall(verified);
+    try {
+      const failure = await this.shell.openPath(path);
+      if (failure) throw new Error(failure);
+    } catch (error) {
+      await reverifyDownloadedArtifactForInstall(verified);
+      throw new UpdateHandoffError("macOS could not open the verified update.", error);
+    }
   }
 }

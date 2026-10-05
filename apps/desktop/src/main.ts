@@ -172,7 +172,6 @@ async function start(): Promise<void> {
       }) as unknown as WindowsUpdater,
       new AwaitedWindowsInstaller({
         resourcesPath: process.resourcesPath,
-        openPath: path => shell.openPath(path),
         beforeQuitForUpdate: () => { electronAutoUpdater.emit("before-quit-for-update"); },
         quit: () => { app.quit(); },
       }),

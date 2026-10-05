@@ -4,12 +4,13 @@ import { basename, join } from "node:path";
 import { CancellationToken, type ProgressInfo, type UpdateCheckResult, type UpdateDownloadedEvent, type UpdateInfo } from "electron-updater";
 import { MAX_UPDATE_ARTIFACT_BYTES, type WindowsUpdateArtifact } from "@mdc/contracts";
 import {
-  reverifyDownloadedArtifact,
+  reverifyDownloadedArtifactForInstall,
   verifyDownloadedArtifact,
   type DesktopUpdateArtifact,
   type VerifiedUpdate,
 } from "./update-files.js";
 import type { UpdateBackend } from "./updates.js";
+import { UpdateHandoffError } from "./update-errors.js";
 
 export interface WindowsUpdater extends EventEmitter {
   autoDownload: boolean;
@@ -30,7 +31,6 @@ export interface WindowsInstallerLauncher {
 
 interface AwaitedWindowsInstallerOptions {
   resourcesPath: string;
-  openPath(path: string): Promise<string>;
   beforeQuitForUpdate(): void;
   quit(): void;
   spawn?: typeof spawn;
@@ -66,7 +66,7 @@ function launchErrorCode(error: unknown): unknown {
 
 // electron-updater 6.8.9's NsisUpdater returns from doInstall before its
 // detached spawn can fail, while BaseUpdater schedules app.quit immediately.
-// Keep its feed/download cache, but await the same NSIS launch here.
+// Keep its feed/download cache, but await a fixed silent NSIS update launch here.
 export class AwaitedWindowsInstaller implements WindowsInstallerLauncher {
   readonly #options: AwaitedWindowsInstallerOptions;
 
@@ -75,7 +75,7 @@ export class AwaitedWindowsInstaller implements WindowsInstallerLauncher {
   }
 
   async launch(installerPath: string): Promise<void> {
-    const args = ["--updated", "--force-run"];
+    const args = ["--updated", "/S", "--force-run"];
     const spawnProcess = this.#options.spawn ?? spawn;
     try {
       await spawnAcknowledged(spawnProcess, installerPath, args);
@@ -87,9 +87,6 @@ export class AwaitedWindowsInstaller implements WindowsInstallerLauncher {
           join(this.#options.resourcesPath, "elevate.exe"),
           [installerPath, ...args],
         );
-      } else if (code === "ENOENT") {
-        const message = await this.#options.openPath(installerPath);
-        if (message) throw new Error(`Windows could not open the update installer: ${message}`);
       } else {
         throw error;
       }
@@ -231,7 +228,12 @@ export class WindowsUpdateBackend implements UpdateBackend {
   async install(verified: VerifiedUpdate): Promise<void> {
     if (verified.artifact.platform !== "win32" || !this.#artifact || verified.artifact.url !== this.#artifact.url)
       throw new Error("The cached Windows update is no longer selected.");
-    const path = await reverifyDownloadedArtifact(verified);
-    await this.#installer.launch(path);
+    const path = await reverifyDownloadedArtifactForInstall(verified);
+    try {
+      await this.#installer.launch(path);
+    } catch (error) {
+      await reverifyDownloadedArtifactForInstall(verified);
+      throw new UpdateHandoffError("Windows could not start the verified update installer.", error);
+    }
   }
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { NativeUpdateManager, type UpdateBackend } from "./updates.js";
+import { UpdateHandoffError } from "./update-errors.js";
 import { updateCatalogFixture } from "./update-test-fixtures.js";
 
 function fixture(overrides: Partial<ConstructorParameters<typeof NativeUpdateManager>[0]> = {}) {
@@ -134,7 +135,7 @@ describe("native update state", () => {
   it("keeps a verified update ready for retry when installer launch fails", async () => {
     const { manager, backend, finishDownload } = fixture({ platform: "win32", arch: "x64", systemVersion: "10.0.0" });
     (backend.install as ReturnType<typeof vi.fn>)
-      .mockRejectedValueOnce(new Error("spawn failed"))
+      .mockRejectedValueOnce(new UpdateHandoffError("spawn failed"))
       .mockResolvedValueOnce(undefined);
     await manager.checkForUpdates();
     const download = manager.startUpdate();

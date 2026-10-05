@@ -4,8 +4,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CancellationToken, UpdateInfo } from "electron-updater";
-import { NsisUpdater } from "electron-updater";
+import { CancellationToken, NsisUpdater, type UpdateInfo } from "electron-updater";
+import { DownloadedUpdateHelper } from "electron-updater/out/DownloadedUpdateHelper.js";
+import type { AppAdapter } from "electron-updater/out/AppAdapter.js";
+import type { ResolvedUpdateFileInfo } from "electron-updater/out/types.js";
 import {
   AwaitedWindowsInstaller,
   WindowsUpdateBackend,
@@ -13,7 +15,10 @@ import {
   type WindowsInstallerLauncher,
   type WindowsUpdater,
 } from "./windows-updates.js";
-import { windowsUpdateFixture } from "./update-test-fixtures.js";
+import { NativeUpdateManager } from "./updates.js";
+import { UpdateHandoffError } from "./update-errors.js";
+import { updateCatalogFixture, windowsUpdateFixture } from "./update-test-fixtures.js";
+import { reverifyDownloadedArtifactForInstall, verifyDownloadedArtifact } from "./update-files.js";
 
 const directories: string[] = [];
 afterEach(async () => Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))));
@@ -24,7 +29,7 @@ async function downloadedInstaller() {
   directories.push(directory);
   const path = join(directory, artifact.name);
   await writeFile(path, bytes);
-  return { artifact, path };
+  return { artifact, bytes, path };
 }
 function updateInfo(artifact: Awaited<ReturnType<typeof downloadedInstaller>>["artifact"]): UpdateInfo {
   return {
@@ -141,7 +146,61 @@ describe("Windows NSIS metadata", () => {
     await backend.prepare(artifact, "0.5.5");
     const verified = await backend.download(artifact, vi.fn());
     installer.launch.mockRejectedValueOnce(new Error("NSIS launch failed"));
-    await expect(backend.install(verified)).rejects.toThrow(/NSIS launch failed/i);
+    await expect(backend.install(verified)).rejects.toBeInstanceOf(UpdateHandoffError);
+  });
+
+  it("does not preserve launch retry state when the cache disappears during handoff", async () => {
+    const { artifact, path } = await downloadedInstaller();
+    const updater = updaterFixture(updateInfo(artifact), path);
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer);
+    await backend.prepare(artifact, "0.5.5");
+    const verified = await backend.download(artifact, vi.fn());
+    installer.launch.mockImplementationOnce(async (selectedPath: string) => {
+      await rm(selectedPath);
+      throw launchError("ENOENT");
+    });
+    let failure: unknown;
+    try { await backend.install(verified); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(UpdateHandoffError);
+  });
+
+  it.each([
+    ["deleted", async (path: string) => rm(path)],
+    ["tampered", async (path: string) => writeFile(path, "tampered")],
+  ])("invalidates a %s cached installer and downloads a fresh copy before retry", async (_case, invalidate) => {
+    const { artifact, bytes, path } = await downloadedInstaller();
+    const info = updateInfo(artifact);
+    const updater = updaterFixture(info, path);
+    (updater.downloadUpdate as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await writeFile(path, bytes);
+      updater.emit("download-progress", { transferred: artifact.size, total: artifact.size, percent: 100 });
+      updater.emit("update-downloaded", { ...info, downloadedFile: path });
+      return [path];
+    });
+    const installer = installerFixture();
+    const backend = new WindowsUpdateBackend(updater, installer);
+    const manager = new NativeUpdateManager({
+      platform: "win32",
+      arch: "x64",
+      currentVersion: "0.5.4",
+      systemVersion: "10.0.0",
+      readCatalog: vi.fn(async () => updateCatalogFixture("0.5.5", bytes)),
+      backend,
+    });
+    await expect(manager.checkForUpdates()).resolves.toMatchObject({ status: "available" });
+    await expect(manager.startUpdate()).resolves.toMatchObject({ status: "ready" });
+    await invalidate(path);
+    await expect(manager.installUpdate()).rejects.toThrow(/installed/i);
+    await expect(manager.getUpdateState()).resolves.toMatchObject({ status: "error" });
+    expect(manager.isReadyToInstall()).toBe(false);
+    expect(installer.launch).not.toHaveBeenCalled();
+    await expect(manager.startUpdate()).resolves.toMatchObject({ status: "ready" });
+    expect(updater.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(updater.downloadUpdate).toHaveBeenCalledTimes(2);
+    await manager.installUpdate();
+    expect(installer.launch).toHaveBeenCalledOnce();
   });
 
   it("treats a cancelled updater download as unusable", async () => {
@@ -212,16 +271,14 @@ function launchFixture() {
   const { spawn, children } = spawnFixture();
   const events: string[] = [];
   const scheduled: Array<() => void> = [];
-  const openPath = vi.fn(async () => "");
   const launcher = new AwaitedWindowsInstaller({
     resourcesPath: "C:\\Program Files\\Multi Device Context\\resources",
     spawn,
-    openPath,
     beforeQuitForUpdate: () => { events.push("before-quit-for-update"); },
     quit: () => { events.push("quit"); },
     scheduleQuit: task => { scheduled.push(task); },
   });
-  return { launcher, children, events, scheduled, openPath, spawn };
+  return { launcher, children, events, scheduled, spawn };
 }
 function launchError(code: string, message = "launch failed"): Error & { code: string } {
   return Object.assign(new Error(message), { code });
@@ -233,7 +290,7 @@ describe("awaited Windows NSIS launch", () => {
     const launched = fixture.launcher.launch("C:\\cache\\selected-setup.exe");
     expect(fixture.spawn).toHaveBeenCalledWith(
       "C:\\cache\\selected-setup.exe",
-      ["--updated", "--force-run"],
+      ["--updated", "/S", "--force-run"],
       { detached: true, shell: false, stdio: "ignore" },
     );
     expect(fixture.scheduled).toHaveLength(0);
@@ -262,7 +319,7 @@ describe("awaited Windows NSIS launch", () => {
     await vi.waitFor(() => expect(fixture.children).toHaveLength(2));
     expect(fixture.spawn).toHaveBeenLastCalledWith(
       join("C:\\Program Files\\Multi Device Context\\resources", "elevate.exe"),
-      ["C:\\cache\\selected-setup.exe", "--updated", "--force-run"],
+      ["C:\\cache\\selected-setup.exe", "--updated", "/S", "--force-run"],
       { detached: true, shell: false, stdio: "ignore" },
     );
     fixture.children[1]!.emit("error", launchError("EACCES", "elevation failed"));
@@ -270,13 +327,75 @@ describe("awaited Windows NSIS launch", () => {
     expect(fixture.scheduled).toHaveLength(0);
   });
 
-  it("awaits the shell fallback and rejects its asynchronous error result", async () => {
+  it("rejects a missing installer without reopening it in assisted mode", async () => {
     const fixture = launchFixture();
-    fixture.openPath.mockResolvedValueOnce("The system refused the installer");
     const launched = fixture.launcher.launch("C:\\cache\\selected-setup.exe");
     fixture.children[0]!.emit("error", launchError("ENOENT"));
-    await expect(launched).rejects.toThrow(/system refused/i);
-    expect(fixture.openPath).toHaveBeenCalledWith("C:\\cache\\selected-setup.exe");
+    await expect(launched).rejects.toThrow(/launch failed/i);
     expect(fixture.scheduled).toHaveLength(0);
   });
+});
+
+class CacheFastPathNsisUpdater extends NsisUpdater {
+  taskCalls = 0;
+
+  constructor(helper: DownloadedUpdateHelper, app: AppAdapter) {
+    super(null, app);
+    this.downloadedUpdateHelper = helper;
+    this.autoInstallOnAppQuit = false;
+  }
+
+  downloadThroughPinnedCache(
+    updateInfoValue: UpdateInfo,
+    fileInfo: ResolvedUpdateFileInfo,
+    bytes: Uint8Array,
+  ): Promise<string[]> {
+    return this.executeDownload({
+      fileExtension: "exe",
+      fileInfo,
+      downloadUpdateOptions: {
+        updateInfoAndProvider: { info: updateInfoValue, provider: {} as never },
+        requestHeaders: {},
+        cancellationToken: new CancellationToken(),
+      },
+      task: async destination => {
+        this.taskCalls += 1;
+        await writeFile(destination, bytes);
+      },
+    });
+  }
+}
+
+it("removes rejected bytes so electron-updater's same-process cache downloads again", async () => {
+  const { artifact, bytes } = await downloadedInstaller();
+  const directory = await mkdtemp(join(tmpdir(), "mdc-pinned-update-cache-")); directories.push(directory);
+  const info = updateInfo(artifact);
+  const fileInfo: ResolvedUpdateFileInfo = {
+    url: new URL(artifact.url),
+    info: info.files[0]!,
+  };
+  const app: AppAdapter = {
+    version: "0.5.4",
+    name: "Multi Device Context",
+    isPackaged: true,
+    appUpdateConfigPath: join(directory, "unused.yml"),
+    userDataPath: directory,
+    baseCachePath: directory,
+    whenReady: async () => {},
+    relaunch: vi.fn(),
+    quit: vi.fn(),
+    onQuit: vi.fn(),
+  };
+  const updater = new CacheFastPathNsisUpdater(new DownloadedUpdateHelper(directory), app);
+  updater.logger = { info: () => {}, warn: () => {}, error: () => {} };
+  const [path] = await updater.downloadThroughPinnedCache(info, fileInfo, bytes);
+  const verified = await verifyDownloadedArtifact(path!, artifact);
+  expect(updater.taskCalls).toBe(1);
+  await writeFile(path!, Buffer.alloc(bytes.length, 0x78));
+  await expect(updater.downloadThroughPinnedCache(info, fileInfo, bytes)).resolves.toEqual([path]);
+  expect(updater.taskCalls).toBe(1);
+  await expect(reverifyDownloadedArtifactForInstall(verified)).rejects.toThrow(/checksum|changed/i);
+  await expect(updater.downloadThroughPinnedCache(info, fileInfo, bytes)).resolves.toEqual([path]);
+  expect(updater.taskCalls).toBe(2);
+  await expect(verifyDownloadedArtifact(path!, artifact)).resolves.toMatchObject({ path });
 });
