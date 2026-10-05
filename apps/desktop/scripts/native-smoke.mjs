@@ -128,6 +128,7 @@ try {
     report.checks.push("Native context links and manual reopen emit distinct navigation intents");
     // Exercise the public bridge on the real trusted hosted login page, without
     // authenticating, replacing app origin, or introducing a shipped test hook.
+    report.currentStep = "Subscribe to native workspace commands";
     await window.evaluate(() => {
       window.__nativeCommandSmoke = [];
       window.__stopNativeCommandSmoke = window.contextDesktop.onCommand(request => window.__nativeCommandSmoke.push(request));
@@ -140,36 +141,53 @@ try {
       }
       throw new Error("Native workspace command subscription did not become ready");
     };
+    report.currentStep = "Wait for native workspace readiness";
     await waitReady();
     const clickMenu = async id => app.evaluate(({ Menu, BrowserWindow }, command) => {
       const item = Menu.getApplicationMenu().getMenuItemById(command);
       item.click(item, BrowserWindow.getAllWindows()[0], {});
     }, id);
+    report.currentStep = "Receive New chat menu command";
     await clickMenu("new-chat");
     await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "new-chat"));
+    report.currentStep = "Receive Delete chat menu command";
     await clickMenu("delete-chat");
     await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "delete-chat"));
     // Quit is intercepted through before-quit even when invoked by its native role.
+    report.currentStep = "Receive intercepted native Quit command";
     await app.evaluate(({ app }) => app.quit());
     await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "quit"));
+    report.currentStep = "Refuse Quit and preserve the application window";
     await window.evaluate(async () => {
       const request = window.__nativeCommandSmoke.find(request => request.command === "quit");
       await window.contextDesktop.completeCommand(request.id, false);
     });
     assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
-    if (process.platform === "win32") await window.keyboard.press("F5");
-    else await clickMenu("reload");
+    report.currentStep = process.platform === "win32" ? "Receive native F5 Reload command" : "Receive Reload menu command";
+    if (process.platform === "win32") {
+      // CDP page.keyboard does not reliably traverse Electron's native
+      // before-input-event path. Inject through webContents on the OS runner.
+      await app.evaluate(({ BrowserWindow }) => {
+        const target = BrowserWindow.getAllWindows()[0];
+        target.show(); target.focus(); target.webContents.focus();
+        target.webContents.sendInputEvent({ type: "keyDown", keyCode: "F5" });
+        target.webContents.sendInputEvent({ type: "keyUp", keyCode: "F5" });
+      });
+    } else await clickMenu("reload");
     await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "reload"));
+    report.currentStep = "Acknowledge Reload and load a fresh hosted document";
     const reloaded = window.waitForEvent("load");
     await window.evaluate(async () => {
       const request = window.__nativeCommandSmoke.find(request => request.command === "reload");
       await window.contextDesktop.completeCommand(request.id, true);
     });
     await reloaded;
+    report.currentStep = "Restore native bridge and clear command subscription after Reload";
     await window.waitForFunction(() => window.contextDesktop?.version === 1);
     assert.equal(await window.evaluate(() => window.__nativeCommandSmoke), undefined);
     assert.equal(await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById("delete-chat").enabled), false);
     report.checks.push("Native New/Delete dispatch, refused Quit remains open, acknowledged Reload navigates and clears subscription");
+    delete report.currentStep;
 
     await window.evaluate(() =>
       window.contextDesktop.copyText("  Native smoke fixture\n"),
@@ -357,6 +375,9 @@ let pasteboard = NSPasteboard.general
   report.passed = true;
 } catch (error) {
   report.passed = false;
+  if (report.currentStep && app) {
+    report.receivedCommands = await app.windows()[0]?.evaluate(() => window.__nativeCommandSmoke?.map(request => request.command) ?? []).catch(() => []);
+  }
   report.failure =
     error instanceof Error ? error.message : "Native smoke failed";
   process.exitCode = 1;
