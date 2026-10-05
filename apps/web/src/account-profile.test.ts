@@ -32,3 +32,20 @@ it("respects provider retry-after and cancels scheduled work on disposal", async
   await vi.advanceTimersByTimeAsync(9999);expect(load).toHaveBeenCalledOnce();profile.dispose();
   await vi.advanceTimersByTimeAsync(30_000);expect(load).toHaveBeenCalledOnce();
 });
+it("publishes verified account text before the optional avatar finishes", async () => {
+  let finishAvatar!: (value: string) => void;
+  const loadAvatar = vi.fn(() => new Promise<string>(resolve => { finishAvatar = resolve; }));
+  const profile = new AccountProfileStore(
+    "owner",
+    async () => ({ name: "Alice", email: "alice@example.test" }),
+    () => true,
+    loadAvatar,
+  );
+  await profile.refresh();
+  expect(profile.getSnapshot()).toEqual({ uid: "owner", name: "Alice", email: "alice@example.test" });
+  expect(profile.getState().status).toBe("ready");
+  expect(loadAvatar).toHaveBeenCalledOnce();
+  finishAvatar("data:image/png;base64,AAH/");
+  await vi.waitFor(() => expect(profile.getSnapshot().avatarUrl).toBe("data:image/png;base64,AAH/"));
+  profile.dispose();
+});

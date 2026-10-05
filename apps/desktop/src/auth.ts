@@ -87,7 +87,7 @@ export class AuthManager {
   private readonly request: typeof fetch;
   private readonly key: CryptoKey | JWTVerifyGetKey;
   private readonly issuer: string;
-  private profile: (NativeAccountProfile & { picture?: string }) | undefined;
+  private profile: (NativeAccountProfile & { picture?: string; avatar?: NativeFile }) | undefined;
   private cached: { token: string; expiresAt: number; uid: string } | undefined;
   private flight: Promise<string> | undefined;
   private generation = 0;
@@ -117,13 +117,24 @@ export class AuthManager {
     const session = this.dependencies.readSession();
     if (generation !== this.generation || !this.cached || !session || session.uid !== this.cached.uid || session.authScope !== authenticationScope(this.settings)) throw new Error("Sign-in was cancelled.");
     const profile = this.profile?.uid === session.uid ? this.profile : undefined;
-    if (profile?.picture && !profile.avatar) {
+    if (!profile) return { uid: session.uid };
+    const { picture: _picture, avatar: _avatar, ...verified } = profile;
+    return { ...verified };
+  }
+
+  async getAccountAvatar(): Promise<NativeFile | undefined> {
+    const generation = this.generation;
+    await this.getAccessToken(false);
+    const session = this.dependencies.readSession();
+    if (generation !== this.generation || !this.cached || !session || session.uid !== this.cached.uid || session.authScope !== authenticationScope(this.settings)) throw new Error("Sign-in was cancelled.");
+    const profile = this.profile?.uid === session.uid ? this.profile : undefined;
+    if (!profile?.picture) return profile?.avatar;
+    if (!profile.avatar) {
       const avatar = await this.loadAccountAvatar(profile.picture).catch(() => undefined);
       if (avatar && generation === this.generation && this.profile === profile) profile.avatar = avatar;
     }
-    if (!profile) return { uid: session.uid };
-    const { picture: _picture, ...verified } = profile;
-    return { ...verified };
+    if (generation !== this.generation || this.profile !== profile) return undefined;
+    return profile.avatar;
   }
 
   private async loadAccountAvatar(source: string): Promise<NativeFile | undefined> {

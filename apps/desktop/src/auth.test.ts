@@ -264,10 +264,9 @@ it("loads a bounded Google profile image from the verified identity claim", asyn
     readSession: () => saved, writeSession: async value => { saved = value; }, clearSession: async () => { saved = undefined; }, openBrowser: async () => {}, key: publicKey, fetch: request,
   });
 
-  expect(await manager.getAccountProfile()).toEqual({
-    uid: saved!.uid,
-    name: "Verified",
-    avatar: { name: "account-avatar", contentType: "image/png", bytes: new Uint8Array([0, 1, 255]) },
+  expect(await manager.getAccountProfile()).toEqual({ uid: saved!.uid, name: "Verified" });
+  expect(await manager.getAccountAvatar()).toEqual({
+    name: "account-avatar", contentType: "image/png", bytes: new Uint8Array([0, 1, 255]),
   });
   expect(request).toHaveBeenCalledWith(new URL(picture), expect.objectContaining({ headers: { accept: "image/avif,image/webp,image/png,image/jpeg" }, redirect: "error" }));
   expect(saved).not.toHaveProperty("picture");

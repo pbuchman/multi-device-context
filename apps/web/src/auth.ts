@@ -3,7 +3,7 @@ export type { SessionProfile } from "./account-profile.js";
 import { auth0ClientOptions } from "./browser-identity.js";
 import { apiUrl, createApiUrl, mobileBuild } from "./api.js";
 import { createAuth0Client, type Auth0Client } from "@auth0/auth0-spa-js";
-import { contextIdFromPath, AccountProfileSchema, RuntimeConfigSchema, DeviceSessionSchema, type DeviceSession, type AccessDevice, type DesktopBridge, type RuntimeConfig } from "@mdc/contracts";
+import { contextIdFromPath, AccountProfileSchema, RuntimeConfigSchema, DeviceSessionSchema, type DeviceSession, type AccessDevice, type DesktopBridge, type NativeFile, type RuntimeConfig } from "@mdc/contracts";
 import { deleteApp, initializeApp, type FirebaseApp } from "firebase/app";
 import { getAuth, initializeAuth, inMemoryPersistence, signInWithCustomToken, signOut as firebaseSignOut } from "firebase/auth";
 import { clearIndexedDbPersistence, getFirestore, terminate } from "firebase/firestore";
@@ -14,8 +14,7 @@ import type { Viewer } from "./model.js";
 type Fetcher = typeof fetch;
 type SessionResponse = DeviceSession;
 
-function nativeAvatarDataUrl(profile: Awaited<ReturnType<NonNullable<DesktopBridge["getAccountProfile"]>>>): string | undefined {
-  const avatar = profile.avatar;
+function nativeAvatarDataUrl(avatar: NativeFile | undefined): string | undefined {
   if (!avatar || avatar.bytes.byteLength > 524_288 || !["image/avif", "image/webp", "image/png", "image/jpeg"].includes(avatar.contentType)) return undefined;
   let binary = "";
   for (let offset = 0; offset < avatar.bytes.byteLength; offset += 8192) binary += String.fromCharCode(...avatar.bytes.subarray(offset, offset + 8192));
@@ -245,8 +244,7 @@ export class SessionManager {
         if (platform.native?.getAccountProfile) {
           const result = await platform.native.getAccountProfile();
           if (result.uid !== exchanged.uid) throw new ProfileLoadError("Account details do not match this session. Sign in again.", false);
-          const avatarUrl = nativeAvatarDataUrl(result);
-          known = { ...AccountProfileSchema.parse({ ...(result.name ? { name: result.name } : {}), ...(result.email ? { email: result.email } : {}) }), ...(avatarUrl ? { avatarUrl } : {}) };
+          known = AccountProfileSchema.parse({ ...(result.name ? { name: result.name } : {}), ...(result.email ? { email: result.email } : {}) });
         } else if (!platform.native) {
           const result = await this.#auth0?.getUser?.();
           if (result?.sub) {
@@ -283,7 +281,13 @@ export class SessionManager {
         if (known.name || known.email) return known;
         throw error;
       }
-    }, () => !this.#disposed && generation === this.#generation && this.#session === session);
+    }, () => !this.#disposed && generation === this.#generation && this.#session === session,
+    platform.native?.getAccountAvatar ? async signal => {
+      const avatar = await platform.native!.getAccountAvatar!();
+      current();
+      if (signal.aborted) return undefined;
+      return nativeAvatarDataUrl(avatar);
+    } : undefined);
     const disposeSessionFirebase = async () => { profile.dispose(); await disposeFirebaseData(); };
     const viewer = profile.getSnapshot();
     const session: ActiveSession = {
