@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,10 +13,30 @@ import {
   hashFile,
   preparePrivateTestWorkspace,
   previousVersion,
+  readArchiveManifest,
 } from "./native-update-fixture.mjs";
 import { assertProductionUpdateBoundary } from "./production-update-boundary.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+test("reads the newly installed archive after A is replaced at the same path", async () => {
+  const require = createRequire(import.meta.url);
+  const builder = createRequire(require.resolve("electron-builder"));
+  const packager = createRequire(builder.resolve("app-builder-lib"));
+  const asar = packager("@electron/asar");
+  const parent = await mkdtemp(join(tmpdir(), "mdc-asar-replacement-"));
+  const archive = join(parent, "app.asar");
+  try {
+    for (const version of ["1.0.0", "1.0.1"]) {
+      const source = join(parent, version);
+      await mkdir(source);
+      await writeFile(join(source, "package.json"), JSON.stringify({ version }));
+      if (version === "1.0.0") await writeFile(join(source, "before.txt"), "A-only content");
+      await asar.createPackage(source, archive);
+      assert.equal(readArchiveManifest(archive, asar).version, version);
+    }
+  } finally { asar.uncache(archive); await rm(parent, { recursive: true, force: true }); }
+});
 
 test("derives a strictly older numeric A version", () => {
   assert.equal(previousVersion("1.2.3"), "1.2.2");

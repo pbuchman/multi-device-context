@@ -7,6 +7,13 @@ import { basename, dirname, join } from "node:path";
 
 export const TEST_FIXTURE_MARKER = "MDC_NATIVE_UPDATE_TEST_FIXTURE_DO_NOT_PUBLISH";
 
+export function readArchiveManifest(archivePath, asar) {
+  // NSIS and manual DMG replacement keep the archive pathname. Its cached
+  // header belongs to A and must not be used to read B's different offsets.
+  asar.uncache(archivePath);
+  return JSON.parse(asar.extractFile(archivePath, "package.json").toString());
+}
+
 export async function hashFile(path) {
   const sha256 = createHash("sha256"), sha512 = createHash("sha512");
   let size = 0;

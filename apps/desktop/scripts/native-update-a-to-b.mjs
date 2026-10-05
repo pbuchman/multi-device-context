@@ -14,6 +14,7 @@ import {
   hashFile,
   preparePrivateTestWorkspace,
   previousVersion,
+  readArchiveManifest,
   removePrivateWorkspace,
   startFixtureServer,
 } from "./native-update-fixture.mjs";
@@ -91,9 +92,9 @@ function installedArchive(executable) {
 const require = createRequire(import.meta.url);
 const builder = createRequire(require.resolve("electron-builder"));
 const packager = createRequire(builder.resolve("app-builder-lib"));
-const { extractFile } = packager("@electron/asar");
+const asar = packager("@electron/asar");
 function installedManifest(executable) {
-  return JSON.parse(extractFile(installedArchive(executable), "package.json").toString());
+  return readArchiveManifest(installedArchive(executable), asar);
 }
 
 async function waitForVersion(executable, version, timeoutMs = 180_000) {
