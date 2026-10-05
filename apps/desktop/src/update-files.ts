@@ -114,10 +114,20 @@ async function responseForArtifact(
   throw new Error("Too many update redirects.");
 }
 
-type ComparableStat = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
+type ComparableStat = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint };
 function sameStat(left: ComparableStat, right: ComparableStat): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function samePathAndHandle(pathStat: ComparableStat, handleStat: ComparableStat): boolean {
+  // Node 22 on Windows reports lstat.dev as zero while fstat.dev contains the
+  // volume serial number. Every other identity field remains comparable.
+  const sameDevice = pathStat.dev === handleStat.dev || (
+    process.platform === "win32" && pathStat.dev === 0n && handleStat.dev !== 0n
+  );
+  return sameDevice && pathStat.ino === handleStat.ino && pathStat.size === handleStat.size &&
+    pathStat.mtimeNs === handleStat.mtimeNs && pathStat.ctimeNs === handleStat.ctimeNs;
 }
 
 export async function verifyDownloadedArtifact(
@@ -125,25 +135,26 @@ export async function verifyDownloadedArtifact(
   artifact: DesktopUpdateArtifact,
 ): Promise<VerifiedUpdate> {
   const requested = resolve(path);
-  const entry = await lstat(requested);
+  const entry = await lstat(requested, { bigint: true });
   if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("The cached update is not an ordinary file.");
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
   const handle = await open(requested, constants.O_RDONLY | noFollow);
   try {
-    const before = await handle.stat();
-    if (!sameStat(entry, before)) throw new Error("The cached update path changed.");
+    const before = await handle.stat({ bigint: true });
     const canonical = await realpath(requested);
-    const currentEntry = await lstat(requested);
-    const canonicalEntry = await lstat(canonical);
+    const currentEntry = await lstat(requested, { bigint: true });
+    const canonicalEntry = await lstat(canonical, { bigint: true });
     if (
       currentEntry.isSymbolicLink() ||
       !currentEntry.isFile() ||
       !canonicalEntry.isFile() ||
       canonicalEntry.isSymbolicLink() ||
-      !sameStat(before, currentEntry) ||
-      !sameStat(before, canonicalEntry)
+      !sameStat(entry, currentEntry) ||
+      !sameStat(entry, canonicalEntry) ||
+      !samePathAndHandle(currentEntry, before) ||
+      !samePathAndHandle(canonicalEntry, before)
     ) throw new Error("The cached update path changed.");
-    if (!before.isFile() || before.size !== artifact.size)
+    if (!before.isFile() || before.size !== BigInt(artifact.size))
       throw new Error("The cached update size changed.");
     const sha256 = createHash("sha256");
     const sha512 = createHash("sha512");
@@ -158,20 +169,21 @@ export async function verifyDownloadedArtifact(
       const chunk = buffer.subarray(0, bytesRead);
       sha256.update(chunk); sha512.update(chunk);
     }
-    const after = await handle.stat();
+    const after = await handle.stat({ bigint: true });
     if (!sameStat(before, after) || offset !== artifact.size)
       throw new Error("The cached update changed during verification.");
-    const finalEntry = await lstat(requested);
+    const finalEntry = await lstat(requested, { bigint: true });
     if (
       finalEntry.isSymbolicLink() ||
       !finalEntry.isFile() ||
-      !sameStat(after, finalEntry) ||
+      !sameStat(currentEntry, finalEntry) ||
+      !samePathAndHandle(finalEntry, after) ||
       await realpath(requested) !== canonical
     ) throw new Error("The cached update changed during verification.");
     if (sha256.digest("hex") !== artifact.sha256 || sha512.digest("base64") !== artifact.sha512)
       throw new Error("The cached update checksum does not match the catalog.");
     const identity = JSON.stringify([
-      canonical, String(after.dev), String(after.ino), after.size, after.mtimeMs, after.ctimeMs,
+      canonical, String(after.dev), String(after.ino), String(after.size), String(after.mtimeNs), String(after.ctimeNs),
     ]);
     return { artifact: structuredClone(artifact), path: canonical, identity };
   } finally {

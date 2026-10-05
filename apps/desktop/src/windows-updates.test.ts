@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess, spawn as nodeSpawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -397,5 +397,5 @@ it("removes rejected bytes so electron-updater's same-process cache downloads ag
   await expect(reverifyDownloadedArtifactForInstall(verified)).rejects.toThrow(/checksum|changed/i);
   await expect(updater.downloadThroughPinnedCache(info, fileInfo, bytes)).resolves.toEqual([path]);
   expect(updater.taskCalls).toBe(2);
-  await expect(verifyDownloadedArtifact(path!, artifact)).resolves.toMatchObject({ path });
+  await expect(verifyDownloadedArtifact(path!, artifact)).resolves.toMatchObject({ path: await realpath(path!) });
 });
