@@ -176,28 +176,34 @@ Publish or update the hostname through the separately managed tunnel only after
 the local Caddy origin is healthy. Preserve all unrelated routes and access
 policies.
 
-## Roll out account profile support before the interface
+## Roll out the server before the interface
 
 The desktop loads the hosted interface; replacing its installer alone does not
 update the chat UI. Android bundles the interface into its APK.
 
-For the profile/sidebar update, prepare both server and web outputs from the
-same reviewed commit. Before changing the service, retain a complete copy of the
-currently served `apps/web/dist` outside the checkout, including its hashed
-assets. Keep the new web build separately as well. Serve the retained old web
-build from `apps/web/dist` while installing and restarting the new server with
-the procedure above. The runtime launcher fixes this web path; changing
+Prepare server and web outputs from the same reviewed commit. Before changing
+the service, retain a complete copy of the currently served `apps/web/dist`
+outside the checkout, including its hashed assets. Keep the new web build
+separately as well. Serve the retained old web build while installing and
+restarting the new server. The runtime launcher fixes this web path; changing
 `MDC_WEB_DIST` alone does not override it.
 
-Verify that `GET /api/profile` rejects unauthenticated requests with 401 and
-`Cache-Control: no-store`. Using an authenticated session, verify the response
-contains only the current account's optional name/email and works before an
-installation receives full chat access. Do not put bearer tokens in commands,
-logs or reports. Only after this check, switch the served web directory to the
-prepared new build and restart this application's service so static routes are
-registered for the new hashed assets. Reopen the desktop interface and verify
-account details, menus and sidebar resizing. Keep the old web build available
-for rollback; retain the compatible profile endpoint when reverting the UI.
+Verify the new server with the old web bundle first. Existing clients must keep
+working, and `/api/session` must retain its current request and response schema.
+Confirm that unauthenticated `GET /api/version` returns HTTP 200,
+`Cache-Control: no-store`, and the `uiBuild` from the currently served bundle.
+Older bundles may not contain `version.json`; the new server reports the clear
+`dev` fallback until the new bundle is installed. Do not treat that fallback as
+a production source revision.
+
+Only after the old UI passes against the new server, switch the served web
+directory to the prepared new build and restart this application's service so
+static routes are registered for the new hashed assets. Verify `/api/version`
+now matches the full commit in `apps/web/dist/version.json`. Open both a browser
+and the desktop interface, confirm Settings shows the UI build separately from
+the native app version, and use **Check for updates**. Keep the complete old web
+bundle available for rollback and retain server endpoints required by both web
+versions. Android continues using its bundled UI and needs no hosted UI rollout.
 
 Preparation and successful CI do not authorize production deployment or release
 publication. A physical Mac install/upgrade check is separate from CI's runner
@@ -218,6 +224,7 @@ systemctl is-enabled multi-device-context.service
 curl --fail "http://127.0.0.1:$MDC_VERIFY_PORT/health/live"
 curl --fail "http://127.0.0.1:$MDC_VERIFY_PORT/health/ready"
 curl --fail "https://$MDC_VERIFY_HOSTNAME/health/ready"
+curl --fail -D - "https://$MDC_VERIFY_HOSTNAME/api/version"
 curl -i -X POST "https://$MDC_VERIFY_HOSTNAME/api/session"
 curl -i "http://127.0.0.1:$MDC_VERIFY_PORT$MDC_OLD_MAP_PATH"
 curl -i "https://$MDC_VERIFY_HOSTNAME$MDC_OLD_MAP_PATH"
@@ -227,6 +234,8 @@ The unit must be active and enabled, health endpoints must return HTTP 200 with
 `status: ok`, an unauthenticated session request must return HTTP 401, and known
 old `.map` paths must return HTTP 404 through loopback and the public route. Purge
 only application-specific cached map URLs if an intermediary still serves them.
+The version response must be public, use `Cache-Control: no-store`, and match the
+deployed web bundle's `version.json`.
 Confirm the public runtime configuration, Google login, owner isolation, context
 and item deletion, attachment upload/download, agent-key revocation, and the
 60/minute per-IP pre-authentication, 600/minute global, and 120/minute per-owner

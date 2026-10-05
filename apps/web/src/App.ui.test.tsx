@@ -7,6 +7,8 @@ import { DraftStore } from "./drafts.js";
 import { ContextWorkspace, sharePartsFromSnapshot, type WorkspaceServices } from "./App.js";
 import type { CloudSnapshot } from "./cloud.js";
 import type { ContextRecord, ItemRecord } from "./model.js";
+import type { NativeUpdateClient } from "./updates.js";
+import type { UpdateState } from "@mdc/contracts";
 
 const alpha = "00000000-0000-4000-8000-000000000001";
 const beta = "00000000-0000-4000-8000-000000000002";
@@ -15,7 +17,11 @@ const contexts: ContextRecord[] = [
   { id: beta, title: "Beta", createdAt: 2, updatedAt: 10, syncState: "synced" },
 ];
 
-afterEach(() => { cleanup(); localStorage.clear(); history.replaceState({}, "", "/"); });
+afterEach(() => {
+  cleanup(); localStorage.clear(); history.replaceState({}, "", "/"); vi.unstubAllGlobals();
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+  window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+});
 
 function services(initialContexts = contexts) {
   let contextListener: ((snapshot: CloudSnapshot<ContextRecord>) => void) | undefined;
@@ -63,6 +69,61 @@ function services(initialContexts = contexts) {
     contextListener?.(contextSnapshot);
   } };
 }
+
+it.each([
+  [1280, "light"],
+  [360, "dark"],
+] as const)("renders update settings at %spx in %s mode", async (width, theme) => {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+  window.matchMedia = vi.fn().mockReturnValue({ matches: width < 840, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  const t = services();
+  t.value.platformKind = "browser";
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ uiBuild: "dev" }))));
+  render(<ContextWorkspace services={t.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
+  await userEvent.selectOptions(screen.getByRole("combobox"), theme);
+
+  expect(document.documentElement.dataset.theme).toBe(theme);
+  expect(screen.getByText("UI build")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Check for updates" })).toBeTruthy();
+});
+
+it("shows native download progress and keeps update failures separate from sync errors", async () => {
+  const t = services();
+  t.value.platformKind = "desktop";
+  let listener: ((state: UpdateState) => void) | undefined;
+  const updateError = { status: "error", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", message: "Signature verification failed" } as const;
+  t.value.nativeUpdates = {
+    getUpdateState: vi.fn(async () => ({ status: "available", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 0, total: 2048, percent: 0 } })),
+    checkForUpdates: vi.fn(async () => updateError),
+    startUpdate: vi.fn(async () => updateError), installUpdate: vi.fn(async () => undefined),
+    onUpdateState: vi.fn(), subscribe: vi.fn(next => { listener = next; return () => { listener = undefined; }; }),
+  } as unknown as NativeUpdateClient;
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ uiBuild: "dev" }))));
+  render(<ContextWorkspace services={t.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
+  await waitFor(() => expect(screen.getByRole("status").textContent).toContain("1.1.0 · 2 KB"));
+  await act(async () => listener?.({ status: "downloading", platform: "darwin", currentVersion: "1.0.0", availableVersion: "1.1.0", progress: { transferred: 1024, total: 2048, percent: 50 } }));
+
+  expect(screen.getByText(/50%/)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+  expect(screen.getByRole("alert").textContent).toContain("Signature verification failed");
+  expect(screen.queryByText(/Operation is not confirmed/)).toBeNull();
+});
+
+it("flushes the active draft before reloading a newer hosted UI", async () => {
+  const t = services();
+  t.value.platformKind = "browser";
+  t.value.reloadPage = vi.fn();
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ uiBuild: "b".repeat(40) }))));
+  render(<ContextWorkspace services={t.value} />);
+  await userEvent.type(screen.getByLabelText("Message to yourself"), "Keep this draft");
+  await userEvent.click(await screen.findByRole("button", { name: "Reload to update" }));
+
+  const drafts = await new DraftStore(t.value.outbox.namespace).list();
+  expect(Object.values(drafts).some(draft => draft.text === "Keep this draft")).toBe(true);
+  expect(t.value.reloadPage).toHaveBeenCalledOnce();
+});
 
 describe("ContextWorkspace", () => {
   it("preserves Android shared text and files in one incoming snapshot", () => {

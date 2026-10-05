@@ -26,6 +26,8 @@ import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, disp
 import { ChatContextMenu, type ChatMenuAnchor } from "./chat-context-menu.js";
 import { WorkspaceDialog, trapFocus } from "./workspace-overlay.js";
 import { useTimelineScroll } from "./use-timeline-scroll.js";
+import { HostedUpdateNotice, UpdateSettings, useUpdateController } from "./update-ui.js";
+import { createNativeUpdateClient, type NativeUpdateClient } from "./updates.js";
 import { frozenClipboardParts, insertClipboardText, keyboardSends, type SharePart } from "./workspace-input.js";
 import "./theme.css";
 
@@ -98,6 +100,8 @@ export type WorkspaceServices = {
   readClipboard?: () => Promise<ClipboardSnapshot>;
   subscribeNativeShares?: (listener: () => void) => Unsubscribe;
   drainNativeShares?: () => Promise<Id | undefined>;
+  nativeUpdates?: NativeUpdateClient;
+  reloadPage?: () => void;
 };
 
 type Theme = "system" | "light" | "dark";
@@ -990,6 +994,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     }
     await navigation.flush();
   };
+  const updateController = useUpdateController({
+    platformKind: services.platformKind ?? "browser",
+    ...(services.nativeUpdates ? { nativeUpdates: services.nativeUpdates } : {}),
+    settle: settleLocalInput,
+    freeze: saving => { lifecycleLocked.current = saving; setLifecycleSaving(saving); },
+    reload: services.reloadPage ?? (() => window.location.reload()),
+  });
   const newChat = () => {
     if (accountBlocked) return;
     setSelectedId(undefined); setError(undefined); closeDrawer(false);
@@ -1102,6 +1113,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       </main>
     </div>
     {chatMenu && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
+    <HostedUpdateNotice updates={updateController} />
     {toast && !lifecycleSaving ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
     {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()}>
       {panel.kind === "context" ? <>
@@ -1131,6 +1143,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       </> : null}
       {panel.kind === "settings" ? <>
         <AccountDetails viewer={viewer} profile={services.profile} />
+        <UpdateSettings updates={updateController} platformKind={services.platformKind ?? "browser"} hasNativeHost={services.platformKind === "desktop" || services.platformKind === "android"} />
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
         {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or a supported first image up to 5 MiB, to OpenRouter. Other files send only filename/type. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
@@ -1163,6 +1176,7 @@ async function browserSaveFile(file: NativeFile): Promise<boolean> {
 type WorkspaceBundle = { services: WorkspaceServices; invalidate(): void; settle(): Promise<void>; dispose(): void };
 export async function buildServices(session: ActiveSession, onAccessChange: () => void): Promise<WorkspaceBundle> {
   const native = session.platform.native;
+  const nativeUpdates = session.platform.updates ?? createNativeUpdateClient(native ?? {});
   const device = { id: session.device.id, name: session.device.name };
   await prepareHistory(session.firebaseApp);
   const cloud = new FirebaseCloud(session.firebaseApp, session.uid, session.accessToken, session.device);
@@ -1316,6 +1330,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
       ...(session.platform.shareFile ? { shareFile: session.platform.shareFile } : {}),
       accountSignOut,
       signOut: async () => { throw new Error("Use the reviewed sign-out flow."); },
+      ...(nativeUpdates ? { nativeUpdates } : {}),
       ...(native ? {
         ...(native.getLaunchAtLogin ? { getLaunchAtLogin: () => native.getLaunchAtLogin!() } : {}),
         ...(native.setLaunchAtLogin ? { setLaunchAtLogin: (enabled: boolean) => native.setLaunchAtLogin!(enabled) } : {}),

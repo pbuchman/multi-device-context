@@ -1,6 +1,7 @@
 import type { DesktopBridge, NativeFile } from "@mdc/contracts";
 import { mobileBuild } from "./api.js";
 import { inspectDesktopBridge } from "./desktop.js";
+import { createNativeUpdateClient, type NativeUpdateClient } from "./updates.js";
 
 /** Desktop v1 remains unchanged; shared callers use only supported capabilities. */
 export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLaunchAtLogin" | "setLaunchAtLogin" | "signOut"> &
@@ -11,6 +12,7 @@ export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLa
 export type PlatformAdapter = {
   kind: "browser" | "desktop" | "android";
   native?: NativePlatform;
+  updates?: NativeUpdateClient;
   /** Native helpers keep installation credentials out of the renderer. */
   exchangeSession?(accessToken: string): Promise<unknown>;
   openAccessPanel?(deviceId: string): Promise<void>;
@@ -39,10 +41,11 @@ export async function createPlatformAdapter(options: {
   }
   if (desktop.kind !== "ready") return { kind: "browser", dispose() {} };
   const bridge = desktop.bridge as ReviewedDesktopBridge;
+  const updates = createNativeUpdateClient(bridge);
   const assertCanSignOut = () => {
     if (bridge.reviewedSignOut !== true) throw new DesktopUpdateRequiredError("Update this desktop app before signing out. This installed version cannot safely preserve newly arriving shares; your local data has not been cleared.");
   };
-  return { kind: "desktop", assertCanSignOut,
+  return { kind: "desktop", assertCanSignOut, ...(updates ? { updates } : {}),
     ...(bridge.exchangeInstallationSession ? { exchangeSession: (token: string) => bridge.exchangeInstallationSession!(token) } : {}),
     ...(bridge.openAccessPanel ? { openAccessPanel: (id: string) => bridge.openAccessPanel!(id) } : {}),
     ...(bridge.invalidateTransfers ? { invalidateTransfers: () => bridge.invalidateTransfers!() } : {}),

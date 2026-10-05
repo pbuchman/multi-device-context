@@ -14,6 +14,17 @@ it("keeps browser and desktop adapters independent of Android imports", async ()
   expect(adapter.native?.signOut).toBeTypeOf("function");
   expect(loadAndroid).not.toHaveBeenCalled();
 });
+it("exposes native updates only when every optional v1 capability is present", async () => {
+  const base = { version: 1, platform: "darwin" } as unknown as DesktopBridge;
+  window.contextDesktop = { ...base, getUpdateState: vi.fn() };
+  expect((await createPlatformAdapter({ mobile: false })).updates).toBeUndefined();
+  window.contextDesktop = {
+    ...base,
+    getUpdateState: vi.fn(), checkForUpdates: vi.fn(), startUpdate: vi.fn(),
+    installUpdate: vi.fn(), onUpdateState: vi.fn(),
+  };
+  expect((await createPlatformAdapter({ mobile: false })).updates).toBeDefined();
+});
 it("refuses old desktop sign-out even when its current inbox is empty", async () => {
   const signOut = vi.fn(async () => {});
   window.contextDesktop = { version: 1, platform: "linux", signOut } as unknown as DesktopBridge;

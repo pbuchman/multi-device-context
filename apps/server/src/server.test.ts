@@ -2,6 +2,9 @@ import type { RuntimeConfig } from "@mdc/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { readServerConfig } from "./config.js";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DeviceAccessPort } from "./device-access.js";
 import {
   BackendConflictError,
@@ -112,6 +115,19 @@ describe("readServerConfig", () => {
 });
 
 describe("public and health routes", () => {
+  it("serves the current UI build metadata without authentication or caching", async () => {
+    const webDist = await mkdtemp(join(tmpdir(), "mdc-web-dist-"));
+    await writeFile(join(webDist, "index.html"), "<main>test</main>");
+    await writeFile(join(webDist, "version.json"), JSON.stringify({ uiBuild: "a".repeat(40) }));
+    const app = buildServer({ publicConfig, verifier, backend: backend(), webDist });
+    openServers.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/version" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ uiBuild: "a".repeat(40) });
+    expect(response.headers["cache-control"]).toBe("no-store");
+  });
   it("returns only public runtime config with no-store caching and security headers", async () => {
     const { app } = server();
     const response = await app.inject({ method: "GET", url: "/api/config" });
