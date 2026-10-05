@@ -1,3 +1,4 @@
+import { DesktopCommands, applicationMenu } from "./commands.js";
 import { exchangeInstallationSession, accessPanelUrl } from "./installation.js";
 import {
   app,
@@ -48,6 +49,16 @@ let window: BrowserWindow | undefined,
   copies: CopiedFiles;
 let quitting = false,
   connecting: Promise<void> | undefined;
+const commands = new DesktopCommands({
+  send: request => { show(); window?.webContents.send("mdc:command", request); },
+  newChat: openNew,
+  reload: () => { void connect(); },
+  quit: () => { quitting = true; app.quit(); },
+  changed: () => { if (app.isReady()) refreshApplicationMenu(); },
+});
+function refreshApplicationMenu() {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu(process.platform, app.name, commands.ready, command => commands.request(command))));
+}
 const callbacks: string[] = [];
 let pendingNavigation: { contextId?: string } | undefined;
 function navigate(contextId?: string): void {
@@ -97,8 +108,9 @@ else {
     onCallback(url);
   });
   for (const arg of process.argv) onCallback(arg);
-  app.on("before-quit", () => {
-    quitting = true;
+  app.on("before-quit", event => {
+    if (!quitting && commands.ready) { event.preventDefault(); commands.request("quit"); }
+    else quitting = true;
   });
   app.on("window-all-closed", () => {});
   app.on("activate", openNew);
@@ -156,6 +168,16 @@ async function start(): Promise<void> {
       spellcheck: true,
     },
   });
+  window.webContents.on("before-input-event", (event, input) => {
+    if (process.platform === "win32" && input.type === "keyDown" && input.key === "F5" && !input.control && !input.alt && !input.meta && !input.shift) {
+      event.preventDefault(); commands.request("reload");
+    }
+  });
+  window.setMenuBarVisibility(true);
+  window.setAutoHideMenuBar(false);
+  window.webContents.on("did-start-navigation", details => {
+    if (details.isMainFrame && !details.isSameDocument) commands.reset();
+  });
   window.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();
@@ -199,30 +221,12 @@ async function start(): Promise<void> {
     },
   );
   window.webContents.on("render-process-gone", () => {
+    commands.reset();
     void showRecovery();
   });
   wireBridge();
   createTray();
-  Menu.setApplicationMenu(
-    Menu.buildFromTemplate(
-      process.platform === "darwin"
-        ? [
-            {
-              label: app.name,
-              submenu: [
-                { role: "about" },
-                { type: "separator" },
-                { role: "hide" },
-                { type: "separator" },
-                { label: "Quit Multi Device Context", click: () => app.quit() },
-              ],
-            },
-            { role: "editMenu" },
-            { role: "windowMenu" },
-          ]
-        : [{ role: "editMenu" }, { role: "windowMenu" }],
-    ),
-  );
+  refreshApplicationMenu();
   await connect();
   if (
     !shouldStartHidden(
@@ -370,6 +374,15 @@ function wireBridge(): void {
         return { ok: false, message: errorMessage(error) };
       }
     });
+  handle("commandSubscription", 2, (id, ready) => {
+    const registration = IdSchema.parse(id);
+    if (typeof ready !== "boolean") throw new Error("Invalid application command subscription.");
+    if (ready) commands.subscribe(registration); else commands.unsubscribe(registration);
+  });
+  handle("completeCommand", 3, (registration, id, allow) => {
+    if (typeof allow !== "boolean") throw new Error("Invalid application command response.");
+    commands.complete(IdSchema.parse(registration), IdSchema.parse(id), allow);
+  });
   handle("exchangeInstallationSession", 1, async (token) => {
     if (typeof token !== "string") throw new Error("Invalid sign-in token.");
     if (installationExchange) throw new Error("Session exchange already running.");

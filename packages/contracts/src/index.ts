@@ -140,8 +140,12 @@ export type PendingClipboardShare = {
   snapshot: ClipboardSnapshot;
 };
 
+export type DesktopCommandRequest = { id: string; command: "new-chat" | "delete-chat" | "reload" | "quit" };
+
 export interface DesktopBridge {
   version: 1;
+  onCommand?(listener: (request: DesktopCommandRequest) => void): () => void;
+  completeCommand?(id: string, allow: boolean): Promise<void>;
   platform: "win32" | "darwin" | "linux";
   getDevice(): Promise<Device>;
   getAccessToken(interactive?: boolean): Promise<string>;
