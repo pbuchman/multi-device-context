@@ -4,19 +4,15 @@ import { createReadStream } from "node:fs";
 import { cp, lstat, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:https";
 import { basename, dirname, join } from "node:path";
-import { pipeline } from "node:stream/promises";
 
 export const TEST_FIXTURE_MARKER = "MDC_NATIVE_UPDATE_TEST_FIXTURE_DO_NOT_PUBLISH";
 
 export async function hashFile(path) {
   const sha256 = createHash("sha256"), sha512 = createHash("sha512");
   let size = 0;
-  const inspect = async function* (source) {
-    for await (const chunk of source) {
-      size += chunk.length; sha256.update(chunk); sha512.update(chunk); yield chunk;
-    }
-  };
-  await pipeline(createReadStream(path), inspect);
+  for await (const chunk of createReadStream(path)) {
+    size += chunk.length; sha256.update(chunk); sha512.update(chunk);
+  }
   return { size, sha256: sha256.digest("hex"), sha512: sha512.digest("base64") };
 }
 

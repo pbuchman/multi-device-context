@@ -114,7 +114,8 @@ async function responseForArtifact(
   throw new Error("Too many update redirects.");
 }
 
-function sameStat(left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>, right: typeof left): boolean {
+type ComparableStat = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
+function sameStat(left: ComparableStat, right: ComparableStat): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
     left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
 }
@@ -123,14 +124,25 @@ export async function verifyDownloadedArtifact(
   path: string,
   artifact: DesktopUpdateArtifact,
 ): Promise<VerifiedUpdate> {
-  const absolute = resolve(path);
-  const entry = await lstat(absolute);
+  const requested = resolve(path);
+  const entry = await lstat(requested);
   if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("The cached update is not an ordinary file.");
-  if (await realpath(absolute) !== absolute) throw new Error("The cached update path changed.");
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-  const handle = await open(absolute, constants.O_RDONLY | noFollow);
+  const handle = await open(requested, constants.O_RDONLY | noFollow);
   try {
     const before = await handle.stat();
+    if (!sameStat(entry, before)) throw new Error("The cached update path changed.");
+    const canonical = await realpath(requested);
+    const currentEntry = await lstat(requested);
+    const canonicalEntry = await lstat(canonical);
+    if (
+      currentEntry.isSymbolicLink() ||
+      !currentEntry.isFile() ||
+      !canonicalEntry.isFile() ||
+      canonicalEntry.isSymbolicLink() ||
+      !sameStat(before, currentEntry) ||
+      !sameStat(before, canonicalEntry)
+    ) throw new Error("The cached update path changed.");
     if (!before.isFile() || before.size !== artifact.size)
       throw new Error("The cached update size changed.");
     const sha256 = createHash("sha256");
@@ -149,12 +161,19 @@ export async function verifyDownloadedArtifact(
     const after = await handle.stat();
     if (!sameStat(before, after) || offset !== artifact.size)
       throw new Error("The cached update changed during verification.");
+    const finalEntry = await lstat(requested);
+    if (
+      finalEntry.isSymbolicLink() ||
+      !finalEntry.isFile() ||
+      !sameStat(after, finalEntry) ||
+      await realpath(requested) !== canonical
+    ) throw new Error("The cached update changed during verification.");
     if (sha256.digest("hex") !== artifact.sha256 || sha512.digest("base64") !== artifact.sha512)
       throw new Error("The cached update checksum does not match the catalog.");
     const identity = JSON.stringify([
-      absolute, String(after.dev), String(after.ino), after.size, after.mtimeMs, after.ctimeMs,
+      canonical, String(after.dev), String(after.ino), after.size, after.mtimeMs, after.ctimeMs,
     ]);
-    return { artifact: structuredClone(artifact), path: absolute, identity };
+    return { artifact: structuredClone(artifact), path: canonical, identity };
   } finally {
     await handle.close();
   }
@@ -186,11 +205,15 @@ export async function downloadVerifiedArtifact(
   progress: (transferred: number, total: number) => void = () => {},
   timeoutMs = 15 * 60_000,
 ): Promise<VerifiedUpdate> {
-  await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
-  await chmod(cacheDirectory, 0o700).catch(() => {});
-  const destination = join(cacheDirectory, artifact.name);
-  if (dirname(destination) !== resolve(cacheDirectory)) throw new Error("Invalid update filename.");
-  const partial = join(cacheDirectory, `.${artifact.name}.${randomUUID()}.part`);
+  const requestedCache = resolve(cacheDirectory);
+  await mkdir(requestedCache, { recursive: true, mode: 0o700 });
+  const canonicalCache = await realpath(requestedCache);
+  const cacheEntry = await lstat(canonicalCache);
+  if (!cacheEntry.isDirectory() || cacheEntry.isSymbolicLink()) throw new Error("Invalid update cache directory.");
+  await chmod(canonicalCache, 0o700).catch(() => {});
+  const destination = join(canonicalCache, artifact.name);
+  if (dirname(destination) !== canonicalCache) throw new Error("Invalid update filename.");
+  const partial = join(canonicalCache, `.${artifact.name}.${randomUUID()}.part`);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let handle: Awaited<ReturnType<typeof open>> | undefined;

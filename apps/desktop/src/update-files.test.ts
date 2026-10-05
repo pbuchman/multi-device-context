@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -122,5 +122,27 @@ describe("verified update files", () => {
     const verified = await verifyDownloadedArtifact(path, artifact);
     await writeFile(path, Buffer.from("replaced desktop installer"));
     await expect(reverifyDownloadedArtifact(verified)).rejects.toThrow(/changed|checksum|size/i);
+  });
+
+  it.runIf(process.platform !== "win32")("canonicalizes a stable symlinked cache ancestor but rejects a replaced leaf symlink", async () => {
+    const bytes = Buffer.from("verified desktop installer");
+    const artifact = darwinUpdateFixture("0.5.5", bytes);
+    const root = await directory();
+    const cache = join(root, "private-cache"), alias = join(root, "system-cache-alias");
+    await mkdir(cache);
+    await symlink(cache, alias, "dir");
+    const verified = await downloadVerifiedArtifact(
+      artifact,
+      alias,
+      async () => new Response(bytes, { status: 200 }),
+    );
+    expect(verified.path).toBe(join(await realpath(cache), artifact.name));
+    await expect(reverifyDownloadedArtifact(verified)).resolves.toBe(verified.path);
+
+    const replacement = join(root, "replacement.dmg");
+    await writeFile(replacement, bytes);
+    await rm(verified.path);
+    await symlink(replacement, verified.path);
+    await expect(reverifyDownloadedArtifact(verified)).rejects.toThrow(/ordinary file|identity|changed/i);
   });
 });
