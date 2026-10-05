@@ -2,6 +2,7 @@ import { DesktopCommands, applicationMenu } from "./commands.js";
 import { exchangeInstallationSession, accessPanelUrl } from "./installation.js";
 import {
   app,
+  autoUpdater as electronAutoUpdater,
   BrowserWindow,
   ClipboardItem,
   clipboard,
@@ -20,12 +21,15 @@ import { pathToFileURL } from "node:url";
 import { writeFile } from "node:fs/promises";
 import {
   ContentSchema,
+  UPDATE_CHECK_INTERVAL_MS,
+  WINDOWS_UPDATE_FEED_URL,
   contextIdFromProtocol,
   IdSchema,
   RuntimeConfigSchema,
   isTrustedAppUrl,
   type NativeFile,
 } from "@mdc/contracts";
+import { NsisUpdater } from "electron-updater";
 import { AuthManager } from "./auth.js";
 import { NativeStore } from "./store.js";
 import { LaunchSettings, shouldStartHidden } from "./settings.js";
@@ -38,6 +42,9 @@ import {
   validateNativeFile,
   nativeFilePath,
 } from "./security.js";
+import { MacUpdateBackend } from "./mac-updates.js";
+import { NativeUpdateManager } from "./updates.js";
+import { WindowsUpdateBackend, type WindowsUpdater } from "./windows-updates.js";
 
 declare const MDC_APP_ORIGIN: string;
 const recovery = pathToFileURL(join(__dirname, "resources/recovery.html")).href;
@@ -46,9 +53,11 @@ let window: BrowserWindow | undefined,
   store: NativeStore,
   auth: AuthManager | undefined,
   launch: LaunchSettings,
-  copies: CopiedFiles;
+  copies: CopiedFiles,
+  updates: NativeUpdateManager;
 let quitting = false,
   connecting: Promise<void> | undefined;
+electronAutoUpdater.on("before-quit-for-update", () => { quitting = true; });
 const commands = new DesktopCommands({
   send: request => { show(); window?.webContents.send("mdc:command", request); },
   newChat: openNew,
@@ -57,7 +66,13 @@ const commands = new DesktopCommands({
   changed: () => { if (app.isReady()) refreshApplicationMenu(); },
 });
 function refreshApplicationMenu() {
-  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu(process.platform, app.name, commands.ready, command => commands.request(command))));
+  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu(
+    process.platform,
+    app.name,
+    commands.ready,
+    command => { commands.request(command); },
+    checkForUpdates,
+  )));
 }
 const callbacks: string[] = [];
 let pendingNavigation: { contextId?: string } | undefined;
@@ -145,6 +160,25 @@ async function start(): Promise<void> {
   await pruneCopiedFiles();
   launch = new LaunchSettings(app, store);
   await launch.initialize();
+  if (process.platform !== "darwin" && process.platform !== "win32")
+    throw new Error("This desktop package does not support native updates on this platform.");
+  const backend = process.platform === "darwin"
+    ? new MacUpdateBackend(join(directory, "updates"), shell)
+    : new WindowsUpdateBackend(new NsisUpdater({
+      provider: "generic",
+      url: WINDOWS_UPDATE_FEED_URL,
+    }) as unknown as WindowsUpdater);
+  updates = new NativeUpdateManager({
+    platform: process.platform,
+    arch: process.arch,
+    currentVersion: app.getVersion(),
+    systemVersion: (process as NodeJS.Process & { getSystemVersion(): string }).getSystemVersion(),
+    backend,
+  });
+  updates.onUpdateState(state => {
+    if (window && !window.isDestroyed() && isTrustedAppUrl(window.webContents.getURL(), MDC_APP_ORIGIN))
+      window.webContents.send("mdc:updateState", state);
+  });
   session.defaultSession.setPermissionRequestHandler(
     (_contents, _permission, callback) => callback(false),
   );
@@ -228,6 +262,9 @@ async function start(): Promise<void> {
   createTray();
   refreshApplicationMenu();
   await connect();
+  void updates.checkForUpdates();
+  const updateTimer = setInterval(() => { void updates.checkForUpdates(); }, UPDATE_CHECK_INTERVAL_MS);
+  updateTimer.unref();
   if (
     !shouldStartHidden(
       process.platform,
@@ -236,6 +273,10 @@ async function start(): Promise<void> {
     )
   )
     show();
+}
+function checkForUpdates(): void {
+  show();
+  if (updates) void updates.checkForUpdates();
 }
 async function showRecovery(): Promise<void> {
   if (window && !window.isDestroyed()) await window.loadURL(recovery);
@@ -319,6 +360,7 @@ function refreshTray(): void {
           void launch.set(item.checked).then(refreshTray).catch(report);
         },
       },
+      { label: "Check for updates…", click: checkForUpdates },
       { type: "separator" },
       { label: "Quit", click: () => app.quit() },
     ]),
@@ -445,6 +487,16 @@ function wireBridge(): void {
       throw new Error("Invalid startup setting.");
     await launch.set(enabled);
     refreshTray();
+  });
+  handle("getUpdateState", 0, () => updates.getUpdateState());
+  handle("checkForUpdates", 0, () => updates.checkForUpdates());
+  handle("startUpdate", 0, () => updates.startUpdate());
+  handle("installUpdate", 0, () => {
+    if (!updates.isReadyToInstall()) throw new Error("The update is not ready to install.");
+    const accepted = commands.request("quit", allow => {
+      if (allow) void updates.installUpdate().catch(report);
+    });
+    if (!accepted) throw new Error("Another application action is still waiting to finish.");
   });
   ipcMain.handle("mdc:retry", async (event, ...args: unknown[]) => {
     if (

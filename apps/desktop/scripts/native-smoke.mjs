@@ -45,7 +45,7 @@ try {
     return {
       file: menu.items.some(item => item.label === "File"),
       visible: BrowserWindow.getAllWindows()[0].isMenuBarVisible(),
-      commands: ["new-chat", "delete-chat", "reload", "quit"].map(id => {
+      commands: ["new-chat", "delete-chat", "reload", "check-for-updates", "quit"].map(id => {
         const item = menu.getMenuItemById(id);
         return { id, accelerator: item?.accelerator, enabled: item?.enabled };
       }),
@@ -57,7 +57,8 @@ try {
     assert.equal(menus.commands.find(item => item.id === id).accelerator, accelerator);
   }
   assert.equal(menus.commands.find(item => item.id === "delete-chat").enabled, false);
-  report.checks.push("Visible native File menu and New/Delete/Reload/Quit accelerators on installed app");
+  assert.equal(menus.commands.find(item => item.id === "check-for-updates").enabled, true);
+  report.checks.push("Visible native File menu, update check, and New/Delete/Reload/Quit accelerators on installed app");
   assert.equal(runtime.packaged, true);
   assert.equal(runtime.encryption, true);
   assert.equal(runtime.windows, 1);
@@ -98,14 +99,28 @@ try {
       accountAvatar: typeof window.contextDesktop.getAccountAvatar,
       device: await window.contextDesktop.getDevice(),
       startup: await window.contextDesktop.getLaunchAtLogin(),
+      updates: {
+        get: typeof window.contextDesktop.getUpdateState,
+        check: typeof window.contextDesktop.checkForUpdates,
+        start: typeof window.contextDesktop.startUpdate,
+        install: typeof window.contextDesktop.installUpdate,
+        subscribe: typeof window.contextDesktop.onUpdateState,
+        state: await window.contextDesktop.getUpdateState(),
+      },
       node: typeof window.require,
     }));
     assert.equal(bridge.version, 1);
     assert.equal(bridge.accountProfile, "function");
     assert.equal(bridge.accountAvatar, "function");
+    assert.deepEqual(
+      [bridge.updates.get, bridge.updates.check, bridge.updates.start, bridge.updates.install, bridge.updates.subscribe],
+      ["function", "function", "function", "function", "function"],
+    );
+    assert.equal(bridge.updates.state.platform, process.platform);
+    assert.match(bridge.updates.state.currentVersion, /^\d+\.\d+\.\d+$/);
     await assert.rejects(window.evaluate(() => window.contextDesktop.getAccountProfile()), /Sign in with Google/);
     await assert.rejects(window.evaluate(() => window.contextDesktop.getAccountAvatar()), /Sign in with Google/);
-    report.checks.push("Native account profile and avatar APIs require a verified signed-in identity");
+    report.checks.push("Native account, update state and update subscription bridge methods are present and validated");
     assert.ok(bridge.device.id);
     assert.equal(bridge.node, "undefined");
     assert.equal(bridge.startup, true);

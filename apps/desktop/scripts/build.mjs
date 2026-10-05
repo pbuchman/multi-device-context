@@ -1,5 +1,7 @@
 import { build } from "esbuild";
 import { cp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 const value = process.env.MDC_APP_ORIGIN;
 let origin;
 try {
@@ -47,8 +49,31 @@ const metadata = JSON.parse(await readFile("package.json", "utf8"));
 const { devDependencies, dependencies, scripts, ...manifest } = metadata;
 await writeFile("bundle/package.json", JSON.stringify(manifest, null, 2) + "\n");
 await cp("../../LICENSE", "bundle/LICENSE");
-const notices = [];
-for (const [name, license] of [["jose", "node_modules/jose/LICENSE.md"], ["zod", "../../packages/contracts/node_modules/zod/LICENSE"]]) {
-  notices.push(name + "\n" + await readFile(license, "utf8"));
+const packageFiles = [
+  createRequire(import.meta.url).resolve("jose/package.json"),
+  join(process.cwd(), "../../packages/contracts/node_modules/zod/package.json"),
+  createRequire(import.meta.url).resolve("electron-updater/package.json"),
+];
+const packages = new Map();
+const queue = [...packageFiles];
+while (queue.length) {
+  const packageFile = queue.shift();
+  const packageMetadata = JSON.parse(await readFile(packageFile, "utf8"));
+  const key = `${packageMetadata.name}@${packageMetadata.version}`;
+  if (packages.has(key)) continue;
+  const directory = dirname(packageFile);
+  let licenseText;
+  for (const candidate of ["LICENSE", "LICENSE.md", "LICENSE.txt", "license", "license.md"]) {
+    try { licenseText = await readFile(join(directory, candidate), "utf8"); break; } catch {}
+  }
+  if (!licenseText && packageMetadata.license === "MIT") licenseText = await readFile("../../LICENSE", "utf8");
+  if (!licenseText) throw new Error(`No bundled license text found for ${key}`);
+  packages.set(key, `${key} (${packageMetadata.license ?? "license in package"})\n${licenseText.trim()}\n`);
+  const nestedRequire = createRequire(packageFile);
+  for (const dependency of Object.keys(packageMetadata.dependencies ?? {}))
+    queue.push(nestedRequire.resolve(`${dependency}/package.json`));
 }
-await writeFile("bundle/THIRD_PARTY_NOTICES.txt", notices.join("\n\n"));
+await writeFile(
+  "bundle/THIRD_PARTY_NOTICES.txt",
+  [...packages].sort(([left], [right]) => left.localeCompare(right)).map(([, notice]) => notice).join("\n"),
+);

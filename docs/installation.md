@@ -128,6 +128,7 @@ hosted interface alone cannot update the native shell.
 | New chat | Cmd+N | Ctrl+N |
 | Reload interface | Cmd+R | Ctrl+R or F5 |
 | Delete current chat, with confirmation | Cmd+Shift+Backspace | Ctrl+Shift+Backspace |
+| Check for updates | File → Check for updates… | File → Check for updates… |
 | Quit application | Cmd+Q | Ctrl+Q |
 
 New chat preserves the previous chat's draft. Delete opens the existing
@@ -166,11 +167,32 @@ and choose **Try again** when the connection returns. Pending web shares use the
 account's local outbox and retry when the connection returns. Sign-out explains
 pending local data before it is discarded.
 
-For an update, download the newer release, quit the app from its tray menu, and
-install over the existing Windows application or replace the application in
-macOS Applications. Startup preferences and the protected login are retained
-unless the deployment's login configuration changes. There is no automatic
-updater in this first release.
+The desktop app checks the fixed Preview release catalog when it starts and every
+six hours while it is running. **File → Check for updates…** checks immediately.
+Checks do not download or install anything. Availability, download progress and
+the result appear in the app's update banner and Settings. The updater does not
+send a GitHub token or other account credential with its public catalog and
+release downloads.
+
+On Windows, choose **Download update**, then **Update and restart** after the
+download has been verified. The app waits for local draft and pending-send writes,
+then runs the verified per-user NSIS update in the existing installation location.
+Closing the window or using ordinary Quit never installs a downloaded update.
+The protected login, startup preference and retained application data stay in
+place. If the update is cancelled or fails verification, the installed version
+continues to run and can be retried.
+
+On macOS, choose **Download update**, then **Install update**. The app verifies
+the complete DMG again and opens it. Quit Multi Device Context, drag the new app
+over **Multi Device Context** in Applications, eject the disk image and reopen the
+app. This manual replacement is required because the private macOS build is
+ad-hoc signed and not notarized. Keep using the per-app Gatekeeper steps above;
+the updater does not remove quarantine attributes or bypass Gatekeeper.
+
+Install the first updater-enabled desktop release manually using the instructions
+at the top of this page. Older releases cannot discover the new catalog. A manual
+download from the versioned release remains the recovery path on either platform;
+compare `SHA256SUMS.txt` before installing it. Updating does not clear app data.
 
 Before uninstalling, finish or deliberately discard pending shares, sign out,
 turn off **Launch at login**, and quit. Use Windows Installed Apps to uninstall,
