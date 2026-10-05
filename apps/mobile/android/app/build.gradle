@@ -11,8 +11,18 @@ def signingAvailable = privateKeystore && privateAlias && privateStorePassword &
 def publicConfigFile = file('src/main/res/values/mobile_config.xml')
 def fixtureBuild = publicConfigFile.exists() && new XmlSlurper().parse(publicConfigFile).string.find { it.@name == 'mdc_fixture' }.text() == 'true'
 if (fixtureBuild && (System.getenv('CI') != 'true' || signingAvailable)) throw new GradleException('Fixture builds require CI=true and the generic debug test key')
+def acceptanceRequested = gradle.startParameter.taskNames.any { it.toLowerCase().contains('acceptance') }
+def acceptanceVersionName = System.getenv('MDC_ANDROID_ACCEPTANCE_VERSION_NAME')
+def acceptanceVersionCode = System.getenv('MDC_ANDROID_ACCEPTANCE_VERSION_CODE')
+def acceptanceConfigured = acceptanceVersionName || acceptanceVersionCode
+if (acceptanceRequested) {
+    if (System.getenv('CI') != 'true' || !fixtureBuild || signingAvailable) throw new GradleException('Android update acceptance requires CI fixture config and the generic debug key')
+    if (!(acceptanceVersionName ==~ /[1-9][0-9]{0,5}\.[0-9]{1,6}\.[0-9]{1,6}/)) throw new GradleException('MDC_ANDROID_ACCEPTANCE_VERSION_NAME must be a strict three-part version')
+    if (!(acceptanceVersionCode ==~ /[1-9][0-9]{0,8}/)) throw new GradleException('MDC_ANDROID_ACCEPTANCE_VERSION_CODE must be a positive integer')
+}
 ext.mdcReleaseSigningAvailable = signingAvailable
 ext.mdcProductionConfigAvailable = publicConfigFile.exists() && new XmlSlurper().parse(publicConfigFile).string.find { it.@name == 'mdc_fixture' }.text() == 'false'
+ext.mdcAcceptanceConfigured = acceptanceConfigured
 apply from: '../release-guard.gradle'
 def authDomain() {
  def config = file("src/main/res/values/mobile_config.xml")
@@ -30,8 +40,8 @@ android {
         applicationId "com.multidevicecontext.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode Integer.parseInt(System.getenv("MDC_ANDROID_VERSION_CODE") ?: "10")
-        versionName "0.5.5"
+        versionCode acceptanceRequested ? Integer.parseInt(acceptanceVersionCode) : Integer.parseInt(System.getenv("MDC_ANDROID_VERSION_CODE") ?: "10")
+        versionName acceptanceRequested ? acceptanceVersionName : "0.5.5"
         manifestPlaceholders = [auth0Domain: "${authDomain()}", auth0Scheme: "com.multidevicecontext.mobile"]
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
@@ -53,12 +63,28 @@ android {
         }
     }
     buildTypes {
-        debug { if (signingAvailable) signingConfig signingConfigs.localPrivate }
+        debug {
+            if (signingAvailable) signingConfig signingConfigs.localPrivate
+            buildConfigField 'String', 'MDC_UPDATE_CATALOG_URL', '"https://pbuchman.github.io/multi-device-context/updates/preview.json"'
+            buildConfigField 'String', 'MDC_UPDATE_REPOSITORY', '"https://github.com/pbuchman/multi-device-context"'
+            buildConfigField 'boolean', 'MDC_UPDATE_ACCEPTANCE', 'false'
+        }
 
         release {
             if (signingAvailable) signingConfig signingConfigs.localPrivate
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            buildConfigField 'String', 'MDC_UPDATE_CATALOG_URL', '"https://pbuchman.github.io/multi-device-context/updates/preview.json"'
+            buildConfigField 'String', 'MDC_UPDATE_REPOSITORY', '"https://github.com/pbuchman/multi-device-context"'
+            buildConfigField 'boolean', 'MDC_UPDATE_ACCEPTANCE', 'false'
+        }
+
+        acceptance {
+            initWith debug
+            matchingFallbacks = ['debug']
+            buildConfigField 'String', 'MDC_UPDATE_CATALOG_URL', '"https://127.0.0.1:38443/updates/preview.json"'
+            buildConfigField 'String', 'MDC_UPDATE_REPOSITORY', '"https://127.0.0.1:38443/repository"'
+            buildConfigField 'boolean', 'MDC_UPDATE_ACCEPTANCE', 'true'
         }
     }
 }

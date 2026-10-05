@@ -1,12 +1,15 @@
 package com.multidevicecontext.mobile
 
 import java.net.URI
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -22,12 +25,36 @@ data class AndroidUpdateOffer(
  val minimumSdk:Int,
 )
 
+class UpdateDeadline private constructor(private val expiresAtNanos:Long,private val nanoTime:()->Long) {
+ fun check() {if(nanoTime()>=expiresAtNanos)throw SocketTimeoutException("Update operation deadline exceeded")}
+ fun remainingNanos():Long {check();return (expiresAtNanos-nanoTime()).coerceAtLeast(1)}
+ fun remainingMillis(maximum:Int):Int {
+  val remaining=remainingNanos();val rounded=(remaining+999_999L)/1_000_000L
+  return rounded.coerceIn(1,maximum.toLong()).toInt()
+ }
+ companion object {
+  fun afterMillis(timeout:Long,nanoTime:()->Long=System::nanoTime):UpdateDeadline {
+   require(timeout>0) {"Update deadline must be positive"};val now=nanoTime()
+   return UpdateDeadline(Math.addExact(now,TimeUnit.MILLISECONDS.toNanos(timeout)),nanoTime)
+  }
+ }
+}
+
 object UpdateStream {
- fun copyAndVerify(input:InputStream,output:OutputStream,offer:AndroidUpdateOffer,progress:(Long)->Unit) {
+ fun readBounded(input:InputStream,maximum:Long,deadline:UpdateDeadline,beforeRead:()->Unit):ByteArray {
+  val output=ByteArrayOutputStream();val buffer=ByteArray(8192)
+  while(true) {
+   deadline.check();beforeRead();val count=input.read(buffer);deadline.check();if(count<0)break
+   require(output.size().toLong()+count<=maximum) {"Update response exceeds limit"};output.write(buffer,0,count)
+  }
+  return output.toByteArray()
+ }
+
+ fun copyAndVerify(input:InputStream,output:OutputStream,offer:AndroidUpdateOffer,deadline:UpdateDeadline?=null,progress:(Long)->Unit) {
   val sha256=MessageDigest.getInstance("SHA-256");val sha512=MessageDigest.getInstance("SHA-512")
   val buffer=ByteArray(64*1024);var transferred=0L
   while(true) {
-   val count=input.read(buffer);if(count<0)break
+   deadline?.check();val count=input.read(buffer);deadline?.check();if(count<0)break
    transferred+=count;require(transferred<=offer.size && transferred<=UpdatePolicy.MAX_ARTIFACT_BYTES) {"Update download exceeds declared size"}
    output.write(buffer,0,count);sha256.update(buffer,0,count);sha512.update(buffer,0,count);progress(transferred)
   }
@@ -48,11 +75,13 @@ object ApkIdentityPolicy {
 }
 
 object UpdatePolicy {
- const val CATALOG_URL="https://pbuchman.github.io/multi-device-context/updates/preview.json"
+ val CATALOG_URL:String=BuildConfig.MDC_UPDATE_CATALOG_URL
  const val CHECK_INTERVAL_MS=21_600_000L
+ const val CATALOG_DEADLINE_MS=60_000L
+ const val DOWNLOAD_DEADLINE_MS=900_000L
  const val MAX_CATALOG_BYTES=65_536
  const val MAX_ARTIFACT_BYTES=1_073_741_824L
- private const val REPOSITORY="https://github.com/pbuchman/multi-device-context"
+ private val REPOSITORY:String=BuildConfig.MDC_UPDATE_REPOSITORY
  private val versionPattern=Regex("^(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})$")
  private val sha256Pattern=Regex("^[a-f0-9]{64}$")
  private val sha512Pattern=Regex("^[A-Za-z0-9+/]{86}==$")
@@ -96,12 +125,13 @@ object UpdatePolicy {
 
  fun allowedCatalogUrl(value:String)=value==CATALOG_URL
  fun allowedArtifactUrl(value:String):Boolean {
-  val uri=parseHttps(value) ?: return false
-  return uri.host=="github.com" && uri.rawQuery==null && uri.rawFragment==null && uri.path.startsWith("/pbuchman/multi-device-context/releases/download/v")
+  val uri=parseHttps(value) ?: return false;val repository=parseHttps(REPOSITORY) ?: return false
+  return uri.host==repository.host && uri.port==repository.port && uri.rawQuery==null && uri.rawFragment==null && uri.path.startsWith("${repository.path}/releases/download/v")
  }
  fun allowedArtifactRedirect(value:String):Boolean {
   val uri=parseHttps(value) ?: return false
-  return uri.host in setOf("github.com","objects.githubusercontent.com","release-assets.githubusercontent.com","github-releases.githubusercontent.com")
+  if(BuildConfig.MDC_UPDATE_ACCEPTANCE)return uri.host=="127.0.0.1" && uri.port==38443
+  return uri.port==-1 && uri.host in setOf("github.com","objects.githubusercontent.com","release-assets.githubusercontent.com","github-releases.githubusercontent.com")
  }
 
  fun verify(bytes:ByteArray,size:Long,sha256:String,sha512:String):Boolean =
@@ -142,6 +172,6 @@ object UpdatePolicy {
   return number.toLong()
  }
  private fun parseHttps(value:String):URI?=try {
-  URI(value).takeIf {it.scheme=="https" && it.userInfo==null && it.host!=null && it.port==-1}
+  URI(value).takeIf {it.scheme=="https" && it.userInfo==null && it.host!=null}
  } catch(_:Exception) {null}
 }

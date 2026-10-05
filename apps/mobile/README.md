@@ -30,5 +30,6 @@ Automatic updates use the fixed public Preview catalog documented in
 still requires a manual in-place install. Later updates are downloaded to private
 cache, verified against their catalog digests and installed package identity, and
 then handed to Android's permission and confirmation UI. Keep the signing key,
-application ID, and increasing `MDC_ANDROID_VERSION_CODE` unchanged. Hosted web
-assets do not replace the interface bundled in an installed APK.
+and application ID unchanged, and increase `MDC_ANDROID_VERSION_CODE` for every
+release. Hosted web assets do not replace the interface bundled in an installed
+APK.

@@ -13,7 +13,8 @@
     "android:debug": "node --experimental-strip-types scripts/build.mjs && cap sync android && cd android && ./gradlew assembleDebug",
     "android:release": "node --experimental-strip-types scripts/build.mjs --release && cap sync android && cd android && ./gradlew assembleRelease",
     "android:install": "cd android && ./gradlew installDebug",
-    "android:guards": "node scripts/release-guards.mjs"
+    "android:guards": "node scripts/release-guards.mjs",
+    "android:update-acceptance": "node scripts/android-update-acceptance.mjs"
   },
   "dependencies": {
     "@capacitor/android": "8.5.2",

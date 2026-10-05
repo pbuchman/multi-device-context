@@ -5,6 +5,7 @@ gradle.taskGraph.whenReady { graph ->
         task.project == project && task.name.toLowerCase().contains('release')
     }
     if (includesRelease) {
+        if (project.mdcAcceptanceConfigured) throw new GradleException('Release rejects Android update acceptance configuration')
         if (!project.mdcReleaseSigningAvailable) throw new GradleException('Release requires private Android signing configuration')
         if (!project.mdcProductionConfigAvailable) throw new GradleException('Release requires fetched production config; fixtures are prohibited')
     }

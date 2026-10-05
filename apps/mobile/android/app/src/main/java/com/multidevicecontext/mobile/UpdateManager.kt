@@ -11,7 +11,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -148,17 +147,22 @@ class AndroidUpdateManager private constructor(private val context:Context,recov
 
  fun install():JSONObject {
   val ready=requireNotNull(verified) {"Download and verify the update before installing"}
+  try {revalidateOrThrow(ready)} catch(cause:Exception) {
+   clearCache();publish(invalidCachedUpdate(ready.offer));throw cause
+  }
+  publish(AndroidUpdateState("installing",availableVersion=ready.offer.version,transferred=ready.offer.size,total=ready.offer.size))
   try {
-   revalidateOrThrow(ready)
-   publish(AndroidUpdateState("installing",availableVersion=ready.offer.version,transferred=ready.offer.size,total=ready.offer.size))
    commit(ready)
    verified=null;apk.delete()
    return state.json()
   } catch(cause:Exception) {
-   publish(AndroidUpdateState("ready",availableVersion=ready.offer.version,transferred=ready.offer.size,total=ready.offer.size,message="Could not open the Android installer. Retry when ready."))
+   if(revalidate(ready))publish(AndroidUpdateState("ready",availableVersion=ready.offer.version,transferred=ready.offer.size,total=ready.offer.size,message="Could not open the Android installer. Retry when ready."))
+   else {clearCache();publish(invalidCachedUpdate(ready.offer))}
    throw cause
   }
  }
+
+ private fun invalidCachedUpdate(selected:AndroidUpdateOffer)=AndroidUpdateState("error",availableVersion=selected.version,message="The cached update could not be verified. Check again to download it.")
 
  private fun automaticCheck() {if(context.getString(R.string.mdc_fixture)=="true")return;execute {try {check()} catch(_:Exception) {}}}
  private fun publish(next:AndroidUpdateState) {
@@ -175,45 +179,50 @@ class AndroidUpdateManager private constructor(private val context:Context,recov
  }
 
  private fun download(selected:AndroidUpdateOffer) {
-  var current=selected.url;var redirects=0
+  var current=selected.url;var redirects=0;val deadline=UpdateDeadline.afterMillis(UpdatePolicy.DOWNLOAD_DEADLINE_MS)
   while(true) {
+   deadline.check()
    require(if(redirects==0)UpdatePolicy.allowedArtifactUrl(current) else UpdatePolicy.allowedArtifactRedirect(current)) {"Update download URL is not allowed"}
-   val connection=open(current)
+   val connection=open(current,deadline);val cancellation=disconnectAtDeadline(connection,deadline)
    try {
     val code=connection.responseCode
+    deadline.check()
     if(code in REDIRECTS) {require(redirects++<5) {"Too many update redirects"};current=redirect(current,connection.getHeaderField("Location"));continue}
     require(code==HttpURLConnection.HTTP_OK) {"Update download failed"}
     val length=connection.contentLengthLong;require(length==-1L || length==selected.size) {"Update size changed"}
     connection.inputStream.use {input->FileOutputStream(partial).use {output->
-     var last=-1;UpdateStream.copyAndVerify(input,output,selected) {transferred->
+     var last=-1;UpdateStream.copyAndVerify(input,output,selected,deadline) {transferred->
+      connection.readTimeout=deadline.remainingMillis(READ_TIMEOUT_MS)
       val percent=(transferred*100/selected.size).toInt();if(percent!=last) {last=percent;publish(AndroidUpdateState("downloading",availableVersion=selected.version,transferred=transferred,total=selected.size))}
      };output.fd.sync()
     }}
+    deadline.check()
     return
-   } finally {connection.disconnect()}
+   } finally {cancellation.cancel(false);connection.disconnect()}
   }
  }
 
  private fun fetchBytes(initial:String,maximum:Long,catalog:Boolean):ByteArray {
-  var current=initial;var redirects=0
+  var current=initial;var redirects=0;val deadline=UpdateDeadline.afterMillis(UpdatePolicy.CATALOG_DEADLINE_MS)
   while(true) {
+   deadline.check()
    require(if(catalog)UpdatePolicy.allowedCatalogUrl(current) else UpdatePolicy.allowedArtifactRedirect(current)) {"Update URL is not allowed"}
-   val connection=open(current)
+   val connection=open(current,deadline);val cancellation=disconnectAtDeadline(connection,deadline)
    try {
     val code=connection.responseCode
+    deadline.check()
     if(code in REDIRECTS) {require(redirects++<5) {"Too many update redirects"};current=redirect(current,connection.getHeaderField("Location"));continue}
     require(code==HttpURLConnection.HTTP_OK) {"Update request failed"}
     val length=connection.contentLengthLong;require(length==-1L || length<=maximum) {"Update response exceeds limit"}
     return connection.inputStream.use {input->
-     val output=ByteArrayOutputStream();val buffer=ByteArray(8192)
-     while(true) {val count=input.read(buffer);if(count<0)break;require(output.size().toLong()+count<=maximum) {"Update response exceeds limit"};output.write(buffer,0,count)}
-     output.toByteArray()
+     UpdateStream.readBounded(input,maximum,deadline) {connection.readTimeout=deadline.remainingMillis(READ_TIMEOUT_MS)}
     }
-   } finally {connection.disconnect()}
+   } finally {cancellation.cancel(false);connection.disconnect()}
   }
  }
- private fun open(value:String)=(URL(value).openConnection() as HttpsURLConnection).apply {
-  instanceFollowRedirects=false;connectTimeout=15_000;readTimeout=30_000;requestMethod="GET";useCaches=false
+ private fun disconnectAtDeadline(connection:HttpsURLConnection,deadline:UpdateDeadline)=timer.schedule({connection.disconnect()},deadline.remainingNanos(),TimeUnit.NANOSECONDS)
+ private fun open(value:String,deadline:UpdateDeadline)=(URL(value).openConnection() as HttpsURLConnection).apply {
+  instanceFollowRedirects=false;connectTimeout=deadline.remainingMillis(CONNECT_TIMEOUT_MS);readTimeout=deadline.remainingMillis(READ_TIMEOUT_MS);requestMethod="GET";useCaches=false
   setRequestProperty("Accept","application/json, application/vnd.android.package-archive;q=0.9")
   setRequestProperty("User-Agent","Multi-Device-Context/${BuildConfig.VERSION_NAME} Android")
  }
@@ -260,23 +269,35 @@ class AndroidUpdateManager private constructor(private val context:Context,recov
   when(intent.getIntExtra(PackageInstaller.EXTRA_STATUS,PackageInstaller.STATUS_FAILURE)) {
    PackageInstaller.STATUS_PENDING_USER_ACTION -> {
     val confirmation=if(Build.VERSION.SDK_INT>=33)intent.getParcelableExtra(Intent.EXTRA_INTENT,Intent::class.java) else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_INTENT) as? Intent
-    if(confirmation==null)finishSession(AndroidUpdateState("error",availableVersion=version,message="Android did not provide an installation confirmation."))
-    else context.startActivity(confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    if(confirmation==null)failConfirmation(sessionId,version,"Android did not provide an installation confirmation.")
+    else try {context.startActivity(confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}
+    catch(_:Exception) {failConfirmation(sessionId,version,"Android could not open the installation confirmation. Check again to retry.")}
    }
    PackageInstaller.STATUS_SUCCESS -> finishSession(AndroidUpdateState("idle"))
    PackageInstaller.STATUS_FAILURE_ABORTED -> finishSession(AndroidUpdateState("error",availableVersion=version,message="Installation was cancelled. Check again to retry."))
    else -> finishSession(AndroidUpdateState("error",availableVersion=version,message="Android could not install the update. Check again to retry."))
   }
  }
+ private fun failConfirmation(sessionId:Int,version:String?,message:String) {
+  try {context.packageManager.packageInstaller.abandonSession(sessionId)} catch(_:Exception) {}
+  finishSession(AndroidUpdateState("error",availableVersion=version,message=message))
+ }
  private fun finishSession(next:AndroidUpdateState) {prefs.edit().remove(KEY_SESSION).remove(KEY_TOKEN).remove(KEY_VERSION).commit();publish(next)}
  private fun recoverSessions() {
-  val installer=context.packageManager.packageInstaller;val active=prefs.getInt(KEY_SESSION,-1)
+  val installer=context.packageManager.packageInstaller;val active=prefs.getInt(KEY_SESSION,-1);val activeInfo=if(active>=0)installer.getSessionInfo(active) else null
   for(session in installer.mySessions)if(session.sessionId!=active)try {installer.abandonSession(session.sessionId)} catch(_:Exception) {}
-  if(active>=0 && installer.getSessionInfo(active)!=null)state=AndroidUpdateState("installing",availableVersion=prefs.getString(KEY_VERSION,null))
-  else prefs.edit().remove(KEY_SESSION).remove(KEY_TOKEN).remove(KEY_VERSION).commit()
+  if(activeInfo!=null && isCommitted(activeInfo))state=AndroidUpdateState("installing",availableVersion=prefs.getString(KEY_VERSION,null))
+  else {
+   if(activeInfo!=null)try {installer.abandonSession(active)} catch(_:Exception) {}
+   prefs.edit().remove(KEY_SESSION).remove(KEY_TOKEN).remove(KEY_VERSION).commit()
+  }
  }
 
+ private fun isCommitted(info:PackageInstaller.SessionInfo)=if(Build.VERSION.SDK_INT>=29)info.isCommitted else @Suppress("DEPRECATION") info.isSealed
+
  companion object {
+  private const val CONNECT_TIMEOUT_MS=15_000
+  private const val READ_TIMEOUT_MS=30_000
   private val REDIRECTS=setOf(301,302,303,307,308)
   private const val KEY_SESSION="installerSession"
   private const val KEY_TOKEN="installerToken"

@@ -6,6 +6,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.net.SocketTimeoutException
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -90,6 +91,36 @@ class UpdatePolicyTest {
   val output=ByteArrayOutputStream()
   assertThrows(IOException::class.java) {UpdateStream.copyAndVerify(disconnected,output,offer) {}}
   assertEquals(1,output.size())
+ }
+
+ @Test fun stopsATrickleStreamAtTheWholeOperationDeadline() {
+  val bytes=ByteArray(10) {it.toByte()}
+  val offer=AndroidUpdateOffer("0.5.5",10,"https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/Multi-Device-Context-0.5.5-android-v10-release.apk","update.apk",bytes.size.toLong(),hex(MessageDigest.getInstance("SHA-256").digest(bytes)),Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-512").digest(bytes)),26)
+  var now=0L;var offset=0
+  val trickle=object:InputStream() {
+   override fun read():Int=throw UnsupportedOperationException()
+   override fun read(buffer:ByteArray,start:Int,length:Int):Int {
+    if(offset==bytes.size)return -1
+    buffer[start]=bytes[offset++];now+=100_000_000L;return 1
+   }
+  }
+  val output=ByteArrayOutputStream()
+  val deadline=UpdateDeadline.afterMillis(250) {now}
+  assertThrows(SocketTimeoutException::class.java) {UpdateStream.copyAndVerify(trickle,output,offer,deadline) {}}
+  assertEquals(2,output.size())
+ }
+
+ @Test fun stopsATrickleCatalogAtTheWholeOperationDeadline() {
+  var now=0L;var reads=0
+  val trickle=object:InputStream() {
+   override fun read():Int=throw UnsupportedOperationException()
+   override fun read(buffer:ByteArray,start:Int,length:Int):Int {
+    buffer[start]='x'.code.toByte();reads++;now+=100_000_000L;return 1
+   }
+  }
+  val deadline=UpdateDeadline.afterMillis(250) {now}
+  assertThrows(SocketTimeoutException::class.java) {UpdateStream.readBounded(trickle,UpdatePolicy.MAX_CATALOG_BYTES.toLong(),deadline) {}}
+  assertEquals(3,reads)
  }
 
  @Test fun apkIdentityRequiresExactPackageCatalogVersionSupportedSdkAndInstalledCertificate() {

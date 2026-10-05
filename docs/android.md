@@ -1,9 +1,11 @@
-# Private Android app
+# Android app
 
 The Android package reuses the React interface, account, contexts and attachment
 storage used by the web and desktop apps. Its application ID is
 `com.multidevicecontext.mobile`. It targets Android 8.0/API 26 or later; builds use
-API 36, JDK 21 and Capacitor 8.5.2. It is installed privately as an APK.
+API 36, JDK 21 and Capacitor 8.5.2. Preview APKs are distributed through GitHub
+and installed outside an app store. The signing key and local build configuration
+remain private.
 
 There is no store release, push notification, background service or background
 synchronization. Preview APKs can update through the app after one updater-capable
@@ -270,6 +272,29 @@ apps/mobile/android/gradlew -p apps/mobile/android connectedDebugAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest
 ```
 
+The full synthetic updater acceptance builds versions A and B with Android's
+generic debug key, serves B from an isolated loopback HTTPS feed, and drives the
+native manager through catalog download, verification, unknown-source refusal,
+system-confirmation cancellation, retry, and successful `PackageInstaller`
+replacement. It verifies the exact installed B bytes and preserved private test
+data. The command intentionally uninstalls this package first and is restricted
+to an API 36 emulator:
+
+```sh
+CI=true \
+MDC_MOBILE_CONFIG_FIXTURE="$PWD/apps/mobile/tests/fixtures/runtime-config.json" \
+MDC_ANDROID_SIGNING_CONFIG=/tmp/mdc-no-private-signing.json \
+ANDROID_SERIAL=emulator-5580 \
+JAVA_HOME=/absolute/path/to/jdk-21 \
+ANDROID_HOME=/absolute/path/to/android-sdk \
+pnpm --filter @mdc/mobile android:update-acceptance
+```
+
+The acceptance variant and its fixed loopback feed are compiled only for that
+guarded command. Release task graphs reject the acceptance configuration. The
+test does not read a private signing configuration or contact a production
+backend.
+
 ## Device support boundaries
 
 The following behavior depends on real devices or external applications and is
@@ -279,8 +304,10 @@ not established by source, unit, lint, or synthetic CI checks alone:
 - rotation, Back/keyboard behavior, and process recreation with drafts, queued
   content, and the authenticated session;
 - Android external-share delivery and delivery to a second signed-in device;
-- signed in-place updater handoff, unknown-source refusal, system-confirmation
-  cancellation, and offline recovery on the intended phone;
+- private-signed in-place updater handoff, unknown-source refusal,
+  system-confirmation cancellation, and offline recovery on the intended
+  physical phone (the generic-debug-key API 36 emulator path is covered by the
+  synthetic acceptance above);
 - first launch, login launch, and sharing on the intended Windows and macOS
   target machines; and
 - DUDU 7 installation and behavior.
