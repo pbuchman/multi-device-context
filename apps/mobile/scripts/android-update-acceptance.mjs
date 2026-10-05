@@ -21,7 +21,7 @@ const REPOSITORY = resolve(SCRIPT_DIR, '../../..');
 const ANDROID = join(REPOSITORY, 'apps/mobile/android');
 const APK = join(ANDROID, 'app/build/outputs/apk/acceptance/app-acceptance.apk');
 const CA_RESOURCE = join(ANDROID, 'app/src/acceptance/res/raw/mdc_acceptance_ca.pem');
-const DEFAULT_REPORT = '/tmp/mdc-public-audit.FNGfKh/android-native-acceptance-run.json';
+const DEFAULT_REPORT = join(ANDROID, 'build/reports/android-update-acceptance.json');
 
 export function acceptanceEnvironment(repository, source, versionName, versionCode) {
   const env = { ...source };

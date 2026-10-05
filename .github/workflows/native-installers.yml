@@ -55,7 +55,26 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Validate native sources and update harness
+        shell: bash
         run: |
+          node --input-type=module <<'NODE'
+          import { mkdtemp, writeFile, lstat, open, rm } from 'node:fs/promises';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          const directory = await mkdtemp(join(tmpdir(), 'mdc-native-stat-'));
+          const path = join(directory, 'synthetic.bin');
+          try {
+            await writeFile(path, 'synthetic fixture');
+            const handle = await open(path, 'r');
+            try {
+              const fields = ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'mtimeNs', 'ctimeNs'];
+              const select = stat => Object.fromEntries(fields.filter(key => key in stat).map(key => [key, String(stat[key])]));
+              console.log(JSON.stringify({ platform: process.platform, node: process.version,
+                pathStat: select(await lstat(path)), handleStat: select(await handle.stat()),
+                pathBigInt: select(await lstat(path, { bigint: true })), handleBigInt: select(await handle.stat({ bigint: true })) }));
+            } finally { await handle.close(); }
+          } finally { await rm(directory, { recursive: true, force: true }); }
+          NODE
           pnpm vitest run apps/desktop/src
           pnpm --filter @mdc/desktop test:update-harness
       - run: pnpm --filter @mdc/desktop typecheck
