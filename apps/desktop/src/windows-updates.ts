@@ -1,7 +1,7 @@
 import type { EventEmitter } from "node:events";
 import { basename } from "node:path";
-import type { ProgressInfo, UpdateCheckResult, UpdateDownloadedEvent, UpdateInfo } from "electron-updater";
-import type { WindowsUpdateArtifact } from "@mdc/contracts";
+import { CancellationToken, type ProgressInfo, type UpdateCheckResult, type UpdateDownloadedEvent, type UpdateInfo } from "electron-updater";
+import { MAX_UPDATE_ARTIFACT_BYTES, type WindowsUpdateArtifact } from "@mdc/contracts";
 import {
   reverifyDownloadedArtifact,
   verifyDownloadedArtifact,
@@ -20,7 +20,7 @@ export interface WindowsUpdater extends EventEmitter {
   disableDifferentialDownload: boolean;
   requestHeaders: Record<string, string> | null;
   checkForUpdates(): Promise<UpdateCheckResult | null>;
-  downloadUpdate(): Promise<string[]>;
+  downloadUpdate(cancellationToken?: CancellationToken): Promise<string[]>;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
 }
 
@@ -39,6 +39,9 @@ export function validateWindowsUpdateInfo(
   const fileKeys = file ? Object.keys(file).sort().join(",") : "";
   if (
     info.version !== version ||
+    !Number.isSafeInteger(artifact.size) ||
+    artifact.size <= 0 ||
+    artifact.size > MAX_UPDATE_ARTIFACT_BYTES ||
     info.files?.length !== 1 ||
     !file ||
     fileKeys !== "sha512,size,url" ||
@@ -48,16 +51,20 @@ export function validateWindowsUpdateInfo(
     info.path !== artifact.url ||
     info.sha512 !== artifact.sha512 ||
     packages != null
-  ) throw new Error("Windows update metadata does not match the signed catalog selection.");
+  ) throw new Error("Windows update metadata does not match the catalog selection.");
 }
 
 export class WindowsUpdateBackend implements UpdateBackend {
   readonly #updater: WindowsUpdater;
+  readonly #downloadTimeoutMs: number;
   #artifact: WindowsUpdateArtifact | undefined;
   #version: string | undefined;
 
-  constructor(updater: WindowsUpdater) {
+  constructor(updater: WindowsUpdater, downloadTimeoutMs = 15 * 60_000) {
     this.#updater = updater;
+    if (!Number.isSafeInteger(downloadTimeoutMs) || downloadTimeoutMs <= 0)
+      throw new Error("Invalid Windows update download deadline.");
+    this.#downloadTimeoutMs = downloadTimeoutMs;
     updater.autoDownload = false;
     updater.autoInstallOnAppQuit = false;
     updater.autoRunAppAfterInstall = true;
@@ -90,14 +97,39 @@ export class WindowsUpdateBackend implements UpdateBackend {
       throw new Error("Windows update metadata must be checked before download.");
     let downloaded: UpdateDownloadedEvent | undefined;
     let cancelled = false;
-    const onProgress = (value: ProgressInfo) => progress(value.transferred, value.total);
+    let downloadFailure: Error | undefined;
+    const cancellation = new CancellationToken();
+    const onProgress = (progressInfo: ProgressInfo) => {
+      if (
+        !Number.isSafeInteger(progressInfo.transferred) ||
+        !Number.isSafeInteger(progressInfo.total) ||
+        progressInfo.transferred < 0 ||
+        progressInfo.total !== artifact.size ||
+        progressInfo.transferred > artifact.size ||
+        progressInfo.transferred > MAX_UPDATE_ARTIFACT_BYTES
+      ) {
+        downloadFailure = new Error("Windows update download progress exceeded the selected size.");
+        cancellation.cancel();
+        return;
+      }
+      progress(progressInfo.transferred, progressInfo.total);
+    };
     const onDownloaded = (event: UpdateDownloadedEvent) => { downloaded = event; };
     const onCancelled = () => { cancelled = true; };
     this.#updater.on("download-progress", onProgress);
     this.#updater.on("update-downloaded", onDownloaded);
     this.#updater.on("update-cancelled", onCancelled);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
-      const paths = await this.#updater.downloadUpdate();
+      const timeout = new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => {
+          downloadFailure = new Error("Windows update download timed out.");
+          cancellation.cancel();
+          reject(downloadFailure);
+        }, this.#downloadTimeoutMs);
+      });
+      const paths = await Promise.race([this.#updater.downloadUpdate(cancellation), timeout]);
+      if (downloadFailure) throw downloadFailure;
       if (cancelled) throw new Error("Windows update download was cancelled.");
       if (paths.length !== 1 || !downloaded || paths[0] !== downloaded.downloadedFile)
         throw new Error("Windows updater returned an unexpected cached installer.");
@@ -106,6 +138,7 @@ export class WindowsUpdateBackend implements UpdateBackend {
         throw new Error("Windows updater cached an unexpected installer name.");
       return await verifyDownloadedArtifact(paths[0]!, artifact);
     } finally {
+      if (deadline) clearTimeout(deadline);
       this.#updater.off("download-progress", onProgress);
       this.#updater.off("update-downloaded", onDownloaded);
       this.#updater.off("update-cancelled", onCancelled);
@@ -116,6 +149,16 @@ export class WindowsUpdateBackend implements UpdateBackend {
     if (verified.artifact.platform !== "win32" || !this.#artifact || verified.artifact.url !== this.#artifact.url)
       throw new Error("The cached Windows update is no longer selected.");
     await reverifyDownloadedArtifact(verified);
-    this.#updater.quitAndInstall(false, true);
+    let installError: Error | undefined;
+    const onError = (error: unknown) => {
+      installError = error instanceof Error ? error : new Error("Windows updater could not start the installer.");
+    };
+    this.#updater.on("error", onError);
+    try {
+      this.#updater.quitAndInstall(false, true);
+      if (installError) throw installError;
+    } finally {
+      this.#updater.off("error", onError);
+    }
   }
 }

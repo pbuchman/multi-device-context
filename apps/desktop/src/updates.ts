@@ -84,6 +84,8 @@ export class NativeUpdateManager implements NativeUpdates {
 
   startUpdate(): Promise<UpdateState> {
     if (this.#downloadTask) return this.#downloadTask;
+    if (this.#state.status === "ready" && this.#verified) return this.getUpdateState();
+    if (this.#state.status === "installing") return this.getUpdateState();
     const task = this.#runDownload().finally(() => {
       if (this.#downloadTask === task) this.#downloadTask = undefined;
     });
@@ -107,6 +109,14 @@ export class NativeUpdateManager implements NativeUpdates {
     });
     try {
       await this.#options.backend.install(verified);
+      if (this.#options.platform === "darwin") {
+        this.#setState({
+          status: "ready",
+          availableVersion: version,
+          progress: { transferred: verified.artifact.size, total: verified.artifact.size, percent: 100 },
+          message: "The verified update was opened. Quit the app, then replace it from the disk image.",
+        });
+      }
     } catch {
       this.#setState({
         status: "error",

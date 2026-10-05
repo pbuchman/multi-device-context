@@ -6,7 +6,7 @@ type Command = DesktopCommandRequest["command"];
 /** A lifecycle acknowledgement belongs to exactly one renderer subscription. */
 export class DesktopCommands {
   #registration: string | undefined;
-  #pending: { request: DesktopCommandRequest; completion?: (allow: boolean) => void } | undefined;
+  #pending: { request: DesktopCommandRequest; completion?: (allow: boolean) => void | Promise<void> } | undefined;
   constructor(private readonly actions: {
     send(request: DesktopCommandRequest): void;
     newChat(): void;
@@ -18,10 +18,11 @@ export class DesktopCommands {
   subscribe(registration: string) { this.#cancelPending(); this.#registration = registration; this.actions.changed(); }
   unsubscribe(registration: string) { if (this.#registration === registration) this.reset(); }
   reset() { this.#registration = undefined; this.#cancelPending(); this.actions.changed(); }
-  request(command: Command, completion?: (allow: boolean) => void): boolean {
+  request(command: Command, completion?: (allow: boolean) => void | Promise<void>): boolean {
     if (this.#pending) return false;
     if (!this.ready) {
-      if (completion && (command === "reload" || command === "quit")) completion(true);
+      if (completion && (command === "reload" || command === "quit"))
+        void Promise.resolve().then(() => completion(true)).catch(() => {});
       else {
         if (command === "new-chat") this.actions.newChat();
         if (command === "reload") this.actions.reload();
@@ -34,19 +35,20 @@ export class DesktopCommands {
     this.actions.send(request);
     return true;
   }
-  complete(registration: string, id: string, allow: boolean) {
+  complete(registration: string, id: string, allow: boolean): Promise<void> {
     if (registration !== this.#registration || this.#pending?.request.id !== id) throw new Error("This application command has expired.");
     const { request, completion } = this.#pending;
     this.#pending = undefined;
-    if (completion) { completion(allow); return; }
-    if (!allow) return;
+    if (completion) return Promise.resolve(completion(allow));
+    if (!allow) return Promise.resolve();
     if (request.command === "reload") this.actions.reload();
     if (request.command === "quit") this.actions.quit();
+    return Promise.resolve();
   }
   #cancelPending() {
     const completion = this.#pending?.completion;
     this.#pending = undefined;
-    completion?.(false);
+    if (completion) void Promise.resolve().then(() => completion(false)).catch(() => {});
   }
 }
 

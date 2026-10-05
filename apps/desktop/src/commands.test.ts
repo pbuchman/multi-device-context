@@ -37,6 +37,14 @@ it("runs an update installer only after the renderer acknowledges the quit save"
   expect(install).toHaveBeenCalledOnce();
   expect(actions.quit).not.toHaveBeenCalled();
 });
+it("propagates an acknowledged update installer failure to command completion", async () => {
+  const { commands, actions } = fixture(); commands.subscribe("registration");
+  const failure = new Error("installer failed");
+  commands.request("quit", async allow => { if (allow) throw failure; });
+  const accepted = actions.send.mock.lastCall![0];
+  await expect(commands.complete("registration", accepted.id, true)).rejects.toBe(failure);
+  expect(actions.quit).not.toHaveBeenCalled();
+});
 it("invalidates pending lifecycle requests on unsubscribe and navigation", () => {
   const { commands, actions } = fixture(); commands.subscribe("old"); commands.request("quit"); const old = actions.send.mock.lastCall![0];
   commands.subscribe("new"); commands.unsubscribe("old"); expect(commands.ready).toBe(true);

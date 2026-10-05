@@ -96,6 +96,28 @@ describe("native update state", () => {
     expect(states).toContain("downloading");
     expect(states).toContain("ready");
     expect(states).toContain("installing");
+    await expect(manager.getUpdateState()).resolves.toMatchObject({
+      status: "ready",
+      message: expect.stringMatching(/opened|replace/i),
+    });
+    await expect(manager.startUpdate()).resolves.toMatchObject({ status: "ready" });
+    expect(backend.download).toHaveBeenCalledOnce();
+  });
+
+  it("does not replace the verified cache while installation is in progress", async () => {
+    let finishInstall!: () => void;
+    const { manager, backend, finishDownload } = fixture();
+    (backend.install as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { finishInstall = resolve; });
+    });
+    await manager.checkForUpdates();
+    const download = manager.startUpdate();
+    await vi.waitFor(() => expect(backend.download).toHaveBeenCalledOnce());
+    finishDownload(); await download;
+    const install = manager.installUpdate();
+    await expect(manager.startUpdate()).resolves.toMatchObject({ status: "installing" });
+    expect(backend.download).toHaveBeenCalledOnce();
+    finishInstall(); await install;
   });
 
   it("reports network and download failures without enabling install", async () => {

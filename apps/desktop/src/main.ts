@@ -45,6 +45,7 @@ import {
 import { MacUpdateBackend } from "./mac-updates.js";
 import { NativeUpdateManager } from "./updates.js";
 import { WindowsUpdateBackend, type WindowsUpdater } from "./windows-updates.js";
+import { installDesktopUpdate } from "./update-install.js";
 
 declare const MDC_APP_ORIGIN: string;
 const recovery = pathToFileURL(join(__dirname, "resources/recovery.html")).href;
@@ -491,13 +492,7 @@ function wireBridge(): void {
   handle("getUpdateState", 0, () => updates.getUpdateState());
   handle("checkForUpdates", 0, () => updates.checkForUpdates());
   handle("startUpdate", 0, () => updates.startUpdate());
-  handle("installUpdate", 0, () => {
-    if (!updates.isReadyToInstall()) throw new Error("The update is not ready to install.");
-    const accepted = commands.request("quit", allow => {
-      if (allow) void updates.installUpdate().catch(report);
-    });
-    if (!accepted) throw new Error("Another application action is still waiting to finish.");
-  });
+  handle("installUpdate", 0, () => installDesktopUpdate(process.platform as "darwin" | "win32", commands, updates));
   ipcMain.handle("mdc:retry", async (event, ...args: unknown[]) => {
     if (
       !window ||

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { UpdateInfo } from "electron-updater";
+import type { CancellationToken, UpdateInfo } from "electron-updater";
 import { NsisUpdater } from "electron-updater";
 import { WindowsUpdateBackend, validateWindowsUpdateInfo, type WindowsUpdater } from "./windows-updates.js";
 import { windowsUpdateFixture } from "./update-test-fixtures.js";
@@ -122,6 +122,18 @@ describe("Windows NSIS metadata", () => {
     expect(updater.quitAndInstall).not.toHaveBeenCalled();
   });
 
+  it("rejects a synchronous updater error instead of swallowing a failed install", async () => {
+    const { artifact, path } = await downloadedInstaller();
+    const updater = updaterFixture(updateInfo(artifact), path);
+    const backend = new WindowsUpdateBackend(updater);
+    await backend.prepare(artifact, "0.5.5");
+    const verified = await backend.download(artifact, vi.fn());
+    (updater.quitAndInstall as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      updater.emit("error", new Error("NSIS launch failed"));
+    });
+    await expect(backend.install(verified)).rejects.toThrow(/NSIS launch failed/i);
+  });
+
   it("treats a cancelled updater download as unusable", async () => {
     const { artifact, path } = await downloadedInstaller();
     const updater = updaterFixture(updateInfo(artifact), path);
@@ -132,6 +144,41 @@ describe("Windows NSIS metadata", () => {
     const backend = new WindowsUpdateBackend(updater);
     await backend.prepare(artifact, "0.5.5");
     await expect(backend.download(artifact, vi.fn())).rejects.toThrow(/cancelled/i);
+    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("cancels download progress that exceeds or disagrees with the selected artifact", async () => {
+    const { artifact, path } = await downloadedInstaller();
+    const updater = updaterFixture(updateInfo(artifact), path);
+    let token: CancellationToken | undefined;
+    (updater.downloadUpdate as ReturnType<typeof vi.fn>).mockImplementationOnce(async (value: CancellationToken) => {
+      token = value;
+      updater.emit("download-progress", {
+        transferred: artifact.size + 1,
+        total: artifact.size,
+        percent: 100,
+      });
+      return [path];
+    });
+    const backend = new WindowsUpdateBackend(updater);
+    await backend.prepare(artifact, "0.5.5");
+    await expect(backend.download(artifact, vi.fn())).rejects.toThrow(/size|progress/i);
+    expect(token?.cancelled).toBe(true);
+    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("cancels a stalled updater download at the fixed deadline", async () => {
+    const { artifact, path } = await downloadedInstaller();
+    const updater = updaterFixture(updateInfo(artifact), path);
+    let token: CancellationToken | undefined;
+    (updater.downloadUpdate as ReturnType<typeof vi.fn>).mockImplementationOnce((value: CancellationToken) => {
+      token = value;
+      return new Promise<string[]>(() => {});
+    });
+    const backend = new WindowsUpdateBackend(updater, 5);
+    await backend.prepare(artifact, "0.5.5");
+    await expect(backend.download(artifact, vi.fn())).rejects.toThrow(/timed out/i);
+    expect(token?.cancelled).toBe(true);
     expect(updater.quitAndInstall).not.toHaveBeenCalled();
   });
 
