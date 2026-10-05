@@ -34,6 +34,8 @@ jobs:
           python-version: '3.12'
       - name: Artifact retention policy tests
         run: node --test scripts/ci/*.test.mjs
+      - name: Update catalog and publication gates
+        run: node --test scripts/updates/*.test.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
