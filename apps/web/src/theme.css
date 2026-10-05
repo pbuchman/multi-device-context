@@ -21,3 +21,9 @@
 .signout-counts{margin:16px 0}.signout-counts>div{display:flex;justify-content:space-between;gap:16px;padding:8px 0}.signout-counts dd{font-weight:600;margin:0}
 
 .account-details{min-width:0;overflow:hidden}.account-details>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-details small{white-space:nowrap}.profile-row>span:last-child{min-width:0;overflow-wrap:anywhere}
+
+/* Keep touch targets generous; compact rows depend on pointer precision. */
+@media(pointer:fine){
+  .context-row,.context-select{min-height:32px}
+  .context-row .icon-button{min-height:32px;height:32px;min-width:32px;width:32px;border-radius:10px}
+}

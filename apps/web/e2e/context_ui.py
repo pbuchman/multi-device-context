@@ -22,6 +22,19 @@ with sync_playwright() as playwright:
     assert not page.locator("vite-error-overlay").count()
     page.screenshot(path=str(SCREENSHOTS / "desktop-light.png"), full_page=True)
 
+    # Density follows the primary pointer, independently of the viewport width.
+    for width in (1440, 390):
+        page.set_viewport_size({"width": width, "height": 920})
+        for selector in (".context-row", ".context-select", ".context-row .icon-button"):
+            assert page.locator(selector).first.evaluate("el => el.getBoundingClientRect().height") == 32, selector
+    page.set_viewport_size({"width": 1440, "height": 920})
+    touch = browser.new_context(has_touch=True, viewport={"width": 1440, "height": 920})
+    touch_page = touch.new_page()
+    touch_page.goto(BASE_URL, wait_until="networkidle")
+    for selector in (".context-row", ".context-select", ".context-row .icon-button"):
+        assert touch_page.locator(selector).first.evaluate("el => el.getBoundingClientRect().height") == 48, selector
+    touch.close()
+
     composer = page.get_by_label("Message to yourself")
     composer.fill("Browser interaction proof")
     composer.press("Enter")
