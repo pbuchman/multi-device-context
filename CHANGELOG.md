@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.5 — Preview updates
+
+- GitHub Preview updates with explicit downloads, verified installers, progress,
+  and retries: Windows NSIS restart, macOS DMG replacement, and Android's system
+  installer with package and signing-certificate validation.
+- Hosted interface build detection and a separate **Reload to update** action
+  that preserves local drafts and waits for pending local work.
+- Public README showcase using only synthetic data, direct platform downloads,
+  and isolated pull-request builds without publication or signing credentials.
+- Complete update catalogs are promoted only after release assets and required
+  checks for their exact source revision have been verified.
 - Clicking an image opens an in-app enlarged preview; right-click and
   Control-click expose a direct **Copy image** action, with non-PNG formats
   decoded to PNG for reliable clipboard support.

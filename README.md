@@ -14,19 +14,19 @@ agent and receive the result in the same conversation.
 > synthetic fixture. Every account, message, file, device, and illustration is
 > fictional demo data.
 
-## Download v0.5.4
+## Download v0.5.5
 
 | Platform | Direct download | Requirements and signing |
 | --- | --- | --- |
-| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.4/Multi-Device-Context-0.5.4-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
-| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.4/Multi-Device-Context-0.5.4-win-x64.exe) | Windows x64. Unsigned. |
-| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.4/Multi-Device-Context-0.5.4-android-v9-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
+| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/Multi-Device-Context-0.5.5-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
+| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/Multi-Device-Context-0.5.5-win-x64.exe) | Windows x64. Unsigned. |
+| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/Multi-Device-Context-0.5.5-android-v10-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
 
 Review the [installation guide](docs/installation.md) before opening an unsigned
 or non-notarized desktop build. Android setup and device support are covered in
 the [Android guide](docs/android.md). Published checksums are available in
-[SHA256SUMS.txt](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.4/SHA256SUMS.txt),
-and every asset is listed on the [v0.5.4 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.4).
+[SHA256SUMS.txt](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/SHA256SUMS.txt),
+and every asset is listed on the [v0.5.5 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.5).
 
 Publishing the source and installers does not grant access to the maintainer's
 hosted deployment. Hosted access remains subject to its authentication and
@@ -101,18 +101,23 @@ grant changes are described in [device access operations](docs/operations/device
 
 ## Updating
 
-There is no automatic updater yet. To update a desktop client, finish or review
-pending shares, quit it from the tray or menu bar, download the newer release,
-then install over the existing Windows application or replace the application in
-macOS Applications. After updating, reconnect and close older app tabs if the
-client requests the one-time local history migration.
+Install **0.5.5 manually** to receive the first updater-capable application.
+It checks the public **Preview** channel at startup and every six hours, with
+**Check for updates** also available in Settings and the desktop menu.
+Downloads start only when you choose them and show progress.
 
-For Android, install the newer APK over the existing application. An upgrade must
-keep the same application ID and existing signing key and use a higher version
-code. Do not uninstall or clear app data to work around an upgrade failure,
-because doing so can discard local drafts, pending shares, and the session. See
-the [installation](docs/installation.md) and [Android](docs/android.md) guides for
-the full update and removal procedures.
+- **Windows:** choose **Update and restart** to download, verify, install, and
+  restart in the existing installation.
+- **macOS:** download and open the verified DMG, quit the app, then replace it
+  in Applications. The ad-hoc signature still requires this manual replacement.
+- **Android:** download the APK and confirm the update in Android's installer;
+  permission to install unknown apps may be required. The signing key is preserved.
+- **Web and hosted desktop UI:** choose **Reload to update** when a new interface
+  build is available. The Android interface updates with its APK.
+
+Updates preserve local drafts and queued shares. Do not uninstall or clear app
+data to resolve an update failure. See the [update guide](docs/updates.md) for
+validation, platform limitations, release procedures, and recovery.
 
 ## Development
 
