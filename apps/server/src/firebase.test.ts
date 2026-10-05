@@ -27,22 +27,23 @@ class FakeSnapshot {
 
 class FakeQuery {
   private maximum = Number.POSITIVE_INFINITY;
-  private deletingOnly = false;
+  private deletingValue: boolean | undefined;
   constructor(
     private readonly store: FakeFirestore,
     private readonly matches: (path: string) => boolean,
   ) {}
   where(field: string, operator: string, value: unknown) {
-    if (field === "deleting" && operator === "==" && value === true) this.deletingOnly = true;
+    if (field === "deleting" && operator === "==" && typeof value === "boolean") this.deletingValue = value;
     return this;
   }
+  orderBy() { return this; }
   limit(maximum: number) {
     this.maximum = maximum;
     return this;
   }
   async get() {
     const docs = [...this.store.documents.entries()]
-      .filter(([path, data]) => this.matches(path) && (!this.deletingOnly || data.deleting === true))
+      .filter(([path, data]) => this.matches(path) && (this.deletingValue === undefined || data.deleting === this.deletingValue))
       .slice(0, this.maximum)
       .map(([path, data]) => new FakeSnapshot(this.store.doc(path), data));
     return { docs, empty: docs.length === 0 };
@@ -383,6 +384,20 @@ describe("FirebaseBackend deletion", () => {
     expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true });
     expect(bucket.objects.has(other)).toBe(true);
     await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID)).resolves.toBeUndefined();
+  });
+
+  it("deletes the parent context when its last message is deleted", async () => {
+    const { backend, firestore } = fixture();
+    const { context, item } = paths();
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false });
+
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID);
+
+    expect(firestore.documents.has(item)).toBe(false);
+    expect(firestore.documents.has(context)).toBe(false);
+    expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true });
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true });
   });
 });
 

@@ -181,23 +181,28 @@ export class FirebaseBackend implements Backend {
       if (record.deleting !== true) transaction.update(reference, { deleting: true });
       return true;
     });
-    if (!exists) { await this.repairFirstItem(uid, contextId, itemId); return; }
+    if (!exists) { await this.repairContextAfterItemDeletion(uid, contextId, itemId, device); return; }
 
     await this.deleteObjectGenerations(`${itemPath(uid, contextId, itemId)}/`);
     await reference.delete();
-    await this.repairFirstItem(uid, contextId, itemId);
+    await this.repairContextAfterItemDeletion(uid, contextId, itemId, device);
   }
 
-  private async repairFirstItem(uid: string, contextId: string, removedId: string) {
+  private async repairContextAfterItemDeletion(uid: string, contextId: string, removedId: string, device?: DeviceIdentity) {
     const parent = this.firestore.doc(contextPath(uid, contextId));
-    await this.firestore.runTransaction(async tx => {
+    const empty = await this.firestore.runTransaction(async tx => {
       const context = await tx.get(parent);
-      if (!context.exists || context.data()?.deleting !== false || context.data()?.firstItemId !== removedId) return;
+      if (!context.exists || context.data()?.deleting !== false) return false;
       const remaining = await tx.get(parent.collection("items").where("deleting", "==", false).orderBy("createdAt").limit(1));
       const first = remaining.docs[0];
-      tx.update(parent, { firstItemId: first?.id ?? FieldValue.delete(), ready: first ? first.data().ready === true : true,
-        ...(context.data()?.titleState === "pending" ? { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() } : {}) });
+      if (!first) return true;
+      if (context.data()?.firstItemId === removedId) {
+        tx.update(parent, { firstItemId: first.id, ready: first.data().ready === true,
+          ...(context.data()?.titleState === "pending" ? { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() } : {}) });
+      }
+      return false;
     });
+    if (empty) await this.deleteContext(uid, contextId, device);
   }
 
   async deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void> {
