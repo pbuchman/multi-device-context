@@ -1,7 +1,7 @@
 # Installing Multi Device Context
 
-After updating, reconnect and close older app tabs to complete the one-time local
-history migration. Unsent drafts and the outbox are preserved. Synchronized
+If the client requests the one-time local history migration, reconnect and close
+older app tabs to complete it. Unsent drafts and the outbox are preserved. Synchronized
 history is now memory-only and requires a connection after restarting the app.
 
 ## Choose your installer
@@ -11,7 +11,7 @@ history is now memory-only and requires a connection after restarting the app.
 | Windows | `Multi-Device-Context-VERSION-win-x64.exe` | x64 |
 | macOS | `Multi-Device-Context-VERSION-mac-arm64.dmg` | Apple Silicon, macOS 13+ |
 
-Download the installer from the versioned release in the private
+Download the installer from the versioned release in the public
 [pbuchman/multi-device-context repository](https://github.com/pbuchman/multi-device-context/releases).
 The release also contains `SHA256SUMS.txt`. Compare the installer checksum before
 running it if the file was copied between machines. No developer tools or manual
@@ -19,7 +19,7 @@ application configuration are required to use a published release.
 
 The Windows installer has no code-signing identity. The macOS application has an
 ad-hoc signature required for its Apple Silicon package; it is not Developer ID
-signed or notarized. These are initial private builds. Neither platform should be
+signed or notarized. These are Preview builds. Neither platform should be
 presented as having a verified publisher.
 
 ## Windows
@@ -97,7 +97,7 @@ Narrowing the window does not replace that preference.
 The sidebar footer shows your account name and email. Open Settings to see the
 full values. If the identity provider is unavailable, sharing remains usable and
 the account area displays **Signed in / Account details unavailable**. Profile
-details are kept only for the current session. Desktop 0.5.4 uses the signed
+details are kept only for the current session. The desktop uses the signed
 profile already verified during sign-in and loads a bounded Google profile image
 without saving it to the account store. The browser uses its Auth0 SDK profile,
 and the server lookup is a fallback. Temporary lookup failures retry in the
