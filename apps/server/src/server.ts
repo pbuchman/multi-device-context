@@ -188,19 +188,34 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     reply.header("cache-control", "no-store");
     const identity = await authenticated(request, verifier);
     if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+    let failureCode = "profile_provider_unavailable";
     try {
       const response = await (options.profileFetcher ?? fetch)(`https://${publicConfig.auth0.domain}/userinfo`, {
         headers: { authorization: request.headers.authorization!, accept: "application/json" },
         cache: "no-store", redirect: "error", signal: AbortSignal.timeout(5_000),
       });
-      if (!response.ok) throw new Error("Profile unavailable");
+      if (!response.ok) {
+        failureCode = response.status === 401 || response.status === 403 ? "profile_provider_rejected"
+          : response.status === 429 ? "profile_provider_rate_limited" : "profile_provider_unavailable";
+        if (response.status === 429) {
+          const seconds = Number(response.headers.get("retry-after"));
+          reply.header("retry-after", String(Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 60));
+        }
+        throw new Error("Profile unavailable");
+      }
+      failureCode = "profile_invalid_response";
       const profile: unknown = await response.json();
-      if (!profile || typeof profile !== "object" || !("sub" in profile) || profile.sub !== identity.subject) throw new Error("Profile mismatch");
+      if (!profile || typeof profile !== "object" || !("sub" in profile)) throw new Error("Invalid profile");
+      if (profile.sub !== identity.subject) { failureCode = "profile_identity_mismatch"; throw new Error("Profile mismatch"); }
       const name = "name" in profile && typeof profile.name === "string" ? profile.name.trim() : "";
       const email = "email" in profile && typeof profile.email === "string" ? profile.email.trim() : "";
+      if (!name && !email) { failureCode = "profile_empty"; throw new Error("Empty profile"); }
       return { ...(name ? { name } : {}), ...(email ? { email } : {}) };
-    } catch {
-      return reply.code(502).send({ error: "Account details unavailable" });
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === "TimeoutError") failureCode = "profile_provider_timeout";
+      // Diagnostic category only: never log tokens, profile fields or upstream bodies.
+      console.warn("Account profile lookup failed:", failureCode);
+      return reply.code(502).send({ error: "Account details unavailable", code: failureCode });
     }
   });
 

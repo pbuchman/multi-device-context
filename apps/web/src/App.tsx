@@ -1,3 +1,4 @@
+import { AccountDetails, defaultProfileState } from "./account-details.js";
 import { useWorkspaceCommands, type WorkspaceCommandRequest } from "./workspace-commands.js";
 import { SidebarResize } from "./sidebar-resize.js";
 import { AccessPage } from "./AccessPage.js";
@@ -51,7 +52,7 @@ export type WorkspaceOutbox = {
   removeContext?(id: Id): Promise<void>;
   removeItem?(contextId: Id, itemId: Id): Promise<void>;
   cancelled?(): Promise<{ contexts: Id[]; items: Id[] }>;
-  deletions?(): Promise<{ contextId: Id; itemId?: Id }[]>;
+  deletions?(): Promise<{ contextId: Id; itemId?: Id; attempts?: number; paused?: boolean; nextAttemptAt?: number }[]>;
   enqueueBatch?(drafts: ShareDraft[]): Promise<void>;
   enqueue(draft: ShareDraft): Promise<void>;
   count(): Promise<number>;
@@ -153,6 +154,7 @@ type WorkspacePanel =
 
 export function ContextWorkspace({ services }: { services: WorkspaceServices }) {
   const viewer = useSyncExternalStore(services.profile?.subscribe ?? emptySubscribe, services.profile?.getSnapshot ?? (() => services.viewer));
+  const profileState = useSyncExternalStore(services.profile?.getState ? services.profile.subscribe : emptySubscribe, services.profile?.getState ?? defaultProfileState);
   const [contexts, setContexts] = useState<ContextRecord[]>([]);
   const confirmedKey = `mdc-confirmed:${services.outbox.namespace}`;
   const [confirmedContextIds, setConfirmedContextIds] = useState(() => readConfirmedContexts(confirmedKey));
@@ -206,6 +208,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const pickerWakeups = useRef(new Set<(cancelled?: boolean) => void>());
   const [renameText, setRenameText] = useState("");
   const [queueCount, setQueueCount] = useState(0);
+  const [deletionCount, setDeletionCount] = useState(0);
+  const [deletionFailed, setDeletionFailed] = useState(false);
+  const [activeDeletions, setActiveDeletions] = useState(0);
   const [syncStreams, setSyncStreams] = useState({
     contexts: { fromCache: false, pending: false, failed: false },
     items: { fromCache: false, pending: false, failed: false },
@@ -332,7 +337,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     window.addEventListener("keydown", key); window.addEventListener("mdc:back", back);
     return () => { window.removeEventListener("keydown", key); window.removeEventListener("mdc:back", back); };
   }, [panel, compact, drawerOpen, closePanel, closeDrawer]);
-  useEffect(() => { setChatMenu(undefined); setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
+  useEffect(() => { setChatMenu(undefined); setPanel(undefined); setDrawerOpen(false); clipboardBusy.current = false; signingOut.current = false; setAccountBlocked(false); setDeletionCount(0); setDeletionFailed(false); setActiveDeletions(0); setSignOutSummary(undefined); sendsInFlight.current.clear(); }, [services]);
 
   const refreshers = useRef({ contexts: new ForegroundRefresh(), deleted: new ForegroundRefresh(), deletedItems: new ForegroundRefresh(), items: new ForegroundRefresh() });
   const applyDeleted = useCallback(async (ids: Id[]) => {
@@ -660,7 +665,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const queued = await services.outbox.list();
     const deletions = await services.outbox.deletions?.() ?? [];
     if (!isLive() || revision !== queueRefreshRevision.current) return;
-    if (deletions.length) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+    const failedDeletion = deletions.some(record => record.paused || ((record.attempts ?? 0) > 0 && record.nextAttemptAt !== 0));
+    setDeletionCount(deletions.length);
+    setDeletionFailed(failedDeletion);
+    if (failedDeletion) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
     else if (pendingDeletionCount.current) setError(current => current?.startsWith("Deletion is not confirmed") ? undefined : current);
     pendingDeletionCount.current = deletions.length;
     const cancelled = await services.outbox.cancelled?.();
@@ -672,16 +680,16 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       setItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
       setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
     }
-    setQueueCount(queued.length + deletions.length);
+    setQueueCount(queued.length);
     const failed = queued.find((record) => record.status === "paused" || record.status === "failed");
     if (failed?.lastError) setError(failed.lastError);
   }, [services.outbox]);
   useEffect(() => { void refreshQueue(); return subscribeLocal(() => { void refreshQueue(); }); }, [refreshQueue]);
   useEffect(() => {
-    if (queueCount === 0 || (services.platformKind === "android" && !active)) return;
+    if ((queueCount === 0 && deletionCount === 0) || (services.platformKind === "android" && !active)) return;
     const timer = window.setInterval(() => void refreshQueue(), 2_000);
     return () => window.clearInterval(timer);
-  }, [active, queueCount, refreshQueue, services.platformKind]);
+  }, [active, queueCount, deletionCount, refreshQueue, services.platformKind]);
   useEffect(() => {
     let active = true;
     void restoreQueued().catch(() => { if (active) setError("Pending shares could not be restored"); });
@@ -932,6 +940,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   };
   const deleteContext = async (context: ContextRecord) => {
     if (accountBlocked || !isLive()) return;
+    setActiveDeletions(count => count + 1);
     try {
       const complete = await remove(context.id);
       if (!isLive()) return;
@@ -939,11 +948,14 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       setContexts(current => current.filter(c => c.id !== context.id));
       setOptimisticItems(current => current.filter(item => item.contextId !== context.id));
       if (navigation.selectedRef.current.id === context.id) setSelectedId(undefined);
-      if (complete) showToast("Context permanently deleted"); else setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+      if (complete) showToast("Context permanently deleted");
       await refreshQueue();
-    } catch { setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const deleteItem = async (item: ItemRecord) => {
+    if (accountBlocked || !isLive()) return;
+    setActiveDeletions(count => count + 1);
     try {
       const complete = await remove(item.contextId, item.id);
       if (!isLive()) return;
@@ -955,14 +967,15 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         setContexts(current => current.filter(context => context.id !== item.contextId));
         if (navigation.selectedRef.current.id === item.contextId) setSelectedId(undefined);
       }
-      if (!complete) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+      if (complete) showToast("Message permanently deleted");
       await refreshQueue();
-    } catch { setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const retry = async () => {
     setError(undefined); navigation.retry();
     nativeReconcile.current?.();
-    try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await services.drain(); await refreshQueue(); }
+    try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await refreshQueue(); await services.drain(); await refreshQueue(); }
     catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
   };
 
@@ -1024,7 +1037,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const pendingWrites = syncStreams.contexts.pending || syncStreams.items.pending;
   const fromCache = syncStreams.contexts.fromCache || syncStreams.items.fromCache;
-  const syncLabel = refreshing ? "Refreshing…" : queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
+  const syncLabel = refreshing ? "Refreshing…" : deletionFailed ? "Deletion needs retry" : deletionCount > 0 || activeDeletions > 0 ? "Deleting…" : queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
     : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
 
   const openChatMenu = (context: ContextRecord, anchor: ChatMenuAnchor, opener: HTMLElement) => {
@@ -1064,7 +1077,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           if (services.platformKind === "android" || window.matchMedia?.("(pointer: coarse)").matches) openPanel({ kind: "context", context });
           else { const rect = opener.getBoundingClientRect(); openChatMenu(context, { x: rect.left, y: rect.bottom }, opener); }
         }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
-        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email} />
+        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email ?? (profileState.status === "loading" ? "Loading account…" : undefined)} />
       <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh(true)}
@@ -1113,7 +1126,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <button type="button" className="dialog-action" aria-label="Code mode" aria-pressed={navigation.selectedRef.current.drafts[panel.contextId]?.code ?? false} onClick={() => { if (!deleted.current.has(panel.contextId)) navigation.patchFor(panel.contextId, { code: !navigation.selectedRef.current.drafts[panel.contextId]?.code }); closePanel(); }}><WorkspaceIcon name="code" /><span>Code mode<small>{navigation.selectedRef.current.drafts[panel.contextId]?.code ? "On" : "Off"} · Applies to typed and pasted text</small></span></button>
       </> : null}
       {panel.kind === "settings" ? <>
-        <div className="profile-row"><span className="avatar large">{viewer.name.charAt(0).toUpperCase()}</span><span><strong>{viewer.name}</strong><small>{viewer.email ?? "Account details unavailable"}</small></span></div>
+        <AccountDetails viewer={viewer} profile={services.profile} />
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
         {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}

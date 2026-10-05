@@ -215,3 +215,51 @@ it("does not carry a pending profile into the next account", async () => {
   expect(next.profile!.getSnapshot().name).toBe("New account");
   expect(old.profile!.getSnapshot().name).toBe("Signed in");
 });
+
+it("uses verified native profile claims without depending on the userinfo endpoint", async () => {
+  const f=fixture("desktop");
+  f.platform.native!.getAccountProfile=vi.fn(async()=>({uid:"uid",name:"Alice",email:"alice@example.test"}));
+  const session=(await f.manager.login())!;
+  await vi.waitFor(()=>expect(session.viewer.email).toBe("alice@example.test"));
+  expect(f.fetcher.mock.calls.some(([url])=>String(url).endsWith("/api/profile"))).toBe(false);
+  await session.signOut();
+});
+it("rejects native claims belonging to a different account", async () => {
+  const f=fixture("desktop");
+  f.platform.native!.getAccountProfile=vi.fn(async()=>({uid:"other",name:"Wrong",email:"wrong@example.test"}));
+  const session=(await f.manager.login())!;
+  await vi.waitFor(()=>expect(session.profile!.getState!().status).toBe("unavailable"));
+  expect(session.viewer.name).toBe("Signed in");
+  expect(session.profile!.getState!().message).toContain("do not match");
+  await session.signOut();
+});
+it("recovers profile lookup without signing out and obtains a fresh Auth0 token on retry", async () => {
+  const f=fixture("desktop");let calls=0;
+  f.fetcher.mockImplementation(async input=>String(input).endsWith("/api/profile")
+    ? ++calls===1 ? new Response(JSON.stringify({code:"profile_provider_rejected"}),{status:502}) : new Response(JSON.stringify({email:"recovered@example.test"}))
+    : new Response(JSON.stringify(config)));
+  const session=(await f.manager.login())!;
+  await vi.waitFor(()=>expect(session.profile!.getState!().status).toBe("unavailable"));
+  f.native.getAccessToken.mockResolvedValue("fresh-access");
+  await session.profile!.refresh!();
+  expect(session.viewer.email).toBe("recovered@example.test");
+  expect(f.fetcher).toHaveBeenLastCalledWith(expect.stringContaining("/api/profile"),expect.objectContaining({headers:expect.objectContaining({authorization:"Bearer fresh-access"})}));
+  await session.signOut();
+});
+
+it("uses the browser SDK profile only for the same issuer-derived account", async () => {
+  const { webcrypto, createHash } = await import("node:crypto");
+  vi.stubGlobal("crypto",webcrypto);
+  const subject="google-oauth2|browser-person", uid=createHash("sha256").update(`https://${config.auth0.domain}/\0${subject}`).digest("base64url");
+  const f=fixture();
+  sdk.createAuth0Client.mockResolvedValueOnce({isAuthenticated:async()=>true,getTokenSilently:async()=>"access",getUser:async()=>({sub:subject,name:"Browser User",email:"browser@example.test"}),logout:async()=>{}});
+  sdk.signInWithCustomToken.mockResolvedValueOnce({user:{uid,getIdToken:sdk.getIdToken}});
+  f.fetcher.mockImplementation(async input=>new Response(JSON.stringify(String(input).endsWith("/api/session")?{uid,customToken:"custom",device}:config)));
+  const manager=new SessionManager(f.fetcher,{platformFactory:async()=>({kind:"browser",dispose(){}})});
+  try {
+    const session=(await manager.login())!;
+    await vi.waitFor(()=>expect(session.viewer.email).toBe("browser@example.test"));
+    expect(f.fetcher.mock.calls.some(([url])=>String(url).endsWith("/api/profile"))).toBe(false);
+    await session.signOut();
+  } finally {manager.dispose();vi.unstubAllGlobals();}
+});

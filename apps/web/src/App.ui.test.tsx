@@ -580,3 +580,49 @@ it("freezes edits and chat actions until native lifecycle completion", async () 
     expect(input.disabled).toBe(true); // Remain frozen while the native window begins navigation.
   } finally { release(); save.mockRestore(); }
 });
+it.each([false, true])("shows neutral deletion progress until confirmation (item=%s)", async item => {
+  const test = services(); const { changed } = await import("./local-db.js");
+  let intents: { contextId: string; itemId?: string; attempts: number; paused: boolean; nextAttemptAt: number }[] = [];
+  test.value.outbox.deletions = async () => intents;
+  test.value.remove = async (contextId, itemId) => { intents = [{ contextId, ...(itemId ? { itemId } : {}), attempts: 0, paused: false, nextAttemptAt: 0 }]; changed(); return false; };
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  if (item) {
+    act(() => test.items.get(alpha)!({ records: [{ id: beta, contextId: alpha, content: { kind: "text", text: "Delete me" }, createdAt: 1, device: test.value.device, ready: true, syncState: "synced" }], fromCache: false, hasPendingWrites: false }));
+    await userEvent.click(screen.getByRole("button", { name: "Message options" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete message…" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete message" }));
+  } else {
+    await userEvent.click(screen.getByRole("button", { name: "Options for Alpha" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete chat…" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+  }
+  await waitFor(() => expect(screen.getByText("Deleting…")).toBeTruthy());
+  expect(screen.queryByRole("alert")).toBeNull();
+  await act(async () => { intents = []; changed(); });
+  await waitFor(() => expect(screen.queryByText("Deleting…")).toBeNull());
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it("shows Retry only for a failed deletion and clears it after recovery", async () => {
+  const test = services(); const { changed } = await import("./local-db.js");
+  let intents = [{ contextId: alpha, attempts: 1, paused: false, nextAttemptAt: Date.now() + 1000 }];
+  test.value.outbox.deletions = async () => intents;
+  render(<ContextWorkspace services={test.value} />);
+  expect((await screen.findByRole("alert")).textContent).toContain("Deletion is not confirmed");
+  await act(async () => { intents = []; changed(); });
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+});
+it("does not show an error while an ordinary delete request awaits confirmation", async () => {
+  const test = services(); let confirm!: (value: boolean) => void;
+  test.value.remove = () => new Promise<boolean>(resolve => { confirm = resolve; });
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Options for Alpha" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Delete chat…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+  expect(screen.getByText("Deleting…")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  await act(async () => confirm(true));
+  expect(screen.queryByText("Deleting…")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByText("Context permanently deleted")).toBeTruthy();
+});

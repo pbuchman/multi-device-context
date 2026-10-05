@@ -20,6 +20,8 @@ it("keeps the reviewed sign-out snapshot independent of concurrent inbox reads",
   expect(electron.invoke).toHaveBeenLastCalledWith("mdc:signOut", ["explicitly-reviewed"]);
   await bridge.signOut();
   expect(electron.invoke).toHaveBeenLastCalledWith("mdc:signOut", []);
+  await bridge.getAccountProfile!();
+  expect(electron.invoke).toHaveBeenLastCalledWith("mdc:getAccountProfile");
   expect(bridge.version).toBe(1);
   expect(bridge).toMatchObject({ reviewedSignOut: true });
 });

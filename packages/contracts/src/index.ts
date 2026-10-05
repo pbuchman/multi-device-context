@@ -140,6 +140,8 @@ export type PendingClipboardShare = {
   snapshot: ClipboardSnapshot;
 };
 
+export type NativeAccountProfile = { uid: string; name?: string; email?: string };
+
 export type DesktopCommandRequest = { id: string; command: "new-chat" | "delete-chat" | "reload" | "quit" };
 
 export interface DesktopBridge {
@@ -149,6 +151,7 @@ export interface DesktopBridge {
   platform: "win32" | "darwin" | "linux";
   getDevice(): Promise<Device>;
   getAccessToken(interactive?: boolean): Promise<string>;
+  getAccountProfile?(): Promise<NativeAccountProfile>;
   signOut(): Promise<void>;
   readClipboard(): Promise<ClipboardSnapshot>;
   copyText(text: string): Promise<void>;

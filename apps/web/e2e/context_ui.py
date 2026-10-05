@@ -39,6 +39,27 @@ with sync_playwright() as playwright:
     page.get_by_role("combobox", name="Theme").select_option("light")
     page.get_by_role("button", name="Close dialog").click()
 
+    page.evaluate("window.mdcProfileTest.fail()")
+    page.get_by_label("Open settings").click()
+    expect(page.get_by_text("Account provider test failure", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Retry account details", exact=True).click()
+    expect(page.get_by_role("button", name="Refresh account details", exact=True)).to_be_enabled()
+    expect(page.get_by_text("Account provider test failure", exact=True)).to_have_count(0)
+    expect(page.get_by_role("dialog").get_by_text("alex@example.com", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Close dialog").click()
+    page.evaluate("window.mdcDeletionTest.pause()")
+    page.get_by_role("button", name="Meeting notes", exact=True).click(button="right")
+    page.get_by_role("menuitem", name="Delete chat…", exact=True).click()
+    page.get_by_role("button", name="Delete chat", exact=True).click()
+    expect(page.get_by_text("Deleting…", exact=True)).to_be_visible()
+    expect(page.locator(".error-banner")).to_have_count(0)
+    page.screenshot(path=str(SCREENSHOTS / "deletion-pending.png"), full_page=True)
+    page.evaluate("window.mdcDeletionTest.finish()")
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    expect(page.get_by_role("button", name="Meeting notes", exact=True)).to_have_count(0)
+    expect(page.get_by_text("Deleting…", exact=True)).to_have_count(0)
+    expect(page.locator(".error-banner")).to_have_count(0)
+
     # Density follows the primary pointer, independently of the viewport width.
     for width in (1440, 390):
         page.set_viewport_size({"width": width, "height": 920})

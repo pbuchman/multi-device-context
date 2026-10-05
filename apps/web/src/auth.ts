@@ -1,3 +1,5 @@
+import { AccountProfileStore, ProfileLoadError, profileOwner, type SessionProfile } from "./account-profile.js";
+export type { SessionProfile } from "./account-profile.js";
 import { auth0ClientOptions } from "./browser-identity.js";
 import { apiUrl, createApiUrl, mobileBuild } from "./api.js";
 import { createAuth0Client, type Auth0Client } from "@auth0/auth0-spa-js";
@@ -12,7 +14,6 @@ import type { Viewer } from "./model.js";
 type Fetcher = typeof fetch;
 type SessionResponse = DeviceSession;
 
-export type SessionProfile = { getSnapshot(): Viewer; subscribe(listener: () => void): () => void };
 
 export type ActiveSession = {
   config: RuntimeConfig;
@@ -226,10 +227,56 @@ export class SessionManager {
     let logoutGeneration: number | undefined;
     let nativeSignedOut = false, browserSignedOut = false, cleanupDone = false, logoutDone = false;
     let logoutUrl: string | undefined;
-    const disposeSessionFirebase = firebaseDisposer(firebaseApp);
-    let viewer: Viewer = { uid: exchanged.uid, name: "Signed in" };
-    const profileListeners = new Set<() => void>();
-    const profile: SessionProfile = { getSnapshot: () => viewer, subscribe: listener => { profileListeners.add(listener); return () => { profileListeners.delete(listener); }; } };
+    const disposeFirebaseData = firebaseDisposer(firebaseApp);
+    let firstProfileRequest = true;
+    const profile = new AccountProfileStore(exchanged.uid, async signal => {
+      let known: { name?: string | undefined; email?: string | undefined } = {};
+      // These claims come from the native verifier or Auth0 SDK, never a decoded
+      // unverified token. Bind them to the installation session's owner.
+      try {
+        if (platform.native?.getAccountProfile) {
+          const result = await platform.native.getAccountProfile();
+          if (result.uid !== exchanged.uid) throw new ProfileLoadError("Account details do not match this session. Sign in again.", false);
+          known = AccountProfileSchema.parse({ ...(result.name ? { name: result.name } : {}), ...(result.email ? { email: result.email } : {}) });
+        } else if (!platform.native) {
+          const result = await this.#auth0?.getUser?.();
+          if (result?.sub) {
+            if (await profileOwner(config.auth0.domain, result.sub) !== exchanged.uid) throw new ProfileLoadError("Account details do not match this session. Sign in again.", false);
+            known = AccountProfileSchema.parse({ ...(result.name?.trim() ? { name: result.name.trim() } : {}), ...(result.email?.trim() ? { email: result.email.trim() } : {}) });
+          }
+        }
+      } catch (error) { if (error instanceof ProfileLoadError) throw error; }
+      current();
+      if (signal.aborted) throw new Error("Profile request cancelled");
+      if (known.name && known.email) return known;
+      try {
+        const token = firstProfileRequest ? accessToken : platform.native ? await platform.native.getAccessToken(false) : await browserToken(this.#auth0!);
+        firstProfileRequest = false;
+        current();
+        const response = await this.fetcher(createApiUrl(config.appOrigin)("/api/profile"), {
+          headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+          cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({})) as { code?: string };
+          const rejected = response.status === 401 || data.code === "profile_provider_rejected";
+          const mismatch = data.code === "profile_identity_mismatch";
+          const message = mismatch ? "Account details do not match this session. Sign in again."
+            : rejected ? "Your sign-in provider could not verify the account lookup. Retry or sign in again."
+            : data.code === "profile_empty" ? "Your sign-in provider did not return a name or email."
+            : response.status === 429 || data.code === "profile_provider_rate_limited" ? "Account lookup is temporarily rate limited. Please wait before retrying."
+            : "The account service is temporarily unavailable. You can keep using your chats.";
+          const seconds = Number(response.headers.get("retry-after"));
+          throw new ProfileLoadError(message, !rejected && !mismatch && data.code !== "profile_empty", Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0);
+        }
+        return { ...known, ...AccountProfileSchema.parse(await response.json()) };
+      } catch (error) {
+        if (known.name || known.email) return known;
+        throw error;
+      }
+    }, () => !this.#disposed && generation === this.#generation && this.#session === session);
+    const disposeSessionFirebase = async () => { profile.dispose(); await disposeFirebaseData(); };
+    const viewer = profile.getSnapshot();
     const session: ActiveSession = {
       config,
       firebaseApp,
@@ -254,6 +301,7 @@ export class SessionManager {
           this.#signOutActive = true;
           logoutGeneration = ++this.#generation;
           this.#session = undefined;
+          profile.dispose();
         }
         const logoutCurrent = () => {
           if (this.#disposed || logoutGeneration !== this.#generation || this.#session) throw new Error("Your session has expired");
@@ -281,23 +329,8 @@ export class SessionManager {
       ...(platform.kind === "desktop" ? { bridge: platform.native as DesktopBridge } : {}),
     };
     this.#session = session;
-    // Use the verified Auth0 token from session establishment, not the Firebase
-    // data token. Profile failures must never prevent opening the workspace.
-    void (async () => {
-      try {
-        const response = await this.fetcher(createApiUrl(config.appOrigin)("/api/profile"), {
-          headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
-          cache: "no-store", signal: AbortSignal.timeout(5_000),
-        });
-        if (!response.ok) return;
-        const data = AccountProfileSchema.parse(await response.json());
-        current();
-        if (this.#session !== session) return;
-        viewer = { uid: exchanged.uid, name: data.name ?? data.email ?? "Signed in", ...(data.email ? { email: data.email } : {}) };
-        session.viewer = viewer;
-        for (const listener of profileListeners) listener();
-      } catch { /* Optional account details remain unavailable this session. */ }
-    })();
+    profile.subscribe(() => { session.viewer = profile.getSnapshot(); });
+    void profile.refresh();
     return session;
   }
 
@@ -312,5 +345,5 @@ export class SessionManager {
     return restored;
   }
 
-  dispose(): void { this.#disposed = true; this.#generation++; this.#platform?.dispose(); }
+  dispose(): void { (this.#session?.profile as AccountProfileStore | undefined)?.dispose(); this.#disposed = true; this.#generation++; this.#platform?.dispose(); }
 }

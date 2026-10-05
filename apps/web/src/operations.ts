@@ -16,9 +16,19 @@ export class ContextOperations {
     } });
   }
   async prepare() {
-    const markers = await this.cloud.deletionMarkers();
-    for (const id of markers.contexts) await this.outbox.removeContext(id);
-    for (const item of markers.items) await this.outbox.removeItem(item.contextId, item.itemId);
+    try {
+      const markers = await this.cloud.deletionMarkers();
+      for (const id of markers.contexts) await this.outbox.removeContext(id);
+      for (const item of markers.items) await this.outbox.removeItem(item.contextId, item.itemId);
+    } catch (error) {
+      // Preparation is part of delivering a deletion. Persist its failure too,
+      // so a fresh intent is not left looking indefinitely in flight offline.
+      for (const deletion of await this.outbox.deletions()) {
+        if (deletion.paused || deletion.nextAttemptAt > Date.now()) continue;
+        await this.outbox.failDeletion(deletion, error instanceof PublishFailure && !error.retryable, error instanceof PublishFailure ? error.retryAfterMs : 0);
+      }
+      throw error;
+    }
     for (const deletion of await this.outbox.deletions()) {
       if (deletion.paused || deletion.nextAttemptAt > Date.now()) continue;
       try {

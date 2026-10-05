@@ -1,3 +1,4 @@
+import type { NativeAccountProfile } from "@mdc/contracts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   createRemoteJWKSet,
@@ -86,7 +87,8 @@ export class AuthManager {
   private readonly request: typeof fetch;
   private readonly key: CryptoKey | JWTVerifyGetKey;
   private readonly issuer: string;
-  private cached: { token: string; expiresAt: number } | undefined;
+  private profile: NativeAccountProfile | undefined;
+  private cached: { token: string; expiresAt: number; uid: string } | undefined;
   private flight: Promise<string> | undefined;
   private generation = 0;
   private pending:
@@ -109,7 +111,18 @@ export class AuthManager {
         timeoutDuration: 10000,
       });
   }
+  async getAccountProfile(): Promise<NativeAccountProfile> {
+    const generation = this.generation;
+    await this.getAccessToken(false);
+    const session = this.dependencies.readSession();
+    if (generation !== this.generation || !this.cached || !session || session.uid !== this.cached.uid || session.authScope !== authenticationScope(this.settings)) throw new Error("Sign-in was cancelled.");
+    return this.profile?.uid === session.uid ? { ...this.profile } : { uid: session.uid };
+  }
   getAccessToken(interactive = false): Promise<string> {
+    const session = this.dependencies.readSession();
+    if (this.cached && (!session || session.uid !== this.cached.uid || session.authScope !== authenticationScope(this.settings))) {
+      this.cached = undefined; this.profile = undefined;
+    }
     if (this.cached && this.cached.expiresAt > Date.now() + 60_000)
       return Promise.resolve(this.cached.token);
     if (this.flight) return this.flight;
@@ -119,6 +132,7 @@ export class AuthManager {
     return this.flight;
   }
   private async acquire(interactive: boolean): Promise<string> {
+    this.profile = undefined;
     const generation = this.generation;
     const session = this.dependencies.readSession();
     if (session && session.authScope !== authenticationScope(this.settings)) {
@@ -244,6 +258,7 @@ export class AuthManager {
       throw new Error("Invalid sign-in response.");
     let subject: string;
     let expiresAt: number;
+    let profile: { name?: string; email?: string } = {};
     try {
       const verified = await jwtVerify(
         data.access_token,
@@ -267,7 +282,7 @@ export class AuthManager {
         Date.now() + data.expires_in * 1000,
       );
       if (previous && previous.subject !== subject) throw new Error();
-      if (attempt) {
+      if (attempt || data.id_token !== undefined) {
         if (typeof data.id_token !== "string") throw new Error();
         const identity = await jwtVerify(
           data.id_token,
@@ -276,14 +291,19 @@ export class AuthManager {
             issuer: this.issuer,
             audience: this.settings.nativeClientId,
             algorithms: ["RS256"],
-            requiredClaims: ["sub", "exp", "iat", "nonce"],
+            requiredClaims: ["sub", "exp", "iat", ...(attempt ? ["nonce"] : [])],
           },
         );
         if (
-          identity.payload.nonce !== attempt.nonce ||
-          identity.payload.sub !== subject
+          (attempt && identity.payload.nonce !== attempt.nonce) ||
+          identity.payload.sub !== subject ||
+          (identity.payload.azp !== undefined && identity.payload.azp !== this.settings.nativeClientId) ||
+          (Array.isArray(identity.payload.aud) && identity.payload.aud.length > 1 && identity.payload.azp !== this.settings.nativeClientId)
         )
           throw new Error();
+        const name = typeof identity.payload.name === "string" ? identity.payload.name.trim() : "";
+        const email = typeof identity.payload.email === "string" ? identity.payload.email.trim() : "";
+        profile = { ...(name && name.length <= 256 ? { name } : {}), ...(email && email.length <= 320 ? { email } : {}) };
       }
     } catch {
       throw new Error("Could not verify the Google sign-in identity.");
@@ -305,7 +325,8 @@ export class AuthManager {
       await this.dependencies.clearSession();
       throw new Error("Sign-in was cancelled.");
     }
-    this.cached = { token: data.access_token, expiresAt };
+    this.cached = { token: data.access_token, expiresAt, uid };
+    this.profile = { uid, ...profile };
     return data.access_token;
   }
   private cancelPending(message: string): void {
@@ -317,6 +338,7 @@ export class AuthManager {
   async signOut(): Promise<void> {
     this.generation++;
     this.cached = undefined;
+    this.profile = undefined;
     this.cancelPending("Signed out.");
     const previous = this.dependencies.readSession();
     await this.dependencies.clearSession();

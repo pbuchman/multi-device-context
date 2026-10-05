@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Desktop 0.5.3 uses verified sign-in profile claims in memory, avoiding an
+  unnecessary dependency on a second Auth0 lookup for account details.
+- Account lookup now supports bounded recovery and an explicit retry in Settings;
+  provider failures expose a diagnostic category without personal data or tokens.
+- Pending deletion shows “Deleting…”; retry warnings appear only after a failed
+  attempt, and disappear after confirmation.
+
 - Desktop 0.5.2: native File menu and macOS/Windows shortcuts for new chat,
   confirmed deletion, reload and quit, with local-save checks before leaving.
 - Clear refresh arrows, visible progress throughout access checks and fetching,

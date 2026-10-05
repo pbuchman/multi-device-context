@@ -1,3 +1,4 @@
+import { AccountProfileStore, ProfileLoadError } from "./account-profile.js";
 import type { Content, Id } from "@mdc/contracts";
 import { createRoot } from "react-dom/client";
 
@@ -45,7 +46,19 @@ Object.assign(window, { mdcRefreshTest: {
   pause() { refreshGate = new Promise<void>(resolve => { finishRefresh = resolve; }); },
   finish() { finishRefresh?.(); },
 } });
+let profileFailure = false;
+const profile = new AccountProfileStore("browser-test", async () => {
+  if (profileFailure) { profileFailure = false; throw new ProfileLoadError("Account provider test failure", false); }
+  return { name: "Alex", email: "alex@example.com" };
+}, () => true);
+void profile.refresh();
+let deleteGate = Promise.resolve();let finishDelete: (() => void) | undefined;
+Object.assign(window, {
+  mdcProfileTest: { async fail() { profileFailure = true; await profile.refresh(); } },
+  mdcDeletionTest: { pause() { deleteGate = new Promise<void>(resolve => { finishDelete = resolve; }); }, finish() { finishDelete?.(); } },
+});
 const services: WorkspaceServices = {
+  profile,
   viewer: { uid: "browser-test", name: "Alex", email: "alex@example.com" },
   device: dell,
   cloud: {
@@ -56,7 +69,7 @@ const services: WorkspaceServices = {
     subscribeContexts(emit) { contextListener = emit; queueMicrotask(emitContexts); return () => { contextListener = undefined; }; },
     subscribeItems(contextId, emit) { itemListeners.set(contextId, emit); queueMicrotask(() => emitItems(contextId)); return () => itemListeners.delete(contextId); },
     async renameContext(contextId, title) { contexts = contexts.map((context) => context.id === contextId ? { ...context, title } : context); emitContexts(); },
-    async deleteContext(contextId) { contexts = contexts.filter((context) => context.id !== contextId); items.delete(contextId); emitContexts(); },
+    async deleteContext(contextId) { await deleteGate; contexts = contexts.filter((context) => context.id !== contextId); items.delete(contextId); emitContexts(); },
     async deleteItem(contextId, itemId) { items.set(contextId, (items.get(contextId) ?? []).filter((entry) => entry.id !== itemId)); emitItems(contextId); },
     async attachmentBytes() { return png; },
   },
