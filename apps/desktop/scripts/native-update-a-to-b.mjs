@@ -2,6 +2,7 @@
 // artifact is immutable input; test A is built in a private copied workspace.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { access, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
@@ -18,6 +19,12 @@ import {
   removePrivateWorkspace,
   startFixtureServer,
 } from "./native-update-fixture.mjs";
+import {
+  buildMacKeychainConsentScript,
+  launchWithRequiredConsent,
+  parseSecurityKeychains,
+  redactSecret,
+} from "./native-update-mac-keychain.mjs";
 
 assert.equal(process.env.CI, "true", "A→B native update acceptance is restricted to an ephemeral CI runner");
 assert.equal(process.env.MDC_NATIVE_UPDATE_A_TO_B, "1", "Set MDC_NATIVE_UPDATE_A_TO_B=1 explicitly on the isolated native update job");
@@ -35,6 +42,7 @@ const port = Number(process.env.MDC_NATIVE_UPDATE_TEST_PORT ?? "48765");
 assert(Number.isSafeInteger(port) && port >= 1024 && port <= 65535, "Invalid fixture HTTPS port");
 const reportPath = resolve(process.env.MDC_NATIVE_UPDATE_REPORT ?? join(desktopDirectory, "release/native-update-a-to-b.json"));
 const privateRoot = await realpath(await mkdtemp(join(tmpdir(), "mdc-native-update-a-to-b-")));
+const macUserDataDirectory = process.platform === "darwin" ? join(privateRoot, "user-data") : undefined;
 await mkdir(dirname(reportPath), { recursive: true });
 const report = {
   platform: process.platform,
@@ -43,7 +51,7 @@ const report = {
   versions: { a: aVersion, b: bVersion },
   checks: [],
 };
-let app, server, installedExecutable, mountedVolumes = [];
+let app, server, installedExecutable, macKeychain, mountedVolumes = [];
 
 function checkpoint(message) {
   report.checks.push(message);
@@ -71,17 +79,35 @@ function runCapture(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
     const { deadlineMs = 600_000, ...spawnOptions } = options;
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], ...spawnOptions });
-    let stdout = "", stderr = "";
-    const deadline = setTimeout(() => {
+    let stdout = "", stderr = "", processError, closeFallback, settled = false;
+    const finish = callback => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(closeFallback);
+      callback();
+    };
+    const waitForClose = error => {
+      processError ??= error;
+      clearTimeout(deadline);
       child.kill();
-      reject(new Error(`${basename(command)} exceeded its ${deadlineMs} ms deadline`));
+      closeFallback ??= setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(() => reject(processError));
+      }, 5_000);
+    };
+    const deadline = setTimeout(() => {
+      waitForClose(new Error(`${basename(command)} exceeded its ${deadlineMs} ms deadline`));
     }, deadlineMs);
     child.stdout.on("data", value => { stdout += value; });
     child.stderr.on("data", value => { stderr += value; });
-    child.once("error", error => { clearTimeout(deadline); reject(error); });
-    child.once("exit", code => {
-      clearTimeout(deadline);
-      code === 0 ? resolvePromise(stdout) : reject(new Error(`${basename(command)} failed (${code}): ${stderr.slice(-2000)}`));
+    child.once("error", waitForClose);
+    child.once("close", (code, signal) => {
+      finish(() => {
+        if (processError) reject(processError);
+        else if (code === 0) resolvePromise(stdout);
+        else reject(new Error(`${basename(command)} failed (${signal ?? code}): ${stderr.slice(-2000)}`));
+      });
     });
   });
 }
@@ -150,13 +176,110 @@ async function installA(aArtifact) {
 async function replaceMacWithB(executable) {
   const mount = await attachDmg(bPath, join(privateRoot, "mount-b"));
   const appPath = resolve(dirname(executable), "../..");
+  const sourceApp = join(mount, "Multi Device Context.app");
+  const sourceExecutable = join(sourceApp, "Contents/MacOS/Multi Device Context");
+  const sourceArchive = join(sourceApp, "Contents/Resources/app.asar");
+  const sourceIdentity = {
+    executable: await hashFile(sourceExecutable),
+    archive: await hashFile(sourceArchive),
+  };
   const previous = `${appPath}.test-a`;
   await rm(previous, { recursive: true, force: true });
   await rename(appPath, previous);
-  try { await run("ditto", [join(mount, "Multi Device Context.app"), appPath]); }
+  try { await run("ditto", [sourceApp, appPath]); }
   catch (error) { await rename(previous, appPath); throw error; }
   await rm(previous, { recursive: true, force: true });
+  assert.deepEqual(await hashFile(executable), sourceIdentity.executable, "Copied B executable differs from the exact mounted DMG");
+  assert.deepEqual(await hashFile(installedArchive(executable)), sourceIdentity.archive, "Copied B archive differs from the exact mounted DMG");
+  await runCapture("codesign", ["--verify", "--deep", "--strict", appPath], { deadlineMs: 30_000 });
   await detachVolumes();
+  return sourceIdentity;
+}
+
+async function createMacTestKeychain() {
+  if (process.platform !== "darwin") return undefined;
+  const priorDefault = parseSecurityKeychains(await runCapture("security", ["default-keychain", "-d", "user"], { deadlineMs: 10_000 }));
+  assert.equal(priorDefault.length, 1, "macOS returned more than one default user Keychain");
+  const priorSearch = parseSecurityKeychains(await runCapture("security", ["list-keychains", "-d", "user"], { deadlineMs: 10_000 }));
+  const name = "MDC Native Update Test";
+  const path = join(privateRoot, `${name}.keychain-db`);
+  const password = randomBytes(24).toString("hex");
+  const state = { name, path, password, priorDefault: priorDefault[0], priorSearch, created: false };
+  try {
+    await run("security", ["create-keychain", "-p", password, path], { deadlineMs: 10_000 });
+    state.created = true;
+    await run("security", ["set-keychain-settings", "-lut", "21600", path], { deadlineMs: 10_000 });
+    await run("security", ["unlock-keychain", "-p", password, path], { deadlineMs: 10_000 });
+    await run("security", ["list-keychains", "-d", "user", "-s", path], { deadlineMs: 10_000 });
+    await run("security", ["default-keychain", "-d", "user", "-s", path], { deadlineMs: 10_000 });
+    assert.deepEqual(
+      parseSecurityKeychains(await runCapture("security", ["list-keychains", "-d", "user"], { deadlineMs: 10_000 })),
+      [path],
+      "The private test Keychain is not the isolated user search list",
+    );
+    assert.deepEqual(
+      parseSecurityKeychains(await runCapture("security", ["default-keychain", "-d", "user"], { deadlineMs: 10_000 })),
+      [path],
+      "The private test Keychain is not the user default",
+    );
+    return state;
+  } catch (error) {
+    try { await restoreMacTestKeychain(state); }
+    catch (restoreError) {
+      macKeychain = state;
+      throw new AggregateError([error, restoreError], "Creating the private test Keychain failed and its prior state could not be fully restored");
+    }
+    throw error;
+  }
+}
+
+async function restoreMacTestKeychain(state) {
+  if (!state) return;
+  assert.equal(dirname(state.path), privateRoot, "Refusing to delete a Keychain outside the private fixture root");
+  assert.equal(basename(state.path), `${state.name}.keychain-db`, "Refusing to delete an unexpected Keychain");
+  const failures = [];
+  try { await run("security", ["list-keychains", "-d", "user", "-s", ...state.priorSearch], { deadlineMs: 10_000 }); }
+  catch (error) { failures.push(error); }
+  try { await run("security", ["default-keychain", "-d", "user", "-s", state.priorDefault], { deadlineMs: 10_000 }); }
+  catch (error) { failures.push(error); }
+  if (failures.length > 0) throw new AggregateError(failures, "Could not restore the prior user Keychain configuration");
+  assert.deepEqual(
+    parseSecurityKeychains(await runCapture("security", ["list-keychains", "-d", "user"], { deadlineMs: 10_000 })),
+    state.priorSearch,
+    "The prior user Keychain search list was not restored exactly",
+  );
+  assert.deepEqual(
+    parseSecurityKeychains(await runCapture("security", ["default-keychain", "-d", "user"], { deadlineMs: 10_000 })),
+    [state.priorDefault],
+    "The prior default user Keychain was not restored exactly",
+  );
+  if (state.created) await run("security", ["delete-keychain", state.path], { deadlineMs: 10_000 });
+}
+
+async function requireMacAccessibilityAutomation() {
+  const output = await runCapture("osascript", ["-e", 'tell application "System Events" to return UI elements enabled'], { deadlineMs: 10_000 });
+  assert.equal(output.trim(), "true", "The macOS runner has not granted Accessibility access needed to consent through the real Keychain prompt");
+}
+
+async function authorizeMacKeychainPrompt(state, signal) {
+  assert(state && process.platform === "darwin", "Keychain consent is macOS-only");
+  const script = buildMacKeychainConsentScript({
+    appName: "Multi Device Context",
+    serviceName: "Multi Device Context Safe Storage",
+    keychainName: state.name,
+  });
+  let output;
+  try {
+    output = await runCapture("osascript", ["-e", script], {
+      deadlineMs: 50_000,
+      env: { ...process.env, MDC_NATIVE_UPDATE_KEYCHAIN_PASSWORD: state.password },
+      signal,
+    });
+  } catch (error) {
+    const message = redactSecret(error instanceof Error ? error.message : String(error), state.password);
+    throw new Error(`macOS Keychain consent automation failed: ${message}`);
+  }
+  assert.equal(output.trim(), "allowed", "macOS did not confirm exact B's item-specific Keychain consent");
 }
 
 async function killAutoStartedWindowsB() {
@@ -260,7 +383,19 @@ async function captureMacLaunchDiagnostic(executable, screenshotPath) {
   await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");
 }
 
-async function launch(executable, playwright, environment, spki, diagnosticScreenshot) {
+async function closeTestApplication(currentApp) {
+  let closeDeadline;
+  const closed = await Promise.race([
+    currentApp.close().then(() => true, () => false),
+    new Promise(resolvePromise => { closeDeadline = setTimeout(() => resolvePromise(false), 20_000); }),
+  ]);
+  clearTimeout(closeDeadline);
+  if (closed) return;
+  currentApp.process().kill("SIGKILL");
+  throw new Error("The test application did not close; its fixture process was terminated.");
+}
+
+async function launch(executable, playwright, environment, spki, diagnosticScreenshot, keychainConsent) {
   let diagnosticPromise, diagnosticTimer;
   if (process.platform === "darwin" && diagnosticScreenshot) {
     diagnosticTimer = setTimeout(() => {
@@ -268,14 +403,24 @@ async function launch(executable, playwright, environment, spki, diagnosticScree
     }, 15_000);
   }
   try {
-    const launched = await playwright.launch({
+    const launchApplication = () => playwright.launch({
       executablePath: executable,
-      args: [`--ignore-certificate-errors-spki-list=${spki}`],
+      args: [
+        `--ignore-certificate-errors-spki-list=${spki}`,
+        ...(macUserDataDirectory ? [`--user-data-dir=${macUserDataDirectory}`] : []),
+      ],
       env: environment,
       timeout: 60_000,
     });
-    const window = await launched.firstWindow({ timeout: 60_000 });
-    return { launched, window };
+    const owned = await launchWithRequiredConsent({
+      launch: launchApplication,
+      consent: keychainConsent
+        ? signal => authorizeMacKeychainPrompt(keychainConsent, signal)
+        : async () => {},
+      ready: launched => launched.firstWindow({ timeout: 60_000 }),
+      close: closeTestApplication,
+    });
+    return { launched: owned.application, window: owned.ready };
   } finally {
     clearTimeout(diagnosticTimer);
     await diagnosticPromise;
@@ -351,6 +496,14 @@ try {
   report.installation = { nonDefault: process.platform === "win32", executable };
   checkpoint(process.platform === "win32" ? "Installed test A at a non-default per-user location" : "Mounted test-A DMG and copied the app into an isolated Applications directory");
 
+  if (macUserDataDirectory) {
+    await mkdir(macUserDataDirectory, { recursive: true });
+    await requireMacAccessibilityAutomation();
+    macKeychain = await createMacTestKeychain();
+    report.macIsolation = { privateUserData: true, privateKeychain: true, accessibilityConsentAutomation: true };
+    checkpoint("Isolated Mac fixture data and Safe Storage in a private user-data directory and test Keychain");
+  }
+
   const { _electron: playwright } = await import("playwright");
   const environment = { ...process.env, NODE_EXTRA_CA_CERTS: certificatePath };
   ({ launched: app } = await launch(executable, playwright, environment, server.spki));
@@ -362,18 +515,27 @@ try {
     `mdc-native-update-settings-${Date.now()}`,
   ];
   const nativeSentinel = `mdc-native-update-safe-storage-${Date.now()}`;
-  const runtimeA = await app.evaluate(async ({ app: electronApp, safeStorage }, sentinel) => {
-    const fs = process.getBuiltinModule("fs").promises;
+  const runtimeA = await app.evaluate(({ app: electronApp }) => {
     const userData = electronApp.getPath("userData");
     const path = process.getBuiltinModule("path").join(userData, "native-update-a-to-b.safe");
-    await fs.writeFile(path, safeStorage.encryptString(sentinel));
     return {
       version: electronApp.getVersion(), executable: process.execPath, userData, sentinelPath: path,
       nativeStatePath: process.getBuiltinModule("path").join(userData, "private", "private-state.bin"),
     };
-  }, nativeSentinel);
+  });
   assert.equal(runtimeA.version, aVersion);
   assert.equal(resolve(runtimeA.executable), resolve(executable));
+  if (macUserDataDirectory) assert.equal(await realpath(runtimeA.userData), await realpath(macUserDataDirectory));
+  await app.evaluate(async ({ safeStorage }, { path, sentinel }) => {
+    const fs = process.getBuiltinModule("fs").promises;
+    await fs.writeFile(path, safeStorage.encryptString(sentinel));
+  }, { path: runtimeA.sentinelPath, sentinel: nativeSentinel });
+  if (macKeychain) await runCapture("security", [
+    "find-generic-password",
+    "-a", "Multi Device Context",
+    "-s", "Multi Device Context Safe Storage",
+    macKeychain.path,
+  ], { deadlineMs: 10_000 });
   await window.evaluate(values => {
     localStorage.setItem("mdc-test-draft", values[0]);
     localStorage.setItem("mdc-test-outbox", values[1]);
@@ -387,6 +549,7 @@ try {
   assert.equal(installedManifest(executable).version, aVersion, "Ordinary Quit installed the cached update");
   assert(await containsMarkers(runtimeA.userData, markers), "Draft/outbox/settings fixture data did not flush before ordinary Quit");
   const nativeStateBefore = await hashFile(runtimeA.nativeStatePath);
+  const nativeSentinelBefore = await hashFile(runtimeA.sentinelPath);
   checkpoint("Downloaded and verified B, then ordinary acknowledged Quit left A installed and flushed synthetic browser data");
 
   ({ launched: app, window } = await launch(executable, playwright, environment, server.spki));
@@ -411,9 +574,9 @@ try {
     assert.equal(opened, undefined);
     assert.equal((await window.evaluate(() => window.contextDesktop.getUpdateState())).status, "ready");
     await quitNormally(app, window, "manual-mac-quit-acknowledged"); app = undefined;
-    await replaceMacWithB(executable);
+    report.macReplacement = await replaceMacWithB(executable);
     assert.equal(installedManifest(executable).version, bVersion);
-    checkpoint("Opened the verified exact B DMG, then explicitly quit, mounted, manually replaced A, and retained the install path");
+    checkpoint("Opened the verified exact B DMG, then explicitly quit, mounted and hash-verified the manual B replacement at the same path");
   }
 
   ({ launched: app } = await launch(
@@ -422,24 +585,29 @@ try {
     environment,
     server.spki,
     join(dirname(reportPath), "native-update-launch.png"),
+    macKeychain,
   ));
+  if (macKeychain) checkpoint("Simulated the user's one-time Allow consent for exact B's Safe Storage item in the private test Keychain");
   const bWindow = app.windows()[0];
   await bWindow.waitForLoadState("domcontentloaded");
-  const runtimeB = await app.evaluate(async ({ app: electronApp, safeStorage }, path) => {
-    const fs = process.getBuiltinModule("fs").promises;
-    return {
-      version: electronApp.getVersion(),
-      executable: process.execPath,
-      userData: electronApp.getPath("userData"),
-      sentinel: safeStorage.decryptString(await fs.readFile(path)),
-    };
-  }, runtimeA.sentinelPath);
+  const runtimeBIdentity = await app.evaluate(({ app: electronApp }) => ({
+    version: electronApp.getVersion(),
+    executable: process.execPath,
+    userData: electronApp.getPath("userData"),
+  }));
   assert.deepEqual(
-    { version: runtimeB.version, executable: resolve(runtimeB.executable), userData: runtimeB.userData, sentinel: runtimeB.sentinel },
-    { version: bVersion, executable: resolve(executable), userData: runtimeA.userData, sentinel: nativeSentinel },
+    { version: runtimeBIdentity.version, executable: resolve(runtimeBIdentity.executable), userData: runtimeBIdentity.userData },
+    { version: bVersion, executable: resolve(executable), userData: runtimeA.userData },
   );
+  if (macUserDataDirectory) assert.equal(await realpath(runtimeBIdentity.userData), await realpath(macUserDataDirectory));
+  const sentinel = await app.evaluate(async ({ safeStorage }, path) => {
+    const fs = process.getBuiltinModule("fs").promises;
+    return safeStorage.decryptString(await fs.readFile(path));
+  }, runtimeA.sentinelPath);
+  assert.equal(sentinel, nativeSentinel);
   assert.deepEqual(await hashFile(runtimeA.nativeStatePath), nativeStateBefore, "Encrypted native startup state changed during A→B");
-  assert(await containsMarkers(runtimeB.userData, markers), "Synthetic draft/outbox/settings sentinels did not survive A→B");
+  assert.deepEqual(await hashFile(runtimeA.sentinelPath), nativeSentinelBefore, "Safe Storage ciphertext changed during Keychain consent");
+  assert(await containsMarkers(runtimeBIdentity.userData, markers), "Synthetic draft/outbox/settings sentinels did not survive A→B");
   checkpoint("Restarted exact B at the same path; safeStorage, user-data path, draft, outbox and settings sentinels survived");
   if (process.platform === "win32") await app.evaluate(({ app: electronApp }) => electronApp.setLoginItemSettings({ openAtLogin: false, args: ["--background"] }));
   await app.close(); app = undefined;
@@ -463,16 +631,10 @@ try {
   process.exitCode = 1;
 } finally {
   if (app) {
-    let closeDeadline;
-    const closed = await Promise.race([
-      app.close().then(() => true, () => false),
-      new Promise(resolvePromise => { closeDeadline = setTimeout(() => resolvePromise(false), 20_000); }),
-    ]);
-    clearTimeout(closeDeadline);
-    if (!closed) {
-      app.process().kill("SIGKILL");
+    try { await closeTestApplication(app); }
+    catch (error) {
       report.passed = false; process.exitCode = 1;
-      report.cleanupFailure = "The test application did not close; its fixture process was terminated.";
+      report.cleanupFailure = error instanceof Error ? error.message : String(error);
     }
   }
   await detachVolumes();
@@ -482,7 +644,17 @@ try {
     report.passed = false; process.exitCode = 1;
     report.cleanupFailure = error instanceof Error ? error.message : String(error);
   }
+  if (macKeychain) {
+    try {
+      await restoreMacTestKeychain(macKeychain);
+      macKeychain = undefined;
+      report.macIsolationRestored = true;
+    } catch (error) {
+      report.passed = false; process.exitCode = 1;
+      report.cleanupFailure = error instanceof Error ? error.message : String(error);
+    }
+  }
   await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");
-  if (process.env.MDC_KEEP_NATIVE_UPDATE_FIXTURE !== "1") await removePrivateWorkspace(privateRoot);
+  if (process.env.MDC_KEEP_NATIVE_UPDATE_FIXTURE !== "1" && !macKeychain) await removePrivateWorkspace(privateRoot);
   console.log(JSON.stringify(report, null, 2));
 }

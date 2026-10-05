@@ -15,6 +15,12 @@ import {
   previousVersion,
   readArchiveManifest,
 } from "./native-update-fixture.mjs";
+import {
+  buildMacKeychainConsentScript,
+  launchWithRequiredConsent,
+  parseSecurityKeychains,
+  redactSecret,
+} from "./native-update-mac-keychain.mjs";
 import { assertProductionUpdateBoundary } from "./production-update-boundary.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -57,6 +63,69 @@ test("builds an exact local catalog around the immutable selected B bytes", () =
       url: "https://localhost:48765/repository/releases/download/v2.0.0/Multi-Device-Context-2.0.0-win-x64.exe",
       ...updateArtifact,
     },
+  );
+});
+
+test("scopes macOS Keychain consent to the exact app item and private keychain", () => {
+  assert.deepEqual(parseSecurityKeychains(`    "/Users/runner/Library/Keychains/login.keychain-db"\n    "/tmp/MDC Native Update Test.keychain-db"\n`), [
+    "/Users/runner/Library/Keychains/login.keychain-db",
+    "/tmp/MDC Native Update Test.keychain-db",
+  ]);
+  assert.throws(() => parseSecurityKeychains('"relative.keychain-db"\n'), /absolute/u);
+
+  const script = buildMacKeychainConsentScript({
+    appName: "Multi Device Context",
+    serviceName: "Multi Device Context Safe Storage",
+    keychainName: "MDC Native Update Test",
+  });
+  assert.match(script, /system attribute "MDC_NATIVE_UPDATE_KEYCHAIN_PASSWORD"/u);
+  assert.match(script, /Multi Device Context Safe Storage/u);
+  assert.match(script, /MDC Native Update Test/u);
+  assert.match(script, /Multi Device Context wants to use/u);
+  assert.match(script, /click button "Allow"/u);
+  assert.doesNotMatch(script, /Always Allow/u);
+});
+
+test("owns the native application across launch and Keychain consent failures", async () => {
+  let consentAborted = false, consentClosed = false, closeCalls = 0;
+  await assert.rejects(launchWithRequiredConsent({
+    launch: async () => { throw new Error("launch rejected"); },
+    consent: signal => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => {
+        consentAborted = true;
+        setTimeout(() => {
+          consentClosed = true;
+          reject(new Error("consent aborted and closed"));
+        }, 10);
+      }, { once: true });
+    }),
+    close: async () => { closeCalls += 1; },
+  }), /launch rejected/u);
+  assert.equal(consentAborted, true);
+  assert.equal(consentClosed, true);
+  assert.equal(closeCalls, 0);
+
+  const launched = { id: "exact-b" };
+  await assert.rejects(launchWithRequiredConsent({
+    launch: async () => launched,
+    consent: async () => { throw new Error("consent rejected"); },
+    close: async value => { assert.equal(value, launched); closeCalls += 1; },
+  }), /consent rejected/u);
+  assert.equal(closeCalls, 1);
+
+  await assert.rejects(launchWithRequiredConsent({
+    launch: async () => launched,
+    consent: async () => {},
+    ready: async () => { throw new Error("first window rejected"); },
+    close: async value => { assert.equal(value, launched); closeCalls += 1; },
+  }), /first window rejected/u);
+  assert.equal(closeCalls, 2);
+});
+
+test("redacts a private Keychain password from automation failures", () => {
+  assert.equal(
+    redactSecret("setter rejected value private-password twice: private-password", "private-password"),
+    "setter rejected value [redacted] twice: [redacted]",
   );
 });
 
