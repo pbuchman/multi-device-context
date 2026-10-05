@@ -889,7 +889,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (item.content.kind === "attachment") {
         const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
         if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
-        await services.copyFile(await clipboardImageFile({ name: item.content.name, contentType: item.content.contentType, bytes }));
+        const file = await clipboardImageFile({ name: item.content.name, contentType: item.content.contentType, bytes });
+        if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
+        await services.copyFile(file);
       } else await services.copyText(item.content.text);
       showToast("Copied to this device");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Copy failed"); }

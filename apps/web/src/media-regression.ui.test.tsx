@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { Blob as NodeBlob } from "node:buffer";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +15,7 @@ const contexts: ContextRecord[] = [
   { id: beta, title: "Beta", createdAt: 2, updatedAt: 10, syncState: "synced" },
 ];
 
-afterEach(() => { cleanup(); localStorage.clear(); history.replaceState({}, "", "/"); });
+afterEach(() => { cleanup(); localStorage.clear(); history.replaceState({}, "", "/"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 function services(initialContexts = contexts) {
   let contextListener: ((snapshot: CloudSnapshot<ContextRecord>) => void) | undefined;
@@ -74,4 +75,35 @@ it("R6: identical snapshots reuse the attachment preview", async()=>{
  act(()=>test.items.get(alpha)!({records:[{...picture,content:{...picture.content}}],fromCache:false,hasPendingWrites:false}));
  await waitFor(()=>expect(test.value.cloud.attachmentBytes).toHaveBeenCalledTimes(1));
  vi.unstubAllGlobals();
+});
+
+it("does not copy an image when access changes during image decoding", async () => {
+  vi.stubGlobal("Blob", NodeBlob);
+  vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => "blob:review"), revokeObjectURL: vi.fn() }));
+  let release!: (bitmap: ImageBitmap) => void;
+  vi.stubGlobal("createImageBitmap", vi.fn(() => new Promise<ImageBitmap>(resolve => { release = resolve; })));
+  const originalCreateElement = document.createElement.bind(document);
+  vi.spyOn(document, "createElement").mockImplementation((tagName: string, options?: ElementCreationOptions) => {
+    if (tagName !== "canvas") return originalCreateElement(tagName, options);
+    return {
+      width: 0,
+      height: 0,
+      getContext: () => ({ drawImage: vi.fn() }),
+      toBlob: (callback: BlobCallback) => callback(new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" })),
+    } as unknown as HTMLCanvasElement;
+  });
+  const test = services(); let accessActive = true; test.value.accessActive = () => accessActive;
+  test.value.cloud.attachmentBytes = vi.fn(async () => new Uint8Array([255, 216, 255, 217]));
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  const picture: ItemRecord = { id: "00000000-0000-4000-8000-000000000078", contextId: alpha, content: { kind: "attachment", name: "photo.jpg", contentType: "image/jpeg", size: 4 }, device: test.value.device, createdAt: 1, ready: true, syncState: "synced" };
+  act(() => test.items.get(alpha)!({ records: [picture], fromCache: false, hasPendingWrites: false }));
+  await userEvent.click(await screen.findByRole("button", { name: "Copy photo.jpg" }));
+  await waitFor(() => expect(createImageBitmap).toHaveBeenCalledTimes(1));
+
+  accessActive = false;
+  release({ width: 2, height: 2, close: vi.fn() } as unknown as ImageBitmap);
+
+  await act(async () => undefined);
+  expect(test.value.copyFile).not.toHaveBeenCalled();
 });
