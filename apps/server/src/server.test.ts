@@ -378,7 +378,7 @@ describe("account profile", () => {
   it.each([{ sub: "another-user", name: "Wrong" }, null])("rejects mismatched or invalid profiles", async profile => {
     const app = buildServer({ publicConfig, verifier, backend: backend(), profileFetcher: async () => new Response(JSON.stringify(profile)) }); openServers.push(app);
     const response = await app.inject({ method: "GET", url: "/api/profile", headers: { authorization: "Bearer valid-token" } });
-    expect(response.statusCode).toBe(502); expect(response.json()).toEqual({ error: "Account details unavailable" });
+    expect(response.statusCode).toBe(502); expect(response.json()).toMatchObject({ error: "Account details unavailable", code: expect.stringMatching(/^profile_/) });
   });
   it("handles unavailable Auth0 without leaking upstream details", async () => {
     const app = buildServer({ publicConfig, verifier, backend: backend(), profileFetcher: async () => { throw new Error("private upstream failure"); } }); openServers.push(app);
@@ -394,4 +394,25 @@ it("rate limits profile requests before calling Auth0 and keeps failures uncache
   const response = await app.inject({ method: "GET", url: "/api/profile", headers: { authorization: "Bearer valid-token" } });
   expect(response.statusCode).toBe(429); expect(response.headers["cache-control"]).toBe("no-store");
   expect(profileFetcher).toHaveBeenCalledTimes(60);
+});
+
+it.each([
+  [401, "profile_provider_rejected"], [403, "profile_provider_rejected"],
+  [429, "profile_provider_rate_limited"], [503, "profile_provider_unavailable"],
+])("categorizes profile provider status %s without leaking its response", async (status, code) => {
+  const app = buildServer({ publicConfig, verifier, backend: backend(), profileFetcher: async () => new Response("private provider response", { status: status as number, headers: { "retry-after": "15" } }) });openServers.push(app);
+  const response = await app.inject({url:"/api/profile",headers:{authorization:"Bearer valid-token"}});
+  expect(response.statusCode).toBe(502);expect(response.json()).toEqual({error:"Account details unavailable",code});
+  expect(response.headers["cache-control"]).toBe("no-store");
+  if(status===429) expect(response.headers["retry-after"]).toBe("15");
+});
+it("categorizes empty profile claims and timeouts", async () => {
+  for (const [fetcher,code] of [
+    [async () => new Response(JSON.stringify({sub:"google-oauth2|person-123"})),"profile_empty"],
+    [async () => {throw new DOMException("private timeout detail","TimeoutError");},"profile_provider_timeout"],
+  ] as const) {
+    const app=buildServer({publicConfig,verifier,backend:backend(),profileFetcher:fetcher});openServers.push(app);
+    const response=await app.inject({url:"/api/profile",headers:{authorization:"Bearer valid-token"}});
+    expect(response.json()).toEqual({error:"Account details unavailable",code});
+  }
 });

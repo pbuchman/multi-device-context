@@ -1,3 +1,4 @@
+import { AccountDetails, defaultProfileState } from "./account-details.js";
 import { useWorkspaceCommands, type WorkspaceCommandRequest } from "./workspace-commands.js";
 import { SidebarResize } from "./sidebar-resize.js";
 import { AccessPage } from "./AccessPage.js";
@@ -153,6 +154,7 @@ type WorkspacePanel =
 
 export function ContextWorkspace({ services }: { services: WorkspaceServices }) {
   const viewer = useSyncExternalStore(services.profile?.subscribe ?? emptySubscribe, services.profile?.getSnapshot ?? (() => services.viewer));
+  const profileState = useSyncExternalStore(services.profile?.getState ? services.profile.subscribe : emptySubscribe, services.profile?.getState ?? defaultProfileState);
   const [contexts, setContexts] = useState<ContextRecord[]>([]);
   const confirmedKey = `mdc-confirmed:${services.outbox.namespace}`;
   const [confirmedContextIds, setConfirmedContextIds] = useState(() => readConfirmedContexts(confirmedKey));
@@ -1075,7 +1077,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
           if (services.platformKind === "android" || window.matchMedia?.("(pointer: coarse)").matches) openPanel({ kind: "context", context });
           else { const rect = opener.getBoundingClientRect(); openChatMenu(context, { x: rect.left, y: rect.bottom }, opener); }
         }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
-        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email} />
+        onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email ?? (profileState.status === "loading" ? "Loading account…" : undefined)} />
       <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
       <main ref={mainRef} className="main-panel">
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh(true)}
@@ -1124,7 +1126,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <button type="button" className="dialog-action" aria-label="Code mode" aria-pressed={navigation.selectedRef.current.drafts[panel.contextId]?.code ?? false} onClick={() => { if (!deleted.current.has(panel.contextId)) navigation.patchFor(panel.contextId, { code: !navigation.selectedRef.current.drafts[panel.contextId]?.code }); closePanel(); }}><WorkspaceIcon name="code" /><span>Code mode<small>{navigation.selectedRef.current.drafts[panel.contextId]?.code ? "On" : "Off"} · Applies to typed and pasted text</small></span></button>
       </> : null}
       {panel.kind === "settings" ? <>
-        <div className="profile-row"><span className="avatar large">{viewer.name.charAt(0).toUpperCase()}</span><span><strong>{viewer.name}</strong><small>{viewer.email ?? "Account details unavailable"}</small></span></div>
+        <AccountDetails viewer={viewer} profile={services.profile} />
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
         {services.settings ? <label className="setting-row"><span>AI context titles<small>Send the first text (up to 8,000 characters), or filename/type, to OpenRouter. File bytes are never sent. Turning off prevents new requests; already sent requests cannot be recalled. This does not add AI replies.</small></span><input aria-label="AI context titles" type="checkbox" disabled={aiEnabled === undefined || services.accessMode === "own"} checked={aiEnabled ?? false} onChange={event => { const enabled = event.target.checked; setAiEnabled(undefined); void services.settings!.setSettings(enabled).then(value => { if (isLive()) setAiEnabled(value.aiTitlesEnabled); }).catch(() => { if (isLive()) setError("Could not save AI setting. Reopen Settings to retry."); }); }} /></label> : null}
