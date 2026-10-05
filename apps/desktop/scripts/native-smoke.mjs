@@ -40,6 +40,24 @@ try {
     preferences:
       BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences(),
   }));
+  const menus = await app.evaluate(({ Menu, BrowserWindow }) => {
+    const menu = Menu.getApplicationMenu();
+    return {
+      file: menu.items.some(item => item.label === "File"),
+      visible: BrowserWindow.getAllWindows()[0].isMenuBarVisible(),
+      commands: ["new-chat", "delete-chat", "reload", "quit"].map(id => {
+        const item = menu.getMenuItemById(id);
+        return { id, accelerator: item?.accelerator, enabled: item?.enabled };
+      }),
+    };
+  });
+  assert.equal(menus.file, true);
+  if (process.platform === "win32") assert.equal(menus.visible, true);
+  for (const [id, accelerator] of [["new-chat", "CmdOrCtrl+N"], ["delete-chat", "CmdOrCtrl+Shift+Backspace"], ["reload", "CmdOrCtrl+R"], ["quit", "CmdOrCtrl+Q"]]) {
+    assert.equal(menus.commands.find(item => item.id === id).accelerator, accelerator);
+  }
+  assert.equal(menus.commands.find(item => item.id === "delete-chat").enabled, false);
+  report.checks.push("Visible native File menu and New/Delete/Reload/Quit accelerators on installed app");
   assert.equal(runtime.packaged, true);
   assert.equal(runtime.encryption, true);
   assert.equal(runtime.windows, 1);
@@ -108,6 +126,51 @@ try {
     await app.evaluate(({ app }) => app.emit("activate"));
     assert.deepEqual(await window.evaluate(() => window.contextDesktop.takeNavigation()), {});
     report.checks.push("Native context links and manual reopen emit distinct navigation intents");
+    // Exercise the public bridge on the real trusted hosted login page, without
+    // authenticating, replacing app origin, or introducing a shipped test hook.
+    await window.evaluate(() => {
+      window.__nativeCommandSmoke = [];
+      window.__stopNativeCommandSmoke = window.contextDesktop.onCommand(request => window.__nativeCommandSmoke.push(request));
+    });
+    await window.waitForFunction(() => typeof window.__stopNativeCommandSmoke === "function");
+    const waitReady = async () => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById("delete-chat").enabled)) return;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      throw new Error("Native workspace command subscription did not become ready");
+    };
+    await waitReady();
+    const clickMenu = async id => app.evaluate(({ Menu, BrowserWindow }, command) => {
+      const item = Menu.getApplicationMenu().getMenuItemById(command);
+      item.click(item, BrowserWindow.getAllWindows()[0], {});
+    }, id);
+    await clickMenu("new-chat");
+    await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "new-chat"));
+    await clickMenu("delete-chat");
+    await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "delete-chat"));
+    // Quit is intercepted through before-quit even when invoked by its native role.
+    await app.evaluate(({ app }) => app.quit());
+    await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "quit"));
+    await window.evaluate(async () => {
+      const request = window.__nativeCommandSmoke.find(request => request.command === "quit");
+      await window.contextDesktop.completeCommand(request.id, false);
+    });
+    assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1);
+    if (process.platform === "win32") await window.keyboard.press("F5");
+    else await clickMenu("reload");
+    await window.waitForFunction(() => window.__nativeCommandSmoke.some(request => request.command === "reload"));
+    const reloaded = window.waitForEvent("load");
+    await window.evaluate(async () => {
+      const request = window.__nativeCommandSmoke.find(request => request.command === "reload");
+      await window.contextDesktop.completeCommand(request.id, true);
+    });
+    await reloaded;
+    await window.waitForFunction(() => window.contextDesktop?.version === 1);
+    assert.equal(await window.evaluate(() => window.__nativeCommandSmoke), undefined);
+    assert.equal(await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById("delete-chat").enabled), false);
+    report.checks.push("Native New/Delete dispatch, refused Quit remains open, acknowledged Reload navigates and clears subscription");
+
     await window.evaluate(() =>
       window.contextDesktop.copyText("  Native smoke fixture\n"),
     );
@@ -271,6 +334,26 @@ let pasteboard = NSPasteboard.general
     assert.deepEqual(await cold.evaluate(() => window.contextDesktop.takeNavigation()), { contextId });
     report.checks.push("Cold-start context URL survives application startup and awaits sign-in");
   }
+  // Verify actual native quit after a renderer acknowledgement; login/recovery
+  // without a bridge also retains an immediate native quit path.
+  const lastWindow = await app.firstWindow();
+  if (report.hostedUiRequired) {
+    await lastWindow.evaluate(() => {
+      window.contextDesktop.onCommand(request => {
+        if (request.command === "quit") void window.contextDesktop.completeCommand(request.id, true).catch(() => {});
+      });
+    });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById("delete-chat").enabled)) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById("delete-chat").enabled), true);
+  }
+  const exited = app.waitForEvent("close");
+  await app.evaluate(({ app }) => app.quit()).catch(() => {});
+  await exited;
+  app = undefined;
+  report.checks.push("Installed application exits through native Quit and the workspace acknowledgement path when available");
   report.passed = true;
 } catch (error) {
   report.passed = false;
@@ -278,7 +361,16 @@ let pasteboard = NSPasteboard.general
     error instanceof Error ? error.message : "Native smoke failed";
   process.exitCode = 1;
 } finally {
-  if (app) await app.close();
+  if (app) {
+    for (const page of app.windows()) {
+      await page.evaluate(async () => {
+        const pending = window.__nativeCommandSmoke?.findLast(request => request.command === "quit" || request.command === "reload");
+        if (pending) await window.contextDesktop.completeCommand(pending.id, false).catch(() => {});
+        window.__stopNativeCommandSmoke?.();
+      }).catch(() => {});
+    }
+    await app.close();
+  }
   await mkdir("release", { recursive: true });
   await writeFile(
     "release/native-smoke.json",

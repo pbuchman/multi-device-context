@@ -22,6 +22,23 @@ with sync_playwright() as playwright:
     assert not page.locator("vite-error-overlay").count()
     page.screenshot(path=str(SCREENSHOTS / "desktop-light.png"), full_page=True)
 
+    # Keep real refresh work pending so progress remains visible in both themes.
+    for theme in ("light", "dark"):
+        page.get_by_label("Open settings").click()
+        page.get_by_role("combobox", name="Theme").select_option(theme)
+        page.get_by_role("button", name="Close dialog").click()
+        page.evaluate("window.mdcRefreshTest.pause()")
+        page.get_by_role("button", name="Refresh chats and messages", exact=True).click()
+        expect(page.get_by_text("Refreshing…", exact=True).first).to_be_visible()
+        expect(page.get_by_role("button", name="Refresh chats and messages", exact=True)).to_be_disabled()
+        page.screenshot(path=str(SCREENSHOTS / f"refresh-{theme}.png"), full_page=True)
+        page.evaluate("window.mdcRefreshTest.finish()")
+        expect(page.get_by_role("button", name="Refresh chats and messages", exact=True)).to_be_enabled()
+        expect(page.get_by_text("Refresh complete", exact=True)).to_be_visible()
+    page.get_by_label("Open settings").click()
+    page.get_by_role("combobox", name="Theme").select_option("light")
+    page.get_by_role("button", name="Close dialog").click()
+
     # Density follows the primary pointer, independently of the viewport width.
     for width in (1440, 390):
         page.set_viewport_size({"width": width, "height": 920})

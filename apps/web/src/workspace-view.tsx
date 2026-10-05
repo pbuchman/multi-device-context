@@ -5,7 +5,7 @@ import { AttachmentPreview } from "./media.js";
 
 const paths = {
   menu: "M4 7h16M4 16h11", close: "m6 6 12 12M18 6 6 18", plus: "M12 5v14M5 12h14",
-  refresh: "M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11-2l3 3M4 16l3 3a7 7 0 0 0 11-2",
+  refresh: "M3 12a9 9 0 0 1 15.4-6.4L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.4 6.4L3 16M3 21v-5h5",
   copy: "M8 8h12v12H8zM15 8V4H4v11h4", send: "M12 19V5M6 11l6-6 6 6",
   paste: "M8 5H5v16h14V5h-3M8 2h8v5H8z", search: "M17 17l4 4M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0",
   edit: "M13 5H5v14h14v-8M10 14l1-4 8-8 3 3-8 8-4 1Z", stack: "M4 4h12v12H4zM9 20h11V9",
@@ -29,7 +29,7 @@ export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, s
     <div className="brand"><span className="brand-mark"><WorkspaceIcon name="stack" /></span><span>Multi Device Context<small>Chat with yourself</small></span><button type="button" className="icon-button drawer-close" aria-label="Close chats menu" onClick={onClose}><WorkspaceIcon name="close" /></button></div>
     <button type="button" className="new-context" aria-label="New chat" onClick={onNew} disabled={blocked}><WorkspaceIcon name="edit" />New chat</button>
     <div className="search"><WorkspaceIcon name="search" /><input type="search" aria-label="Search chat titles" placeholder="Search chats" value={search} onChange={event => onSearch(event.target.value)} /><button className="icon-button" aria-label="Clear search" onClick={() => onSearch("")}><WorkspaceIcon name="close" /></button></div>
-    <div className="context-list-wrap"><div className="sidebar-label"><span>Your chats</span><button className="icon-button" type="button" aria-label="Refresh chats and messages" disabled={refreshing || blocked} aria-busy={refreshing} onClick={onRefresh}><WorkspaceIcon name="refresh" /></button></div>
+    <div className="context-list-wrap"><div className="sidebar-label"><span>{refreshing ? "Refreshing…" : "Your chats"}</span><button className="icon-button refresh" type="button" aria-label="Refresh chats and messages" disabled={refreshing || blocked} aria-busy={refreshing} onClick={onRefresh}><WorkspaceIcon name="refresh" /></button></div>
       <nav className="context-list" aria-label="Your chats">{contexts.length ? contexts.map(context => <div className={`context-row ${context.id === selectedId ? "selected" : ""}`} key={context.id}
         onContextMenu={event => { if (blocked) return; event.preventDefault(); event.stopPropagation(); const opener = (event.target as HTMLElement).closest("button") ?? event.currentTarget.querySelector("button")!; onContextMenu(context, { x: event.clientX, y: event.clientY }, opener); }}
         onKeyDown={event => { if (blocked || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return; event.preventDefault(); event.stopPropagation(); const opener = (event.target as HTMLElement).closest("button") ?? event.currentTarget.querySelector("button")!; const rect = opener.getBoundingClientRect(); onContextMenu(context, { x: rect.left, y: rect.bottom }, opener); }}>
@@ -45,7 +45,7 @@ export function ChatTopbar({ title, status, offline, drawerOpen, menuRef, onMenu
   title?: string | undefined; status: string; offline: boolean; drawerOpen: boolean; menuRef: RefObject<HTMLButtonElement | null>; onMenu(): void; onRefresh(): void; onOptions(): void; refreshing: boolean; blocked: boolean;
 }) {
   return <header className="titlebar"><button ref={menuRef} className="icon-button menu-button" aria-label="Open chats menu" aria-expanded={drawerOpen} disabled={blocked} onClick={onMenu}><WorkspaceIcon name="menu" /></button>
-    <div className="title-group"><h1 tabIndex={-1} title={displayTitle(title)}>{displayTitle(title)}</h1><small><span className={`status-dot ${offline ? "offline" : ""}`} />{status}</small></div>
+    <div className="title-group"><h1 tabIndex={-1} title={displayTitle(title)}>{displayTitle(title)}</h1><small aria-live="polite" aria-atomic="true"><span className={`status-dot ${offline ? "offline" : ""}`} />{status}</small></div>
     <button type="button" className="icon-button refresh" aria-label="Refresh" title="Refresh chats and messages" aria-description="Refresh chats, messages, and deletions" disabled={refreshing || blocked} aria-busy={refreshing} onClick={onRefresh}><WorkspaceIcon name="refresh" /></button>
     <button type="button" className="icon-button" aria-label="Chat options" disabled={blocked} onClick={onOptions}><WorkspaceIcon name="more" /></button>
   </header>;

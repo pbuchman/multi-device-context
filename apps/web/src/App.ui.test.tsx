@@ -520,3 +520,63 @@ it("updates account details in the footer and settings when the session profile 
   expect(within(screen.getByRole("dialog")).getByText("Full Name")).toBeTruthy();
   expect(within(screen.getByRole("dialog")).getByText("full@example.test")).toBeTruthy();
 });
+
+it("routes desktop New chat and Delete chat menu commands through existing draft and confirmation flows", async () => {
+  const test = services();
+  let command!: Parameters<NonNullable<WorkspaceServices["subscribeCommands"]>>[0];
+  test.value.isDesktop = true; test.value.shortcutPlatform = "darwin";
+  test.value.subscribeCommands = callback => { command = callback; return () => {}; };
+  test.value.completeCommand = vi.fn(async () => {});
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: /^Alpha$/ }));
+  await userEvent.type(screen.getByLabelText("Message to yourself"), "preserve my draft");
+  act(() => command({ id: "new", command: "new-chat" }));
+  expect(screen.getByRole("heading", { name: "New chat" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: /^Alpha$/ }));
+  expect((screen.getByLabelText("Message to yourself") as HTMLTextAreaElement).value).toBe("preserve my draft");
+  await userEvent.click(screen.getByRole("button", { name: /^Beta$/ }));
+  act(() => command({ id: "delete", command: "delete-chat" }));
+  expect(screen.getByRole("dialog", { name: "Delete chat?" }).textContent).toContain("Beta");
+  expect(test.value.cloud.deleteContext).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: /^Delete chat$/ }));
+  await waitFor(() => expect(test.value.cloud.deleteContext).toHaveBeenCalledWith(beta));
+});
+
+it("acknowledges native reload only after the current draft reaches local storage", async () => {
+  const test = services();let command!: Parameters<NonNullable<WorkspaceServices["subscribeCommands"]>>[0];
+  test.value.isDesktop = true;
+  test.value.subscribeCommands = callback => { command = callback; return () => {}; };
+  test.value.completeCommand = vi.fn(async () => {});
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: /^Alpha$/ }));
+  let release!: () => void;const pending = new Promise<void>(resolve => { release = resolve; });
+  const save = vi.spyOn(DraftStore.prototype, "save").mockImplementation(async () => { await pending; return false; });
+  try {
+    await userEvent.type(screen.getByLabelText("Message to yourself"), "x");
+    act(() => command({ id: "reload", command: "reload" }));
+    expect(test.value.completeCommand).not.toHaveBeenCalled();
+    release();await waitFor(() => expect(test.value.completeCommand).toHaveBeenCalledWith("reload", true));
+  } finally { release();save.mockRestore(); }
+});
+
+it("freezes edits and chat actions until native lifecycle completion", async () => {
+  const test = services(); let command!: Parameters<NonNullable<WorkspaceServices["subscribeCommands"]>>[0];
+  test.value.isDesktop = true; test.value.subscribeCommands = listener => { command = listener; return () => {}; };
+  test.value.completeCommand = vi.fn(async () => {});
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: /^Alpha$/ }));
+  let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  const save = vi.spyOn(DraftStore.prototype, "save").mockImplementation(async () => { await pending; return false; });
+  try {
+    await userEvent.type(screen.getByLabelText("Message to yourself"), "before");
+    act(() => command({ id: "reload", command: "reload" }));
+    const input = screen.getByLabelText("Message to yourself") as HTMLTextAreaElement;
+    expect(input.disabled).toBe(true); expect(screen.getByText("Saving local work…")).toBeTruthy();
+    fireEvent.change(input, { target: { value: "after" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Beta$/, hidden: true }));
+    expect(input.value).toBe("before"); expect(screen.getByRole("heading", { name: "Alpha", hidden: true })).toBeTruthy();
+    expect(test.value.completeCommand).not.toHaveBeenCalled();
+    release(); await waitFor(() => expect(test.value.completeCommand).toHaveBeenCalledWith("reload", true));
+    expect(input.disabled).toBe(true); // Remain frozen while the native window begins navigation.
+  } finally { release(); save.mockRestore(); }
+});

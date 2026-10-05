@@ -97,8 +97,31 @@ current conversation and its draft unchanged. Unsent local chats have no copyabl
 link. Use arrow keys and Enter to choose an action, or Escape to close the menu.
 Phones retain the chat options sheet.
 
-Both refresh controls update chats, messages, and deletions. Message **Copy** and
-**Message options** remain reachable without hovering.
+Both refresh controls update chats, messages, and deletions. Circular arrows and
+**Refreshing…** show the operation in progress, including the access check. A
+manual refresh finishes with **Refresh complete**, or an error explaining why it
+failed. Pending sends and offline status remain visible independently. Message
+**Copy** and **Message options** remain reachable without hovering.
+
+## Desktop keyboard shortcuts
+
+Desktop 0.5.2 adds these commands to the native application menu. Install the
+updated desktop application to get its menu and Quit handling; reloading the
+hosted interface alone cannot update the native shell.
+
+| Action | macOS | Windows |
+| --- | --- | --- |
+| New chat | Cmd+N | Ctrl+N |
+| Reload interface | Cmd+R | Ctrl+R or F5 |
+| Delete current chat, with confirmation | Cmd+Shift+Backspace | Ctrl+Shift+Backspace |
+| Quit application | Cmd+Q | Ctrl+Q |
+
+New chat preserves the previous chat's draft. Delete opens the existing
+confirmation dialog. Normal text-editing deletion shortcuts remain unchanged.
+Reload and Quit wait for local draft and pending-send writes; if a local save
+fails, the app stays open and displays the error. They do not wait for queued
+uploads to finish over the network. Closing the window (including Alt+F4 on
+Windows) keeps the app running in its tray/menu bar; use Quit to exit.
 
 ## Context links, names and agents
 

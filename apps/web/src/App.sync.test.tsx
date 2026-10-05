@@ -374,3 +374,67 @@ it("cannot resume or apply a late refresh after the installation policy was inva
  await act(async()=>read.resolve(snap([{...contexts[0]!,title:"Revoked content"}])));
  expect(screen.queryByRole("button",{name:"Revoked content"})).toBeNull(); expect(t.value.resume).not.toHaveBeenCalled();
 });
+
+it("shows refresh progress through access verification, coalesces repeats and reports completion", async () => {
+  const t = services(); const access = deferred<void>(); const data = deferred<CloudSnapshot<ContextRecord>>();
+  t.value.checkAccess = vi.fn(() => access.promise);
+  t.value.cloud.refreshContexts = vi.fn(() => data.promise);
+  t.value.cloud.refreshDeletedContexts = async () => [];
+  render(createElement(ContextWorkspace, { services: t.value }));
+  await act(async () => {});
+  expect(screen.getByRole("button", { name: "Refresh" }).getAttribute("aria-busy")).toBe("true");
+  expect(screen.getAllByText("Refreshing…").length).toBeGreaterThan(0);
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await userEvent.click(screen.getByRole("button", { name: "Refresh chats and messages" }));
+  expect(t.value.checkAccess).toHaveBeenCalledTimes(1);
+  await act(async () => access.resolve());
+  expect(screen.getByRole("button", { name: "Refresh" }).getAttribute("aria-busy")).toBe("true");
+  await act(async () => data.resolve(snap()));
+  expect(screen.getByRole("button", { name: "Refresh" }).getAttribute("aria-busy")).toBe("false");
+  expect(screen.queryByText("Refreshing…")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(screen.getByRole("status").textContent).toContain("Refresh complete");
+});
+it("finishes manual progress on error, selection changes and account changes", async () => {
+  const t = services(); const data = deferred<CloudSnapshot<ContextRecord>>();
+  t.value.cloud.refreshContexts = vi.fn(() => data.promise);
+  t.value.cloud.refreshDeletedContexts = async () => { throw new Error("offline"); };
+  const view = render(createElement(ContextWorkspace, { services: t.value }));
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await userEvent.click(screen.getByRole("button", { name: "Beta" }));
+  await userEvent.click(screen.getByRole("button", { name: "Refresh chats and messages" }));
+  expect(t.value.cloud.refreshContexts).toHaveBeenCalledTimes(1);
+  await act(async () => data.resolve(snap()));
+  expect(screen.getByRole("button", { name: "Refresh" }).getAttribute("aria-busy")).toBe("false");
+  expect(screen.getByRole("alert").textContent).toContain("Some data could not be refreshed");
+  expect(screen.queryByText("Refresh complete")).toBeNull();
+  const next = deferred<CloudSnapshot<ContextRecord>>(); t.value.cloud.refreshContexts = () => next.promise;
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  view.rerender(createElement(ContextWorkspace, { services: services().value }));
+  expect(screen.getByRole("button", { name: "Refresh" }).getAttribute("aria-busy")).toBe("false");
+  await act(async () => next.resolve(snap()));
+  expect(screen.queryByText("Refresh complete")).toBeNull();
+});
+it("stops the indicator after an access-check failure", async () => {
+  const t = services(); t.value.checkAccess = async () => { throw new Error("Device access could not be checked"); };
+  t.value.cloud.refreshContexts = vi.fn(async () => snap()); t.value.cloud.refreshDeletedContexts = async () => [];
+  render(createElement(ContextWorkspace, { services: t.value }));
+  await act(async () => {});
+  expect(screen.getByRole("button", { name: "Refresh" }).getAttribute("aria-busy")).toBe("false");
+  expect(screen.getByRole("alert").textContent).toContain("Device access could not be checked");
+  expect(t.value.cloud.refreshContexts).not.toHaveBeenCalled();
+});
+it("reports completion without falsely claiming cached or pending data is synced", async () => {
+  const t = services();
+  t.value.cloud.refreshContexts = async () => ({ ...snap(), fromCache: true, hasPendingWrites: true });
+  t.value.cloud.refreshDeletedContexts = async () => [];
+  render(createElement(ContextWorkspace, { services: t.value }));
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(screen.getByText("Syncing 1 item")).toBeTruthy();
+  expect(screen.queryByText("Synced")).toBeNull();
+  expect(screen.getByText("Refresh complete")).toBeTruthy();
+  t.value.cloud.refreshContexts = async () => ({ ...snap(), fromCache: true });
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(screen.getByText("Offline history")).toBeTruthy();
+  expect(screen.queryByText("Synced")).toBeNull();
+});

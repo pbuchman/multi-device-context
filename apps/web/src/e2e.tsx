@@ -39,10 +39,20 @@ const emitContexts = () => contextListener?.({ records: contexts, fromCache: fal
 const emitItems = (contextId: Id) => itemListeners.get(contextId)?.({ records: items.get(contextId) ?? [], fromCache: false, hasPendingWrites: false });
 const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (character) => character.charCodeAt(0));
 
+let refreshGate = Promise.resolve();
+let finishRefresh: (() => void) | undefined;
+Object.assign(window, { mdcRefreshTest: {
+  pause() { refreshGate = new Promise<void>(resolve => { finishRefresh = resolve; }); },
+  finish() { finishRefresh?.(); },
+} });
 const services: WorkspaceServices = {
   viewer: { uid: "browser-test", name: "Alex", email: "alex@example.com" },
   device: dell,
   cloud: {
+    async refreshContexts() { await refreshGate; return { records: contexts, fromCache: false, hasPendingWrites: false }; },
+    async refreshDeletedContexts() { return []; },
+    async refreshDeletedItems() { return []; },
+    async refreshItems(contextId) { return { records: items.get(contextId) ?? [], fromCache: false, hasPendingWrites: false }; },
     subscribeContexts(emit) { contextListener = emit; queueMicrotask(emitContexts); return () => { contextListener = undefined; }; },
     subscribeItems(contextId, emit) { itemListeners.set(contextId, emit); queueMicrotask(() => emitItems(contextId)); return () => itemListeners.delete(contextId); },
     async renameContext(contextId, title) { contexts = contexts.map((context) => context.id === contextId ? { ...context, title } : context); emitContexts(); },

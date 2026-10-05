@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Desktop 0.5.2: native File menu and macOS/Windows shortcuts for new chat,
+  confirmed deletion, reload and quit, with local-save checks before leaving.
+- Clear refresh arrows, visible progress throughout access checks and fetching,
+  and explicit completion or failure feedback.
+
 - Guarded transitive dependency patches for deeply nested brace patterns and
   shared-cache stale response handling, with exploit regression tests.
 

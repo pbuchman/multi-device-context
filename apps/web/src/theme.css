@@ -31,3 +31,9 @@
 .sidebar-resize{position:relative;flex:0 0 0;width:0;align-self:stretch;z-index:8;touch-action:none;cursor:col-resize;outline:none}
 .sidebar-resize::after{content:"";position:absolute;left:-4px;top:0;bottom:0;width:8px}
 .sidebar-resize:hover::after,.sidebar-resize:focus-visible::after,.sidebar-resize.dragging::after{background:var(--focus);opacity:.55}
+
+/* Refresh progress remains readable when motion is reduced. */
+.refresh[aria-busy="true"] .workspace-icon{animation:refresh-turn 1s linear infinite}
+.refresh[aria-busy="true"]{opacity:1;color:var(--green)}
+@keyframes refresh-turn{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.refresh[aria-busy="true"] .workspace-icon{animation:none}}
