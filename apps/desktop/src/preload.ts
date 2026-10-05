@@ -47,6 +47,7 @@ if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
     reviewedSignOut: true,
     platform: process.platform as DesktopBridge["platform"],
     getDevice: () => invoke("getDevice"),
+    getAccountProfile: () => invoke("getAccountProfile"),
     getAccessToken: (interactive = false) =>
       invoke("getAccessToken", interactive),
     // Optional private argument binds cleanup to the exact reviewed inbox. The

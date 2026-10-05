@@ -393,6 +393,10 @@ function wireBridge(): void {
   handle("invalidateTransfers", 0, async () => { transferGeneration++; await copies.clear(); });
   handle("takeNavigation", 0, () => { const value = pendingNavigation; pendingNavigation = undefined; return value; });
   handle("getDevice", 0, () => store.device());
+  handle("getAccountProfile", 0, () => {
+    if (!auth) throw new Error("Sign-in is unavailable. Reconnect and retry.");
+    return auth.getAccountProfile();
+  });
   handle("getAccessToken", 1, (interactive) => {
     if (typeof interactive !== "boolean")
       throw new Error("Invalid sign-in request.");
