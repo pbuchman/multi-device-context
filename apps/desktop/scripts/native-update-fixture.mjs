@@ -71,6 +71,13 @@ export async function preparePrivateTestWorkspace({
     'const RELEASE_REPOSITORY_URL = "https://github.com/pbuchman/multi-device-context";',
     `const RELEASE_REPOSITORY_URL = "${repository}";`,
   );
+  // The private fixture needs its fixed localhost HTTPS port. Production keeps
+  // rejecting every non-default artifact port; no runtime override is added.
+  await replaceExact(
+    join(destination, "apps/desktop/src/update-files.ts"),
+    'url.protocol !== "https:" || url.username || url.password || url.port || url.hash',
+    `url.protocol !== "https:" || url.username || url.password || (url.port && url.origin !== ${JSON.stringify(origin)}) || url.hash`,
+  );
 
   const packagePath = join(destination, "apps/desktop/package.json");
   const manifest = JSON.parse(await readFile(packagePath, "utf8"));

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
+import { build } from "esbuild";
 import test from "node:test";
 import {
   TEST_FIXTURE_MARKER,
@@ -61,5 +63,20 @@ test("rewrites only a private source copy and marks it so production validation 
       JSON.stringify({ appOrigin: "https://localhost:48765", bridgeVersion: 1, nativeUpdateTestOnly: TEST_FIXTURE_MARKER }),
     ), /nativeUpdateTestOnly|test-only|deep-equal/i);
     assert.deepEqual(await hashFile(productionContracts), before);
+    const output = join(parent, "download.mjs");
+    await build({ entryPoints: [join(result.appDirectory, "src/update-files.ts")], outfile: output,
+      bundle: true, platform: "node", format: "esm",
+      alias: { "@mdc/contracts": join(destination, "packages/contracts/src/index.ts") } });
+    const { downloadVerifiedArtifact } = await import(pathToFileURL(output).href);
+    const bytes = Buffer.from("isolated macOS fixture");
+    const catalog = buildTestCatalog({ version: "0.5.4", repository: result.repository, platform: "darwin",
+      updateArtifact: { size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"),
+        sha512: createHash("sha512").update(bytes).digest("base64") } });
+    const artifact = catalog.artifacts.find(value => value.platform === "darwin");
+    const downloaded = await downloadVerifiedArtifact(artifact, join(parent, "cache"), async url => {
+      assert.equal(url, artifact.url);
+      return new Response(bytes, { headers: { "content-length": String(bytes.length) } });
+    });
+    assert.deepEqual(await readFile(downloaded.path), bytes);
   } finally { await rm(parent, { recursive: true, force: true }); }
 });
