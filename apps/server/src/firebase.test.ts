@@ -386,7 +386,7 @@ describe("FirebaseBackend deletion", () => {
     await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID)).resolves.toBeUndefined();
   });
 
-  it("deletes the parent context when its last message is deleted", async () => {
+  it("keeps the parent context after an ordinary item deletion", async () => {
     const { backend, firestore } = fixture();
     const { context, item } = paths();
     firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
@@ -395,9 +395,51 @@ describe("FirebaseBackend deletion", () => {
     await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID);
 
     expect(firestore.documents.has(item)).toBe(false);
-    expect(firestore.documents.has(context)).toBe(false);
+    expect(firestore.documents.has(context)).toBe(true);
     expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true });
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(false);
+  });
+
+  it("atomically deletes the parent only when a requested final item has no sibling", async () => {
+    const { backend, firestore } = fixture();
+    const { context, item } = paths();
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false });
+
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true);
+
+    expect(firestore.documents.has(item)).toBe(false);
+    expect(firestore.documents.has(context)).toBe(false);
     expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true });
+  });
+
+  it("does not delete the context when a requested final item has a live sibling", async () => {
+    const { backend, firestore } = fixture();
+    const { context, item } = paths();
+    const sibling = `${context}/items/00000000-0000-4000-8000-000000000099`;
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false, createdAt: 1 });
+    firestore.documents.set(sibling, { deleting: false, ready: true, createdAt: 2 });
+
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true);
+
+    expect(firestore.documents.has(context)).toBe(true);
+    expect(firestore.documents.has(sibling)).toBe(true);
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(false);
+  });
+
+  it("resumes conditional context cleanup after an interrupted object deletion", async () => {
+    const { backend, firestore, bucket } = fixture();
+    const { context, item, object } = paths();
+    firestore.documents.set(context, { deleting: false, firstItemId: ITEM_ID });
+    firestore.documents.set(item, { deleting: false });
+    bucket.objects.set(object, { size: 1, contentType: "text/plain", generation: "1", failDeletes: 1 });
+
+    await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true)).rejects.toThrow("transient");
+    expect(firestore.documents.get(context)?.deleting).toBe(true);
+    await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, undefined, true)).resolves.toBeUndefined();
+    expect(firestore.documents.has(context)).toBe(false);
+    expect(firestore.documents.has(item)).toBe(false);
   });
 });
 

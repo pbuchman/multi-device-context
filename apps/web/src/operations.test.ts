@@ -20,13 +20,27 @@ it("R4: persists ID-only deletion across a failed request and process restart; r
   const second = new ContextOperations(reopened, remote); await reopened.retry(); await second.runner.drain(); second.runner.stop();
   expect(remote.deleteContext).toHaveBeenCalledTimes(2); expect(await reopened.deletions()).toEqual([]); reopened.close();
 });
-it("R5: deleting a first queued item preserves and promotes its successor", async () => {
+it("R5: a queued sibling prevents final-context deletion and is published after its predecessor is removed", async () => {
   const outbox = new DurableOutbox({ projectId: "test", uid: "owner" }), remote = cloud();
   await outbox.enqueue(draft); await outbox.enqueue({ ...draft, itemId: nextId, createsContext: false });
-  const operations = new ContextOperations(outbox, remote); await operations.remove(contextId, itemId); operations.runner.stop();
-  expect(remote.deleteItem).toHaveBeenCalledWith(contextId, itemId);
+  const operations = new ContextOperations(outbox, remote); await operations.remove(contextId, itemId, true); operations.runner.stop();
+  expect(remote.deleteItem).toHaveBeenCalledWith(contextId, itemId, false);
   expect(remote.publish).toHaveBeenCalledTimes(1); expect(remote.publish).toHaveBeenCalledWith(expect.objectContaining({ itemId: nextId, createsContext: true }));
   await expect(outbox.enqueue(draft)).rejects.toThrow("deleted"); outbox.close();
+});
+it("requests conditional context cleanup when the deleted item has no queued sibling", async () => {
+  const outbox = new DurableOutbox({ projectId: "test", uid: "final" }), remote = cloud();
+  const operations = new ContextOperations(outbox, remote); await operations.remove(contextId, itemId, true); operations.runner.stop();
+  expect(remote.deleteItem).toHaveBeenCalledWith(contextId, itemId, true); outbox.close();
+});
+it("rejects a new local sibling while final-context deletion is pending", async () => {
+  const outbox = new DurableOutbox({ projectId: "test", uid: "final-race" }), remote = cloud();
+  let finish!: () => void;
+  remote.deleteItem.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+  const operations = new ContextOperations(outbox, remote); const removing = operations.remove(contextId, itemId, true);
+  await vi.waitFor(() => expect(remote.deleteItem).toHaveBeenCalled());
+  await expect(outbox.enqueue({ ...draft, itemId: nextId, createsContext: false })).rejects.toThrow(/delet/i);
+  finish(); await removing; operations.runner.stop(); outbox.close();
 });
 it("R1/R5: reconcile remote deletion before replaying queued bytes", async () => {
   const outbox = new DurableOutbox({ projectId: "test", uid: "owner" }), remote = cloud(); await outbox.enqueue(draft);

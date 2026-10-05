@@ -43,7 +43,7 @@ export type WorkspaceCloud = {
   setNetworkEnabled?(enabled: boolean): Promise<void>;
   renameContext(contextId: Id, title: string): Promise<void>;
   deleteContext(contextId: Id): Promise<void>;
-  deleteItem(contextId: Id, itemId: Id): Promise<void>;
+  deleteItem(contextId: Id, itemId: Id, deleteEmptyContext?: boolean): Promise<void>;
   attachmentBytes(contextId: Id, itemId: Id, content: Extract<Content, { kind: "attachment" }>): Promise<Uint8Array>;
 };
 
@@ -62,7 +62,7 @@ export type WorkspaceOutbox = {
 };
 
 export type WorkspaceServices = {
-  remove?(contextId: Id, itemId?: Id): Promise<boolean>;
+  remove?(contextId: Id, itemId?: Id, deleteEmptyContext?: boolean): Promise<boolean>;
   initialContextId?: Id;
   settings?: { getSettings(): Promise<{ aiTitlesEnabled: boolean }>; setSettings(enabled: boolean): Promise<{ aiTitlesEnabled: boolean }> };
   isDesktop?: boolean;
@@ -928,11 +928,11 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   };
 
   const fallbackDeletes = useRef(new Map<string, () => Promise<void>>());
-  const remove = async (contextId: Id, itemId?: Id): Promise<boolean> => {
-    if (services.remove) return services.remove(contextId, itemId);
+  const remove = async (contextId: Id, itemId?: Id, deleteEmptyContext = false): Promise<boolean> => {
+    if (services.remove) return services.remove(contextId, itemId, deleteEmptyContext);
     const key = `${contextId}:${itemId ?? "context"}`;
     const action = async () => {
-      if (itemId) { await services.outbox.removeItem?.(contextId, itemId); await services.cloud.deleteItem(contextId, itemId); }
+      if (itemId) { await services.outbox.removeItem?.(contextId, itemId); await services.cloud.deleteItem(contextId, itemId, deleteEmptyContext); }
       else { await services.outbox.removeContext?.(contextId); await services.cloud.deleteContext(contextId); }
       fallbackDeletes.current.delete(key);
     };
@@ -957,7 +957,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (accountBlocked || !isLive()) return;
     setActiveDeletions(count => count + 1);
     try {
-      const complete = await remove(item.contextId, item.id);
+      const finalVisibleItem = visibleItems.length === 1 && visibleItems[0]?.id === item.id;
+      const complete = await remove(item.contextId, item.id, finalVisibleItem);
       if (!isLive()) return;
       deletedItems.current.add(item.id);
       setItems(current => current.filter(i => i.id !== item.id));

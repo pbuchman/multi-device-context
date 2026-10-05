@@ -226,12 +226,13 @@ describe("authenticated API", () => {
           method: "DELETE",
           url: `/api/contexts/${CONTEXT_ID}/items/${ITEM_ID}`,
           headers,
+          payload: { deleteEmptyContext: true },
         })
       ).statusCode,
     ).toBe(204);
     expect(fake.completeUpload).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, ITEM_ID, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
     expect(fake.deleteContext).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
-    expect(fake.deleteItem).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, ITEM_ID, { uid: "derived_uid", deviceId: TEST_DEVICE_ID });
+    expect(fake.deleteItem).toHaveBeenCalledWith("derived_uid", CONTEXT_ID, ITEM_ID, { uid: "derived_uid", deviceId: TEST_DEVICE_ID }, true);
   });
 
   it.each([

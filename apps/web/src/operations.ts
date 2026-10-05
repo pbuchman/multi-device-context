@@ -5,7 +5,7 @@ export type OperationCloud = {
   deletionMarkers(): Promise<DeletionMarkers>;
   publish(record: QueuedShare): Promise<void>;
   deleteContext(id: Id): Promise<void>;
-  deleteItem(contextId: Id, itemId: Id): Promise<void>;
+  deleteItem(contextId: Id, itemId: Id, deleteEmptyContext?: boolean): Promise<void>;
 };
 /** All local cancellations commit before HTTP; ID-only intents survive ambiguous responses. */
 export class ContextOperations {
@@ -32,7 +32,7 @@ export class ContextOperations {
     for (const deletion of await this.outbox.deletions()) {
       if (deletion.paused || deletion.nextAttemptAt > Date.now()) continue;
       try {
-        if (deletion.itemId) await this.cloud.deleteItem(deletion.contextId, deletion.itemId);
+        if (deletion.itemId) await this.cloud.deleteItem(deletion.contextId, deletion.itemId, deletion.deleteEmptyContext === true);
         else await this.cloud.deleteContext(deletion.contextId);
         await this.outbox.remove(deletion.key);
       } catch (error) {
@@ -40,8 +40,8 @@ export class ContextOperations {
       }
     }
   }
-  async remove(contextId: Id, itemId?: Id): Promise<boolean> {
-    await this.outbox.requestDeletion(contextId, itemId);
+  async remove(contextId: Id, itemId?: Id, deleteEmptyContext = false): Promise<boolean> {
+    await this.outbox.requestDeletion(contextId, itemId, deleteEmptyContext);
     await this.runner.drain().catch(() => {});
     return !(await this.outbox.deletions()).some(d => d.contextId === contextId && d.itemId === itemId);
   }

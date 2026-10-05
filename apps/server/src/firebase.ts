@@ -167,7 +167,8 @@ export class FirebaseBackend implements Backend {
     }
   }
 
-  async deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void> {
+  async deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity, deleteEmptyContext = false): Promise<void> {
+    if (deleteEmptyContext) return this.deleteItemAndEmptyContext(uid, contextId, itemId, device);
     const reference = this.firestore.doc(itemPath(uid, contextId, itemId));
     const deletionMarker = this.firestore.doc(`users/${uid}/deletedItems/${contextId}_${itemId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
@@ -181,28 +182,56 @@ export class FirebaseBackend implements Backend {
       if (record.deleting !== true) transaction.update(reference, { deleting: true });
       return true;
     });
-    if (!exists) { await this.repairContextAfterItemDeletion(uid, contextId, itemId, device); return; }
+    if (!exists) { await this.repairFirstItem(uid, contextId, itemId); return; }
 
     await this.deleteObjectGenerations(`${itemPath(uid, contextId, itemId)}/`);
     await reference.delete();
-    await this.repairContextAfterItemDeletion(uid, contextId, itemId, device);
+    await this.repairFirstItem(uid, contextId, itemId);
   }
 
-  private async repairContextAfterItemDeletion(uid: string, contextId: string, removedId: string, device?: DeviceIdentity) {
+  private async repairFirstItem(uid: string, contextId: string, removedId: string) {
     const parent = this.firestore.doc(contextPath(uid, contextId));
-    const empty = await this.firestore.runTransaction(async tx => {
+    await this.firestore.runTransaction(async tx => {
       const context = await tx.get(parent);
-      if (!context.exists || context.data()?.deleting !== false) return false;
+      if (!context.exists || context.data()?.deleting !== false || context.data()?.firstItemId !== removedId) return;
       const remaining = await tx.get(parent.collection("items").where("deleting", "==", false).orderBy("createdAt").limit(1));
       const first = remaining.docs[0];
-      if (!first) return true;
-      if (context.data()?.firstItemId === removedId) {
-        tx.update(parent, { firstItemId: first.id, ready: first.data().ready === true,
-          ...(context.data()?.titleState === "pending" ? { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() } : {}) });
-      }
-      return false;
+      tx.update(parent, { firstItemId: first?.id ?? FieldValue.delete(), ready: first ? first.data().ready === true : true,
+        ...(context.data()?.titleState === "pending" ? { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() } : {}) });
     });
-    if (empty) await this.deleteContext(uid, contextId, device);
+  }
+
+  private async deleteItemAndEmptyContext(uid: string, contextId: string, itemId: string, device?: DeviceIdentity): Promise<void> {
+    const parent = this.firestore.doc(contextPath(uid, contextId));
+    const item = this.firestore.doc(itemPath(uid, contextId, itemId));
+    const itemMarker = this.firestore.doc(`users/${uid}/deletedItems/${contextId}_${itemId}`);
+    const contextMarker = this.firestore.doc(`users/${uid}/deletedContexts/${contextId}`);
+    const result = await this.firestore.runTransaction(async transaction => {
+      const [context, target, previousItemMarker, previousContextMarker, live] = await Promise.all([
+        transaction.get(parent), transaction.get(item), transaction.get(itemMarker),
+        transaction.get(contextMarker),
+        transaction.get(parent.collection("items").where("deleting", "==", false).limit(2)),
+      ]);
+      const access = context.data() ?? previousItemMarker.data();
+      if (device) await assertDeviceContext(this.firestore, device, access, transaction);
+      const originDeviceId = access?.originDeviceId;
+      transaction.set(itemMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
+      if (context.exists && context.data()?.deleting === true && previousContextMarker.exists) return "context" as const;
+      const hasSibling = live.docs.some(entry => entry.id !== itemId);
+      if (context.exists && context.data()?.deleting === false && !hasSibling) {
+        transaction.set(contextMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
+        transaction.update(parent, { deleting: true });
+        if (target.exists && target.data()?.deleting !== true) transaction.update(item, { deleting: true });
+        return "context" as const;
+      }
+      if (target.exists && target.data()?.deleting !== true) transaction.update(item, { deleting: true });
+      return target.exists ? "item" as const : "missing" as const;
+    });
+    if (result === "context") { await this.cleanupMarkedContext(uid, contextId); return; }
+    if (result === "missing") { await this.repairFirstItem(uid, contextId, itemId); return; }
+    await this.deleteObjectGenerations(`${itemPath(uid, contextId, itemId)}/`);
+    await item.delete();
+    await this.repairFirstItem(uid, contextId, itemId);
   }
 
   async deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void> {
@@ -222,7 +251,11 @@ export class FirebaseBackend implements Backend {
       return true;
     });
     if (!exists) return;
+    await this.cleanupMarkedContext(uid, contextId);
+  }
 
+  private async cleanupMarkedContext(uid: string, contextId: string): Promise<void> {
+    const reference = this.firestore.doc(contextPath(uid, contextId));
     while (true) {
       const items = await reference.collection("items").limit(CLEANUP_BATCH_SIZE).get();
       if (items.empty) break;

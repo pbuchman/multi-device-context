@@ -539,6 +539,27 @@ it("offers direct deletion beside copy for every message", async () => {
   expect(screen.getByRole("dialog", { name: "Delete message?" })).toBeTruthy();
 });
 
+it("requests empty-context cleanup only when deleting the final visible message", async () => {
+  const test = services(); test.value.remove = vi.fn(async () => true);
+  render(<ContextWorkspace services={test.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  const first = { id: beta, contextId: alpha, content: { kind: "text" as const, text: "First" }, createdAt: 1, device: test.value.device, ready: true, syncState: "synced" as const };
+  act(() => test.items.get(alpha)!({ records: [first], fromCache: false, hasPendingWrites: false }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete message" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Delete message?" })).getByRole("button", { name: "Delete message" }));
+  await waitFor(() => expect(test.value.remove).toHaveBeenCalledWith(alpha, beta, true));
+
+  cleanup();
+  const next = services(); next.value.remove = vi.fn(async () => true);
+  render(<ContextWorkspace services={next.value} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  const sibling = { ...first, id: "00000000-0000-4000-8000-000000000003", content: { kind: "text" as const, text: "Sibling" }, createdAt: 2 };
+  act(() => next.items.get(alpha)!({ records: [first, sibling], fromCache: false, hasPendingWrites: false }));
+  await userEvent.click(screen.getAllByRole("button", { name: "Delete message" })[0]!);
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Delete message?" })).getByRole("button", { name: "Delete message" }));
+  await waitFor(() => expect(next.value.remove).toHaveBeenLastCalledWith(alpha, beta, false));
+});
+
 it("routes desktop New chat and Delete chat menu commands through existing draft and confirmation flows", async () => {
   const test = services();
   let command!: Parameters<NonNullable<WorkspaceServices["subscribeCommands"]>>[0];

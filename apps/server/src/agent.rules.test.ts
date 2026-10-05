@@ -64,16 +64,14 @@ describe("agent persistence and title races", () => {
     expect(fetcher).not.toHaveBeenCalled(); expect((await store.getContext(owner, id)).titleState).toBe("fallback");
     expect(await settings.get(other)).toEqual({ aiTitlesEnabled: false }); vi.unstubAllGlobals();
   });
-  it("R5: promotes a ready sibling, then removes the context after its final item", async () => {
+  it("R5: deleting the unfinished first attachment promotes a ready sibling", async () => {
     const id = randomUUID(), first = randomUUID(), next = randomUUID();
     await store.writeItem(owner, id, { id: first, content: { kind: "attachment", name: "cancel.bin", contentType: "application/octet-stream", size: 3 } }, true);
     await store.writeItem(owner, id, { id: next, content }, false);
     await backend.deleteItem(owner, id, first);
     const context = await store.getContext(owner, id); expect(context.firstItemId).toBe(next); expect(context.ready).toBe(true);
     await backend.deleteItem(owner, id, first); expect((await store.getContext(owner, id)).firstItemId).toBe(next);
-    await backend.deleteItem(owner, id, next);
-    await expect(store.getContext(owner, id)).rejects.toBeInstanceOf(BackendNotFoundError);
-    expect((await db.doc(`users/${owner}/deletedContexts/${id}`).get()).data()).toMatchObject({ deleted: true });
+    await backend.deleteItem(owner, id, next); expect((await store.getContext(owner, id)).ready).toBe(true);
   });
   it("R2: ten active keys is an enforced owner limit", async () => {
     for (const doc of (await db.collection("agentKeys").where("uid", "==", owner).get()).docs) await doc.ref.delete();
