@@ -7,7 +7,7 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "test": "pnpm test:security && vitest run && pnpm test:runtime && pnpm test:mobile && pnpm test:operations && pnpm test:updates",
+    "test": "pnpm test:security && vitest run && pnpm test:runtime && pnpm test:mobile && pnpm test:operations && pnpm test:updates && pnpm --filter @mdc/desktop test:update-harness",
     "build:web": "pnpm --filter @mdc/web build",
     "test:web": "vitest run apps/web/src",
     "test:rules": "firebase emulators:exec --project demo-mdc --only firestore,storage \"pnpm vitest run --config vitest.rules.config.ts\"",

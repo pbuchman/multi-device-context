@@ -3,6 +3,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     setupFiles: ["apps/web/src/test-setup.ts"],
-    exclude: ["**/node_modules/**", ".local/**", "**/*.rules.test.ts", "scripts/runtime/**/*.test.mjs", "scripts/security/**/*.test.mjs", "scripts/ci/**/*.test.mjs", "scripts/operations/**/*.test.mjs", "scripts/updates/**/*.test.mjs", "apps/mobile/**/*.test.mjs"],
+    exclude: ["**/node_modules/**", ".local/**", "**/*.rules.test.ts", "scripts/runtime/**/*.test.mjs", "scripts/security/**/*.test.mjs", "scripts/ci/**/*.test.mjs", "scripts/operations/**/*.test.mjs", "scripts/updates/**/*.test.mjs", "apps/mobile/**/*.test.mjs", "apps/desktop/scripts/**/*.test.mjs"],
   },
 });

@@ -38,7 +38,7 @@ concurrency:
 jobs:
   debug:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CI: "true"
       MDC_APP_ORIGIN: https://context.example.com
@@ -81,6 +81,21 @@ jobs:
         run: pnpm --filter @mdc/mobile android:guards
       - name: Android lint
         run: pnpm --filter @mdc/mobile android:lint
+      - name: Start isolated Android update-test emulator
+        run: |
+          sdkmanager "emulator" "system-images;android-36;google_apis;x86_64"
+          printf 'no\n' | avdmanager create avd --force --name mdc_update_ci --package "system-images;android-36;google_apis;x86_64"
+          sudo chmod a+rw /dev/kvm
+          "$ANDROID_HOME/emulator/emulator" -avd mdc_update_ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader > "$RUNNER_TEMP/mdc-update-emulator.log" 2>&1 &
+          timeout 180 adb wait-for-device
+          timeout 180 bash -c 'until adb shell getprop sys.boot_completed | tr -d "\r" | grep -q "^1$"; do sleep 2; done'
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+      - name: Verify Android updater on the emulator
+        run: |
+          apps/mobile/android/gradlew -p apps/mobile/android connectedDebugAndroidTest \
+            -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest
       # Configuration tests assert that fixture mode rejects release generation;
       # Gradle independently rejects fixture release tasks and private signing.
       # No production configuration, private key, or APK publication belongs here.
