@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Confirm pasted images and files with Enter. Drag files into a chat to review
+  and send them with Enter while preserving the typed draft and captured chat.
+
 ## 0.5.5 — Preview updates
 
 - GitHub Preview updates with explicit downloads, verified installers, progress,

@@ -29,3 +29,11 @@ Remove each override, patch, exception and corresponding guard only after an
 upstream replacement passes the exploit regression tests. In particular,
 `http-cache-semantics@4.3.0` still reproduces the max-stale vulnerability despite
 being outside the advisory's currently listed affected range.
+
+The Electron download toolchain pins `@electron/get>global-agent` to 4.1.3,
+which removes the `roarr` / `sprintf-js` chain affected by
+[GHSA-hp3w-g68c-fv3c](https://github.com/advisories/GHSA-hp3w-g68c-fv3c).
+A subprocess regression exercises the actual Electron proxy bootstrap with a
+local synthetic HTTP proxy. No new audit exception is needed. `source-map-js`
+is updated to 1.2.2 for
+[GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q).
