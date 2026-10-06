@@ -11,6 +11,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   TEST_FIXTURE_MARKER,
+  assertArtifactTransfers,
   buildTestCatalog,
   hashFile,
   preparePrivateTestWorkspace,
@@ -653,10 +654,12 @@ try {
   const bAfter = await hashFile(bPath), sourceAfter = await hashFile(productionSource);
   assert.deepEqual(bAfter, bBefore, "Release B artifact changed during A→B acceptance");
   assert.deepEqual(sourceAfter, sourceBefore, "Production update constants changed during A→B acceptance");
-  assert(server.artifactBytesServed() >= bBefore.size, "Fixture server never delivered the exact B payload");
-  assert.equal(server.artifactBytesServed() % bBefore.size, 0, "Fixture server delivered a partial B payload");
-  checkpoint("Release B and production source remained byte-for-byte unchanged; local HTTPS served only complete exact-B payloads");
   report.fixtureRequests = server.requests;
+  report.artifactTransfers = server.artifactTransfers();
+  report.artifactTransferSummary = assertArtifactTransfers(report.artifactTransfers, bBefore.size, process.platform);
+  checkpoint(process.platform === "darwin"
+    ? "Release B and production source remained byte-for-byte unchanged; each macOS header probe was followed by a complete exact-B stream"
+    : "Release B and production source remained byte-for-byte unchanged; local HTTPS completed only exact-B artifact streams");
   report.passed = true;
 } catch (error) {
   report.passed = false;

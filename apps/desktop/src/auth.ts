@@ -2,6 +2,7 @@ import type { NativeAccountProfile, NativeFile } from "@mdc/contracts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   createRemoteJWKSet,
+  customFetch,
   jwtVerify,
   type JWTVerifyGetKey,
   type CryptoKey,
@@ -109,6 +110,7 @@ export class AuthManager {
       dependencies.key ??
       createRemoteJWKSet(new URL(".well-known/jwks.json", this.issuer), {
         timeoutDuration: 10000,
+        [customFetch]: this.request,
       });
   }
   async getAccountProfile(): Promise<NativeAccountProfile> {
@@ -252,6 +254,7 @@ export class AuthManager {
     try {
       response = await this.request(new URL("oauth/token", this.issuer), {
         method: "POST",
+        redirect: "error",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...parameters,
@@ -385,6 +388,7 @@ export class AuthManager {
       try {
         await this.request(new URL("oauth/revoke", this.issuer), {
           method: "POST",
+          redirect: "error",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             client_id: this.settings.nativeClientId,

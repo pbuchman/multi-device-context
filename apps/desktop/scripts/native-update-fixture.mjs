@@ -172,6 +172,46 @@ function windowsFeed(catalog) {
   return `version: ${catalog.version}\nfiles:\n  - url: ${value.url}\n    sha512: ${value.sha512}\n    size: ${value.size}\npath: ${value.url}\nsha512: ${value.sha512}\nreleaseDate: ${catalog.publishedAt}\n`;
 }
 
+export function assertArtifactTransfers(transfers, artifactSize, platform) {
+  assert(["darwin", "win32"].includes(platform), "Unsupported artifact transfer platform");
+  assert(Number.isSafeInteger(artifactSize) && artifactSize > 0, "Invalid artifact transfer size");
+  assert(Array.isArray(transfers) && transfers.length > 0, "Fixture server never received an artifact GET");
+  for (const transfer of transfers) {
+    assert.equal(transfer.method, "GET", "Artifact transfer used an unexpected method");
+    assert(Number.isSafeInteger(transfer.bytesServed) && transfer.bytesServed >= 0 && transfer.bytesServed <= artifactSize,
+      "Fixture server recorded invalid artifact transfer bytes");
+    assert.equal(typeof transfer.responseFinished, "boolean", "Artifact transfer has no completion state");
+    assert.equal(typeof transfer.peerClosedEarly, "boolean", "Artifact transfer has no close state");
+    assert.equal(typeof transfer.sourceError, "boolean", "Artifact transfer has no source state");
+    assert.equal(transfer.sourceError, false, "Artifact transfer failed while reading exact B");
+    if (transfer.responseFinished) {
+      assert.equal(transfer.peerClosedEarly, false, "Completed artifact transfer was also marked interrupted");
+      assert.equal(transfer.bytesServed, artifactSize, "Fixture server completed a non-exact B payload");
+    } else {
+      assert.equal(transfer.peerClosedEarly, true, "Incomplete artifact transfer did not end with a peer close");
+      assert(transfer.bytesServed < artifactSize, "Interrupted artifact transfer read the complete B payload");
+    }
+  }
+
+  const completed = transfers.filter(transfer => transfer.responseFinished);
+  assert(completed.length > 0, "Fixture server never completed the exact B payload");
+  if (platform === "win32") {
+    assert.equal(completed.length, transfers.length, "Windows artifact transfer was interrupted");
+    return { completed: completed.length, headerProbes: 0 };
+  }
+
+  // Electron 44 cannot expose a manual 3xx through net.fetch. The macOS
+  // transport therefore makes one header probe immediately before each real
+  // streaming GET. Accept only that exact interrupted/full sequence so an
+  // arbitrary truncated download cannot be mistaken for a successful probe.
+  assert.equal(transfers.length % 2, 0, "macOS artifact transfers did not form probe/stream pairs");
+  for (let index = 0; index < transfers.length; index += 2) {
+    assert.equal(transfers[index].responseFinished, false, "macOS artifact header probe unexpectedly completed");
+    assert.equal(transfers[index + 1].responseFinished, true, "macOS artifact probe was not followed by a complete stream");
+  }
+  return { completed: completed.length, headerProbes: transfers.length - completed.length };
+}
+
 export async function startFixtureServer({ port, certificatePath, keyPath, catalog, updatePath }) {
   const requests = [], selected = catalog.artifacts.find(value => value.platform === process.platform);
   assert(selected, "Catalog has no host-platform update");
@@ -184,7 +224,7 @@ export async function startFixtureServer({ port, certificatePath, keyPath, catal
     limits: { maxTextBytes: 262144, maxAttachmentBytes: 104857600 },
     bridgeVersion: 1,
   }));
-  let artifactBytesServed = 0;
+  const artifactTransfers = [];
   const server = createServer({ cert: await readFile(certificatePath), key: await readFile(keyPath) }, async (request, response) => {
     const path = new URL(request.url ?? "/", `https://localhost:${port}`).pathname;
     requests.push({ method: request.method, path });
@@ -202,9 +242,28 @@ export async function startFixtureServer({ port, certificatePath, keyPath, catal
       response.writeHead(200, { "content-type": "application/octet-stream", "content-length": size, "cache-control": "no-store" });
       if (request.method === "HEAD") response.end();
       else {
+        const transfer = {
+          method: request.method,
+          path,
+          bytesServed: 0,
+          responseFinished: false,
+          peerClosedEarly: false,
+          sourceError: false,
+        };
+        artifactTransfers.push(transfer);
         const stream = createReadStream(updatePath);
-        stream.on("data", chunk => { artifactBytesServed += chunk.length; });
-        stream.on("error", error => response.destroy(error));
+        stream.on("data", chunk => { transfer.bytesServed += chunk.length; });
+        stream.on("error", error => {
+          transfer.sourceError = true;
+          response.destroy(error);
+        });
+        response.once("finish", () => { transfer.responseFinished = true; });
+        response.once("close", () => {
+          if (!transfer.responseFinished) {
+            transfer.peerClosedEarly = true;
+            stream.destroy();
+          }
+        });
         stream.pipe(response);
       }
     } else send(404, "text/plain", Buffer.from("not found"));
@@ -218,7 +277,7 @@ export async function startFixtureServer({ port, certificatePath, keyPath, catal
     origin: `https://localhost:${port}`,
     spki,
     requests,
-    artifactBytesServed: () => artifactBytesServed,
+    artifactTransfers: () => artifactTransfers.map(transfer => ({ ...transfer })),
     close: () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
   };
 }

@@ -2,8 +2,14 @@
 
 ## Unreleased
 
-- Confirm pasted images and files with Enter. Drag files into a chat to review
-  and send them with Enter while preserving the typed draft and captured chat.
+## 0.5.6 — Desktop system certificate trust
+
+- Desktop configuration, sign-in, session requests and update downloads now use Electron's Chromium network stack, including system certificate trust and proxy settings. This fixes connections intercepted by a trusted corporate CA such as Zscaler.
+- The reconnect screen shows a bounded error code. A private local diagnostic records only fixed messages, connection stage, application version and time, without tokens, URLs or account details.
+- Recovery retries report a failed connection accurately. TLS verification, installer checksums and redirect restrictions remain enforced.
+- Windows CI verifies rejection before a synthetic CA is trusted, successful access after adding it to the system store, and continued rejection of a wrong-host certificate.
+- Build tooling updates `source-map-js` and the Electron proxy dependency to remove newly reported denial-of-service vulnerabilities.
+- Confirm rename and delete dialogs with Enter. Drop files into a chat, or paste files when clipboard text is empty.
 
 ## 0.5.5 — Preview updates
 

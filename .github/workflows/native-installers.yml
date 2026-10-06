@@ -80,6 +80,14 @@ jobs:
       - run: pnpm --filter @mdc/desktop typecheck
       - name: Build platform installers
         run: pnpm --filter @mdc/desktop package:${{ matrix.platform }}
+      - name: Verify Windows system certificate trust
+        if: runner.os == 'Windows'
+        env:
+          CI: "true"
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/release/native-system-trust.json'
+          pnpm --filter @mdc/desktop exec node scripts/native-system-trust.mjs --output $report
       - name: Verify desktop dependency boundary
         run: pnpm --filter @mdc/desktop exec node scripts/check-package.mjs
       - name: Locate the exact update candidate
@@ -152,6 +160,8 @@ jobs:
             apps/desktop/release/native-update-launch.png
             apps/desktop/release/native-update-launch-sample.txt
             apps/desktop/release/native-smoke.json
+            apps/desktop/release/native-smoke.png
+            apps/desktop/release/native-system-trust.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         # PRs still build and test; publish only verified main installers.
         if: success() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -165,5 +175,6 @@ jobs:
             apps/desktop/release/*.zip
             apps/desktop/release/SHA256SUMS.txt
             apps/desktop/release/native-smoke.json
+            apps/desktop/release/native-system-trust.json
             apps/desktop/release/native-smoke.png
             apps/desktop/release/native-update-a-to-b.json

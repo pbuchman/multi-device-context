@@ -48,6 +48,27 @@ small {
   font-size: 13px;
   min-height: 20px;
 }
+#diagnostic {
+  margin: 24px 0;
+  padding: 14px 16px;
+  border: 1px solid #d7ddd9;
+  border-radius: 10px;
+  background: #eef2ef;
+  text-align: left;
+}
+#diagnostic p {
+  margin: 0;
+  color: #454a46;
+}
+#diagnostic .diagnostic-code {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #676b67;
+}
+code {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
 @media (prefers-color-scheme: dark) {
   :root {
     background: #202321;
@@ -55,6 +76,16 @@ small {
   }
   p,
   small {
+    color: #a6ada8;
+  }
+  #diagnostic {
+    border-color: #424943;
+    background: #292e2a;
+  }
+  #diagnostic p {
+    color: #d8ddd9;
+  }
+  #diagnostic .diagnostic-code {
     color: #a6ada8;
   }
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { generateKeyPair, SignJWT, type JWTPayload } from "jose";
+import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import {
   AuthManager,
   authenticationScope,
@@ -17,6 +17,47 @@ const settings = {
 const issuer = `https://${settings.domain}/`;
 
 describe("native browser authentication", () => {
+  it("uses the supplied system transport for token exchange, JWKS and revocation", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const access = await new SignJWT({ sub: "google-oauth2|system-ca", azp: settings.nativeClientId })
+      .setProtectedHeader({ alg: "RS256", kid: "system-ca-test" })
+      .setIssuer(issuer).setAudience(settings.audience).setIssuedAt().setExpirationTime("1h").sign(privateKey);
+    let saved: StoredSession | undefined = {
+      uid: createHash("sha256").update(issuer + "\0google-oauth2|system-ca").digest("base64url"),
+      subject: "google-oauth2|system-ca", refreshToken: "synthetic-refresh", authScope: authenticationScope(settings),
+    };
+    const request = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url === issuer + ".well-known/jwks.json") {
+        expect(init?.redirect).toBe("manual");
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        return Response.json({ keys: [{ ...await exportJWK(publicKey), kid: "system-ca-test", alg: "RS256" }] });
+      }
+      expect(init?.redirect).toBe("error");
+      if (url === issuer + "oauth/token") return Response.json({
+        access_token: access, refresh_token: "rotated-synthetic", token_type: "Bearer", expires_in: 3600,
+      });
+      if (url === issuer + "oauth/revoke") return new Response(null, { status: 200 });
+      throw new Error("Unexpected authentication destination");
+    });
+    const nodeFetch = vi.fn(() => Promise.reject(new Error("UNABLE_TO_GET_ISSUER_CERT_LOCALLY")));
+    vi.stubGlobal("fetch", nodeFetch);
+    try {
+      const manager = new AuthManager(settings, {
+        readSession: () => saved, writeSession: async value => { saved = value; },
+        clearSession: async () => { saved = undefined; }, openBrowser: async () => {}, fetch: request,
+      });
+      expect(await manager.getAccessToken()).toBe(access);
+      expect(saved?.refreshToken).toBe("rotated-synthetic");
+      await manager.signOut();
+      expect(saved).toBeUndefined();
+      expect(request.mock.calls.map(([input]) => String(input))).toEqual([
+        issuer + "oauth/token", issuer + ".well-known/jwks.json", issuer + "oauth/revoke",
+      ]);
+      expect(nodeFetch).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("uses random S256 PKCE, state and nonce, validates callback exactly once", () => {
     const attempt = createPkceAttempt(1000);
     expect(attempt.challenge).toBe(

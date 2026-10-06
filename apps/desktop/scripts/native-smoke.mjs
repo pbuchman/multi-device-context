@@ -420,7 +420,11 @@ let pasteboard = NSPasteboard.general
   }
   step("Quit the installed application");
   const exited = app.waitForEvent("close", { timeout: 60_000 });
-  await app.evaluate(({ app }) => app.quit()).catch(() => {});
+  const quitScheduled = await app.evaluate(({ app }) => {
+    setTimeout(() => app.quit(), 0);
+    return true;
+  });
+  assert.equal(quitScheduled, true);
   await exited;
   app = undefined;
   checkpoint("Installed application exits through native Quit and the workspace acknowledgement path when available");

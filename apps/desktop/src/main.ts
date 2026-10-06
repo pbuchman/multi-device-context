@@ -45,7 +45,10 @@ import { MacUpdateBackend } from "./mac-updates.js";
 import { NativeUpdateManager } from "./updates.js";
 import { AwaitedWindowsInstaller, WindowsUpdateBackend, type WindowsUpdater } from "./windows-updates.js";
 import { installDesktopUpdate } from "./update-install.js";
-import { completeCommandAction, registerTrustedIpcHandler } from "./desktop-ipc.js";
+import { completeCommandAction, registerRecoveryIpcHandler, registerTrustedIpcHandler } from "./desktop-ipc.js";
+import { desktopFetch } from "./network.js";
+import { fetchUpdateCatalog } from "./update-files.js";
+import { ConnectionFailure, RecoveryDiagnostics, type ConnectionStage } from "./recovery-diagnostics.js";
 
 declare const MDC_APP_ORIGIN: string;
 const recovery = pathToFileURL(join(__dirname, "resources/recovery.html")).href;
@@ -55,7 +58,9 @@ let window: BrowserWindow | undefined,
   auth: AuthManager | undefined,
   launch: LaunchSettings,
   copies: CopiedFiles,
+  diagnostics: RecoveryDiagnostics,
   updates: NativeUpdateManager;
+let navigationFailure: { errorDescription: string } | undefined;
 let quitting = false,
   connecting: Promise<void> | undefined;
 electronAutoUpdater.on("before-quit-for-update", () => { quitting = true; });
@@ -149,6 +154,7 @@ async function start(): Promise<void> {
       "Could not register the sign-in callback. Reinstall the application.",
     );
   const directory = join(app.getPath("userData"), "private");
+  diagnostics = new RecoveryDiagnostics(join(directory, "connection-diagnostic.json"), app.getVersion());
   store = await NativeStore.open(directory, MDC_APP_ORIGIN, hostname(), {
     available: () =>
       safeStorage.isEncryptionAvailable() &&
@@ -164,7 +170,7 @@ async function start(): Promise<void> {
   if (process.platform !== "darwin" && process.platform !== "win32")
     throw new Error("This desktop package does not support native updates on this platform.");
   const backend = process.platform === "darwin"
-    ? new MacUpdateBackend(join(directory, "updates"), shell)
+    ? new MacUpdateBackend(join(directory, "updates"), shell, desktopFetch)
     : new WindowsUpdateBackend(
       new NsisUpdater({
         provider: "generic",
@@ -180,6 +186,7 @@ async function start(): Promise<void> {
     platform: process.platform,
     arch: process.arch,
     currentVersion: app.getVersion(),
+    readCatalog: () => fetchUpdateCatalog(desktopFetch),
     systemVersion: (process as NodeJS.Process & { getSystemVersion(): string }).getSystemVersion(),
     backend,
   });
@@ -252,19 +259,20 @@ async function start(): Promise<void> {
   });
   window.webContents.on(
     "did-fail-load",
-    (_event, code, _description, url, isMainFrame) => {
+    (_event, code, description, url, isMainFrame) => {
       if (
         isMainFrame &&
         code !== -3 &&
-        !connecting &&
         isTrustedAppUrl(url, MDC_APP_ORIGIN)
-      )
-        void showRecovery();
+      ) {
+        navigationFailure = { errorDescription: description };
+        if (!connecting) void showRecovery("workspace", navigationFailure);
+      }
     },
   );
   window.webContents.on("render-process-gone", () => {
     commands.reset();
-    void showRecovery();
+    void showRecovery("renderer", { code: "RENDERER_EXITED" });
   });
   wireBridge();
   createTray();
@@ -286,34 +294,48 @@ function checkForUpdates(): void {
   show();
   if (updates) void updates.checkForUpdates();
 }
-async function showRecovery(): Promise<void> {
+async function showRecovery(stage: ConnectionStage, error: unknown): Promise<void> {
+  await diagnostics.record(stage, error);
   if (window && !window.isDestroyed()) await window.loadURL(recovery);
 }
 function connect(): Promise<void> {
   if (connecting) return connecting;
   connecting = (async () => {
+    let stage: ConnectionStage = "configuration";
+    navigationFailure = undefined;
     try {
-      const response = await fetch(`${MDC_APP_ORIGIN}/api/config`, {
+      const response = await desktopFetch(`${MDC_APP_ORIGIN}/api/config`, {
         redirect: "error",
         signal: AbortSignal.timeout(15000),
       });
-      if (!response.ok) throw new Error();
-      const config = RuntimeConfigSchema.parse(await response.json());
+      if (!response.ok) throw new ConnectionFailure("HTTP_ERROR", response.status);
+      let payload: unknown;
+      try { payload = await response.json(); }
+      catch (error) {
+        if (error instanceof SyntaxError) throw new ConnectionFailure("CONFIGURATION_INVALID");
+        throw error;
+      }
+      const parsed = RuntimeConfigSchema.safeParse(payload);
+      if (!parsed.success) throw new ConnectionFailure("CONFIGURATION_INVALID");
+      const config = parsed.data;
       if (new URL(config.appOrigin).origin !== MDC_APP_ORIGIN)
-        throw new Error();
+        throw new ConnectionFailure("ORIGIN_MISMATCH");
       if (!auth)
         auth = new AuthManager(config.auth0, {
           readSession: () => store.readSession(),
           writeSession: (value) => store.writeSession(value),
           clearSession: () => store.clearSession(),
           openBrowser: (url) => shell.openExternal(url),
+          fetch: desktopFetch,
         });
       for (const callback of callbacks.splice(0)) auth.handleCallback(callback);
+      stage = "workspace";
       await window!.loadURL(MDC_APP_ORIGIN);
       if (!isTrustedAppUrl(window!.webContents.getURL(), MDC_APP_ORIGIN))
-        throw new Error();
-    } catch {
-      await showRecovery();
+        throw new ConnectionFailure("ORIGIN_MISMATCH");
+      diagnostics.clear();
+    } catch (error) {
+      await showRecovery(stage, stage === "workspace" ? navigationFailure ?? error : error);
     }
   })().finally(() => {
     connecting = undefined;
@@ -426,7 +448,7 @@ function wireBridge(): void {
   handle("exchangeInstallationSession", 1, async (token) => {
     if (typeof token !== "string") throw new Error("Invalid sign-in token.");
     if (installationExchange) throw new Error("Session exchange already running.");
-    installationExchange = exchangeInstallationSession(store, MDC_APP_ORIGIN, token);
+    installationExchange = exchangeInstallationSession(store, MDC_APP_ORIGIN, token, desktopFetch);
     try { return await installationExchange; } finally { installationExchange = undefined; }
   });
   handle("openAccessPanel", 1, id => shell.openExternal(accessPanelUrl(MDC_APP_ORIGIN, IdSchema.parse(id))));
@@ -490,16 +512,14 @@ function wireBridge(): void {
   handle("checkForUpdates", 0, () => updates.checkForUpdates());
   handle("startUpdate", 0, () => updates.startUpdate());
   handle("installUpdate", 0, () => installDesktopUpdate(process.platform as "darwin" | "win32", commands, updates));
-  ipcMain.handle("mdc:retry", async (event, ...args: unknown[]) => {
-    if (
-      !window ||
-      event.sender !== window.webContents ||
-      event.senderFrame !== window.webContents.mainFrame ||
-      event.senderFrame.url !== recovery ||
-      args.length
-    )
-      return { ok: false, message: "Invalid reconnect request." };
-    await connect();
-    return { ok: true, value: undefined };
-  });
+  const recoveryHandlers = {
+    getConnectionDiagnostic: () => diagnostics.current(),
+    retry: async () => {
+      await connect();
+      const failure = diagnostics.current();
+      if (failure) throw new Error(failure.message);
+    },
+  };
+  for (const [method, action] of Object.entries(recoveryHandlers))
+    registerRecoveryIpcHandler(ipcMain, { method, getWindow: () => window, recoveryUrl: recovery, action, errorMessage });
 }

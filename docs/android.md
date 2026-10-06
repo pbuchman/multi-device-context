@@ -76,7 +76,7 @@ increase it for each update. It is not automatically incremented. Keep the
 application ID and signing key unchanged.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=10
+export MDC_ANDROID_VERSION_CODE=11
 pnpm --filter @mdc/mobile android:release
 ```
 

@@ -176,6 +176,36 @@ and choose **Try again** when the connection returns. Pending web shares use the
 account's local outbox and retry when the connection returns. Sign-out explains
 pending local data before it is discarded.
 
+### Troubleshoot a desktop connection
+
+Version 0.5.6 uses the operating system's trusted certificates and Chromium's
+proxy handling for native requests, including configuration, sign-in and updates.
+If 0.5.5 shows the reconnect screen on a corporate network while the workspace
+opens in a browser, install the current EXE manually. Its old update check may
+fail for the same reason. Keep the existing application data.
+
+The reconnect screen shows a short connection code when the desktop can identify
+the failure. `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` or an `ERR_CERT_*` code means the
+secure connection certificate could not be verified. On an organization-managed
+computer, confirm with IT that the organization's TLS inspection certificate is
+installed in the operating system trust store and that Multi Device Context is
+allowed to use the network. Do not disable certificate verification or bypass
+device policy. `ENOTFOUND`, `EAI_AGAIN`, or `ERR_NAME_NOT_RESOLVED` points to DNS;
+check that the computer can resolve the workspace address on its current network.
+Timeout, refused, unreachable, and offline codes usually warrant checking the
+connection, VPN, proxy, or firewall before choosing **Try again**.
+
+`HTTP_ERROR` includes only the response status. Retry a temporary 5xx response;
+for a persistent response, record the status, app version, and connection code.
+`CONFIGURATION_INVALID` or `ORIGIN_MISMATCH` indicates that the installed build
+does not match the configured workspace; install the current release supplied for
+that workspace. The latest diagnostic is stored in `private/connection-diagnostic.json`
+inside the app's user-data directory (`%APPDATA%/Multi Device Context` on Windows,
+`~/Library/Application Support/Multi Device Context` on macOS). It keeps only the latest stage, fixed
+message, code, time, app version, and optional HTTP status. It does not store the
+failed URL, tokens, paths, or raw error text. Share those bounded fields when
+asking for help, never credentials or diagnostic credential objects.
+
 The desktop app checks the fixed Preview release catalog when it starts and every
 six hours while it is running. **File → Check for updates…** checks immediately.
 Checks do not download or install anything. Availability, download progress and

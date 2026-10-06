@@ -1,7 +1,7 @@
 {
   "name": "@mdc/desktop",
   "productName": "Multi Device Context",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "description": "Private contexts shared across your computers",
   "author": "Multi Device Context contributors",
@@ -11,7 +11,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "test:update-harness": "node --test scripts/native-update-fixture.test.mjs",
+    "test:update-harness": "node --test scripts/native-update-fixture.test.mjs scripts/native-system-trust*.test.mjs",
     "test:update-native": "node scripts/native-update-a-to-b.mjs",
     "package:win": "pnpm build && electron-builder --win nsis --x64 --publish never",
     "package:mac": "pnpm build && electron-builder --mac dmg zip --arm64 --publish never"

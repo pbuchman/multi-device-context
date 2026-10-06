@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { completeCommandAction, registerTrustedIpcHandler } from "./desktop-ipc.js";
+import { completeCommandAction, registerTrustedIpcHandler, registerRecoveryIpcHandler } from "./desktop-ipc.js";
 
 const registration = "00000000-0000-4000-8000-000000000091";
 const request = "00000000-0000-4000-8000-000000000092";
@@ -58,4 +58,39 @@ it("retains trusted sender, main-frame, origin, argument and command validation"
   expect(value.commands.complete).not.toHaveBeenCalled();
   await expect(value.handler(value.event, registration, request, false)).resolves.toEqual({ ok: true, value: undefined });
   expect(value.commands.complete).toHaveBeenCalledWith(registration, request, false);
+});
+
+function recoveryFixture() {
+  const recoveryUrl = "file:///app/recovery.html";
+  const mainFrame = { url: recoveryUrl };
+  const webContents = { mainFrame };
+  const ipcMain = { handle: vi.fn() };
+  const action = vi.fn();
+  registerRecoveryIpcHandler(ipcMain, {
+    method: "retry", getWindow: () => ({ webContents }), recoveryUrl, action,
+    errorMessage: error => error instanceof Error ? error.message : "failed",
+  });
+  expect(ipcMain.handle).toHaveBeenCalledWith("mdc:retry", expect.any(Function));
+  return { action, mainFrame, handler: ipcMain.handle.mock.calls[0]![1], event: { sender: webContents, senderFrame: mainFrame } };
+}
+
+it("allows recovery diagnostics only from the exact owned recovery main frame", async () => {
+  const value = recoveryFixture();
+  value.action.mockResolvedValue({ code: "ERR_CERT_AUTHORITY_INVALID" });
+  for (const url of ["file:///other/recovery.html", "file:///app/recovery.html?x=1", "file:///app/recovery.html#x", "https://app.example.test"]) {
+    value.mainFrame.url = url;
+    await expect(value.handler(value.event)).resolves.toEqual({ ok: false, message: "Invalid reconnect request." });
+  }
+  value.mainFrame.url = "file:///app/recovery.html";
+  await expect(value.handler({ ...value.event, sender: {} })).resolves.toMatchObject({ ok: false });
+  await expect(value.handler({ ...value.event, senderFrame: { ...value.mainFrame } })).resolves.toMatchObject({ ok: false });
+  await expect(value.handler(value.event, "unexpected")).resolves.toMatchObject({ ok: false });
+  expect(value.action).not.toHaveBeenCalled();
+  await expect(value.handler(value.event)).resolves.toEqual({ ok: true, value: { code: "ERR_CERT_AUTHORITY_INVALID" } });
+});
+
+it("returns a failed asynchronous reconnect as failure instead of success", async () => {
+  const value = recoveryFixture();
+  value.action.mockRejectedValue(new Error("The secure connection certificate could not be verified."));
+  await expect(value.handler(value.event)).resolves.toEqual({ ok: false, message: "The secure connection certificate could not be verified." });
 });

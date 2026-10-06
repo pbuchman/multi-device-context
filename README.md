@@ -14,19 +14,19 @@ agent and receive the result in the same conversation.
 > synthetic fixture. Every account, message, file, device, and illustration is
 > fictional demo data.
 
-## Download v0.5.5
+## Download v0.5.6
 
 | Platform | Direct download | Requirements and signing |
 | --- | --- | --- |
-| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/Multi-Device-Context-0.5.5-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
-| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/Multi-Device-Context-0.5.5-win-x64.exe) | Windows x64. Unsigned. |
-| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/Multi-Device-Context-0.5.5-android-v10-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
+| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.6/Multi-Device-Context-0.5.6-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
+| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.6/Multi-Device-Context-0.5.6-win-x64.exe) | Windows x64. Unsigned. |
+| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.6/Multi-Device-Context-0.5.6-android-v11-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
 
 Review the [installation guide](docs/installation.md) before opening an unsigned
 or non-notarized desktop build. Android setup and device support are covered in
 the [Android guide](docs/android.md). Published checksums are available in
-[SHA256SUMS.txt](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.5/SHA256SUMS.txt),
-and every asset is listed on the [v0.5.5 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.5).
+[SHA256SUMS.txt](https://github.com/pbuchman/multi-device-context/releases/download/v0.5.6/SHA256SUMS.txt),
+and every asset is listed on the [v0.5.6 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.5.6).
 
 Publishing the source and installers does not grant access to the maintainer's
 hosted deployment. Hosted access remains subject to its authentication and
@@ -101,7 +101,7 @@ grant changes are described in [device access operations](docs/operations/device
 
 ## Updating
 
-Install **0.5.5 manually** to receive the first updater-capable application.
+Install the current version manually if your application predates 0.5.5, or if a corporate TLS certificate prevents the old application from checking for updates.
 It checks the public **Preview** channel at startup and every six hours, with
 **Check for updates** also available in Settings and the desktop menu.
 Downloads start only when you choose them and show progress.
