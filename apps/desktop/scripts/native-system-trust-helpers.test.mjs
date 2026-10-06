@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   NODE_UNTRUSTED_CERTIFICATE_CODES,
+  buildWindowsRootCertificateCountScript,
   classifyChromiumCertificateError,
   classifyNodeCertificateError,
   normalizeThumbprint,
@@ -60,12 +61,24 @@ test("normalizes only complete SHA-1 certificate thumbprints", () => {
   assert.throws(() => normalizeThumbprint("not-a-thumbprint"), /SHA-1/u);
 });
 
+test("builds a Windows certificate count command without static-property method syntax", () => {
+  const script = buildWindowsRootCertificateCountScript("aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd");
+  assert.match(script, /\$thumbprint = 'AABBCCDDEEFF00112233445566778899AABBCCDD'/u);
+  assert.match(script, /Get-ChildItem -LiteralPath 'Cert:\\CurrentUser\\Root'/u);
+  assert.match(script, /\$count = \$certificates\.Count/u);
+  assert.match(script, /\[Console\]::Write\(\[string\]\$count\)/u);
+  assert.doesNotMatch(script, /::Out\.Write/u);
+  assert.throws(() => buildWindowsRootCertificateCountScript("not-a-thumbprint"), /SHA-1/u);
+});
+
 test("redacts private fixture paths and bounds single-line failure details", () => {
   const privateRoot = resolve("private fixture");
-  const result = sanitizedFailure(new Error(`failed at ${privateRoot}\n${"x".repeat(600)}`), [privateRoot]);
+  const result = sanitizedFailure(new Error(`\u001B[31mfailed\u001B[0m at ${privateRoot}\n${"x".repeat(600)}`), [privateRoot]);
   assert.equal(result.name, "Error");
+  assert.match(result.message, /^failed at/u);
   assert.match(result.message, /\[fixture\]/u);
   assert(!result.message.includes(privateRoot));
   assert(!result.message.includes("\n"));
+  assert(!result.message.includes("\u001B"));
   assert.equal(result.message.length, 500);
 });

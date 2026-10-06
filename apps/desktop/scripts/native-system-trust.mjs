@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import {
+  buildWindowsRootCertificateCountScript,
   classifyNodeCertificateError,
   normalizeThumbprint,
   parseOutputArgument,
@@ -48,7 +49,12 @@ function terminateProcessTree(child) {
   } else child.kill("SIGKILL");
 }
 
-function runCapture(command, args, { deadlineMs = COMMAND_DEADLINE_MS, cwd } = {}) {
+function runCapture(command, args, {
+  deadlineMs = COMMAND_DEADLINE_MS,
+  cwd,
+  includeStderr = false,
+  stderrRedactions = [],
+} = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -56,6 +62,7 @@ function runCapture(command, args, { deadlineMs = COMMAND_DEADLINE_MS, cwd } = {
       windowsHide: true,
     });
     let stdout = "";
+    let stderr = "";
     let stderrBytes = 0;
     let settled = false;
     let pendingError;
@@ -82,12 +89,20 @@ function runCapture(command, args, { deadlineMs = COMMAND_DEADLINE_MS, cwd } = {
         terminate(new Error(`${basename(command)} produced excessive output`));
       }
     });
-    child.stderr.on("data", value => { stderrBytes += value.length; });
+    child.stderr.on("data", value => {
+      stderrBytes += value.length;
+      if (includeStderr && stderr.length < 2_000) stderr += value.toString("utf8").slice(0, 2_000 - stderr.length);
+    });
     child.once("error", error => terminate(new Error(`${basename(command)} could not start: ${error.code ?? error.name}`)));
     child.once("close", (code, signal) => finish(() => {
       if (pendingError) reject(pendingError);
       else if (code === 0) resolvePromise(stdout);
-      else reject(new Error(`${basename(command)} failed (${signal ?? code}; ${stderrBytes} stderr bytes)`));
+      else {
+        const detail = includeStderr && stderr.trim()
+          ? sanitizedFailure(stderr, stderrRedactions).message
+          : `${stderrBytes} stderr bytes`;
+        reject(new Error(`${basename(command)} failed (${signal ?? code}): ${detail}`));
+      }
     }));
   });
 }
@@ -151,15 +166,10 @@ async function generateCertificates(openSsl, fixtureRoot) {
 }
 
 async function rootCertificateCount(thumbprint) {
-  assert.match(thumbprint, /^[0-9A-F]{40}$/u);
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    `$thumbprint = '${thumbprint}'`,
-    "[Console]::Out.Write(@(Get-ChildItem -Path Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq $thumbprint }).Count)",
-  ].join("; ");
+  const script = buildWindowsRootCertificateCountScript(thumbprint);
   const output = await runCapture("powershell.exe", [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
-  ]);
+  ], { includeStderr: true, stderrRedactions: [thumbprint] });
   const count = Number(output.trim());
   assert(Number.isSafeInteger(count) && count >= 0, "Could not count the generated CA in CurrentUser Root");
   return count;

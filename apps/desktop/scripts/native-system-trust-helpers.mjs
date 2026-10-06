@@ -63,10 +63,25 @@ export function normalizeThumbprint(value) {
   return thumbprint;
 }
 
+export function buildWindowsRootCertificateCountScript(value) {
+  const thumbprint = normalizeThumbprint(value);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$thumbprint = '${thumbprint}'`,
+    "$certificates = @(Get-ChildItem -LiteralPath 'Cert:\\CurrentUser\\Root' | Where-Object { $_.Thumbprint -eq $thumbprint })",
+    "$count = $certificates.Count",
+    "[Console]::Write([string]$count)",
+  ].join("; ");
+}
+
 export function sanitizedFailure(error, redactions = []) {
   let message = error instanceof Error ? error.message : String(error);
   for (const value of redactions.filter(Boolean)) message = message.replaceAll(value, "[fixture]");
-  message = message.replace(/[\r\n\t]+/gu, " ").replace(/\s{2,}/gu, " ").trim();
+  message = message
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/[\u0000-\u001F\u007F]+/gu, " ")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
   return {
     name: error instanceof Error && error.name ? error.name : "Error",
     message: message.slice(0, 500) || "Native system trust acceptance failed",
