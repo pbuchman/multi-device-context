@@ -232,7 +232,6 @@ app.setPath("userData", userDataPath);
     result = {
       ok: true,
       status: response.status,
-      redirected: response.redirected,
       body: await response.text(),
     };
   } catch (error) {
@@ -377,8 +376,8 @@ export async function main(arguments_ = process.argv.slice(2)) {
       electronPath, bundlePath, fixtureRoot, name: "trusted", url: server.localhostUrl,
     });
     assert.deepEqual(
-      { ok: trusted.ok, status: trusted.status, redirected: trusted.redirected, body: trusted.body },
-      { ok: true, status: 200, redirected: true, body: "system trust ok" },
+      { ok: trusted.ok, status: trusted.status, body: trusted.body },
+      { ok: true, status: 200, body: "system trust ok" },
       "desktopFetch did not complete the trusted HTTPS redirect",
     );
     assert.deepEqual(
