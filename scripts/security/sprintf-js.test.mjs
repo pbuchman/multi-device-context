@@ -50,4 +50,3 @@ test('valid precision, padding, positional and non-numeric formats retain their 
   assert.equal(sprintf('%.5s', 'abcdef'), 'abcde');
   assert.equal(vsprintf('%2$s %1$04d', [7, 'ok']), 'ok 0007');
 });
-

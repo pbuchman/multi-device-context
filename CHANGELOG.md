@@ -9,6 +9,8 @@
 - Recovery retries report a failed connection accurately. TLS verification, installer checksums and redirect restrictions remain enforced.
 - Windows CI verifies rejection before a synthetic CA is trusted, successful access after adding it to the system store, and continued rejection of a wrong-host certificate.
 
+- Build tooling updates `source-map-js` and applies a bounded-precision patch to `sprintf-js` for newly reported denial-of-service advisories.
+
 ## 0.5.5 — Preview updates
 
 - GitHub Preview updates with explicit downloads, verified installers, progress,

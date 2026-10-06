@@ -74,6 +74,7 @@ test('audit exceptions cover only exact patched package versions throughout the 
   const expected = [
     ['braces', '3.0.3', 'GHSA-vfj7-8cjw-p6xm'],
     ['http-cache-semantics', '4.2.0', 'GHSA-ch52-4w7c-c8xp'],
+    ['sprintf-js', '1.1.3', 'GHSA-hp3w-g68c-fv3c'],
   ];
   assert.deepEqual(manifest.pnpm.auditConfig.ignoreGhsas, expected.map(([, , advisory]) => advisory));
   for (const [name, version] of expected) {
