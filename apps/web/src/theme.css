@@ -42,3 +42,5 @@
 .refresh[aria-busy="true"]{opacity:1;color:var(--green)}
 @keyframes refresh-turn{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.refresh[aria-busy="true"] .workspace-icon{animation:none}}
+
+.main-panel.dragging-files{outline:2px solid var(--green);outline-offset:-3px}.file-drop-hint{position:absolute;inset:80px 16px auto;z-index:5;padding:16px;border:2px dashed var(--green);border-radius:12px;background:var(--bg);color:var(--green);text-align:center;pointer-events:none}

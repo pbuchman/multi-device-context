@@ -287,3 +287,104 @@ it("does not automatically repeat a picker enqueue failure that settles while An
   expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("alert").textContent).toContain("Local file write failed");
 });
+
+it("confirms pasted images with Enter without sending the typed draft twice", async () => {
+  const t = fixture();
+  t.services.readClipboard = vi.fn(async () => ({ files: [{ name: "photo.png", contentType: "image/png", bytes: new Uint8Array([1, 2, 3]) }] }));
+  render(<ContextWorkspace services={t.services} />);
+  fireEvent.change(composer(), { target: { value: "keep this draft" } });
+  fireEvent.paste(composer(), { clipboardData: { files: [], getData: () => "" } });
+  await screen.findByRole("dialog", { name: "Send pasted files?" });
+  await userEvent.keyboard("{Enter}");
+  await waitFor(() => expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(t.services.outbox.enqueueBatch!).mock.calls[0]![0]).toHaveLength(1);
+  expect(composer().value).toBe("keep this draft");
+});
+
+function droppedFile(name = "notes.txt") {
+  const file = new File(["hello"], name, { type: "text/plain" });
+  Object.defineProperty(file, "arrayBuffer", { value: async () => new TextEncoder().encode("hello").buffer });
+  return file;
+}
+it("previews dropped files and Enter sends them once to the captured chat", async () => {
+  const t = fixture(); render(<ContextWorkspace services={t.services} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  fireEvent.change(composer(), { target: { value: "draft stays" } });
+  const dataTransfer = { types: ["Files"], files: [droppedFile(), droppedFile("second.txt")], dropEffect: "none" };
+  expect(fireEvent.dragOver(screen.getByRole("main"), { dataTransfer })).toBe(false);
+  expect(dataTransfer.dropEffect).toBe("copy");
+  expect(fireEvent.drop(screen.getByRole("main"), { dataTransfer })).toBe(false);
+  await screen.findByRole("dialog", { name: "Send dropped files?" });
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+  act(() => t.navigate(beta));
+  await userEvent.keyboard("{Enter}");
+  await waitFor(() => expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1));
+  const sent = vi.mocked(t.services.outbox.enqueueBatch!).mock.calls[0]![0];
+  expect(sent.map(item => item.contextId)).toEqual([alpha, alpha]);
+  expect(Array.from(sent[0]!.bytes!)).toEqual([104, 101, 108, 108, 111]);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  expect(composer().value).toBe("draft stays");
+});
+it("keeps Enter on Cancel as cancellation instead of sending attachments", async () => {
+  const t = fixture(); render(<ContextWorkspace services={t.services} />);
+  fireEvent.drop(composer(), { dataTransfer: { types: ["Files"], files: [droppedFile()] } });
+  await screen.findByRole("dialog", { name: "Send dropped files?" });
+  screen.getByRole("button", { name: "Cancel" }).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+});
+
+it("ignores composing/repeated Enter and prevents duplicate file confirmation", async () => {
+  const t = fixture(); let finish!: () => void;
+  t.services.outbox.enqueueBatch = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+  render(<ContextWorkspace services={t.services} />);
+  fireEvent.drop(composer(), { dataTransfer: { types: ["Files"], files: [droppedFile()] } });
+  const dialog = await screen.findByRole("dialog", { name: "Send dropped files?" });
+  fireEvent.keyDown(dialog, { key: "Enter", isComposing: true });
+  fireEvent.keyDown(dialog, { key: "Enter", keyCode: 229 });
+  fireEvent.keyDown(dialog, { key: "Enter", repeat: true });
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+  fireEvent.keyDown(dialog, { key: "Enter" }); fireEvent.keyDown(dialog, { key: "Enter" });
+  expect(t.services.outbox.enqueueBatch).toHaveBeenCalledTimes(1);
+  await act(async () => finish());
+});
+it("rejects invalid dropped files and ignores text drops", async () => {
+  const t = fixture(); render(<ContextWorkspace services={t.services} />);
+  fireEvent.drop(composer(), { dataTransfer: { types: ["text/plain"], files: [] } });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.drop(composer(), { dataTransfer: { types: ["Files"], files: [new File([], "empty.txt")] } });
+  await screen.findByText("Choose up to 32 non-empty files, at most 100 MiB in total.");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+});
+it("discards files if the chat changes while the drop is being read", async () => {
+  const t = fixture(); let finish!: (bytes: ArrayBuffer) => void;
+  const file = new File(["x"], "slow.txt", { type: "text/plain" });
+  Object.defineProperty(file, "arrayBuffer", { value: () => new Promise<ArrayBuffer>(resolve => { finish = resolve; }) });
+  render(<ContextWorkspace services={t.services} />);
+  await userEvent.click(screen.getByRole("button", { name: "Alpha" }));
+  fireEvent.drop(composer(), { dataTransfer: { types: ["Files"], files: [file] } });
+  act(() => t.navigate(beta));
+  await act(async () => finish(new Uint8Array([120]).buffer));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+  expect(screen.getByRole("alert").textContent).toContain("Drop the files again");
+});
+
+it("keeps a pending paste from racing a drop or another paste", async () => {
+  const t = fixture(); let finish!: (snapshot: ClipboardSnapshot) => void;
+  t.services.readClipboard = vi.fn(() => new Promise<ClipboardSnapshot>(resolve => { finish = resolve; }));
+  render(<ContextWorkspace services={t.services} />);
+  fireEvent.paste(composer(), { clipboardData: { files: [], getData: () => "" } });
+  fireEvent.drop(composer(), { dataTransfer: { types: ["Files"], files: [droppedFile()] } });
+  fireEvent.paste(composer(), { clipboardData: { files: [], getData: () => "" } });
+  expect(t.services.readClipboard).toHaveBeenCalledTimes(1);
+  await act(async () => {});
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await act(async () => finish({ files: [{ name: "first.png", contentType: "image/png", bytes: new Uint8Array([1]) }] }));
+  expect(screen.getByRole("dialog", { name: "Send pasted files?" })).toBeTruthy();
+  expect(screen.getByText("first.png")).toBeTruthy();
+  expect(screen.queryByText("notes.txt")).toBeNull();
+  expect(t.services.outbox.enqueueBatch).not.toHaveBeenCalled();
+});

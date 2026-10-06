@@ -12,7 +12,7 @@ import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import { browserCopyFile, clipboardImageFile } from "./clipboard-image.js";
 import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
-import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type SyntheticEvent } from "react";
+import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type DragEvent, type SyntheticEvent } from "react";
 
 import { useNavigation } from "./navigation.js";
 
@@ -146,7 +146,7 @@ function Icon({ children }: { children: ReactNode }) {
   return <span className="icon" aria-hidden="true">{children}</span>;
 }
 
-type ClipboardConfirmation = { id: string; target: Id; title: string; parts: SharePart[]; owner: WorkspaceServices };
+type ClipboardConfirmation = { source?: "drop"; id: string; target: Id; title: string; parts: SharePart[]; owner: WorkspaceServices };
 type WorkspacePanel =
   | { kind: "context"; context: ContextRecord }
   | { kind: "rename"; context: ContextRecord }
@@ -176,6 +176,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
 
   const [aiEnabled, setAiEnabled] = useState<boolean>();
   const [panel, setPanel] = useState<WorkspacePanel>();
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const [chatMenu, setChatMenu] = useState<{ context: ContextRecord; anchor: ChatMenuAnchor; opener: HTMLElement; owner: WorkspaceServices }>();
   const settingsOpen = panel?.kind === "settings";
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -815,23 +816,51 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     }, 0);
   };
   const receivePaste = async (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    event.preventDefault(); if (accountBlocked || !isLive()) return;
+    event.preventDefault(); if (accountBlocked || !isLive() || clipboardBusy.current || panelRef.current) return;
     const capture = captureInput();
     const pastedText = event.clipboardData.getData("text/plain");
     const browserFiles = [...event.clipboardData.files];
+    clipboardBusy.current = true;
     try {
       if (!services.readClipboard && !browserFiles.length) { if (pastedText.length) applyTextPaste(capture, pastedText); return; }
       const snapshot: ClipboardSnapshot = services.readClipboard ? await services.readClipboard() : {
         ...(pastedText.length ? { text: pastedText } : {}),
         files: (await fileParts(browserFiles)).flatMap(part => part.content.kind === "attachment" ? [{ name: part.content.name, contentType: part.content.contentType, bytes: part.bytes }] : []),
       };
-      if (!ownsInput(capture)) { staleClipboard(); return; }
+      if (!ownsInput(capture) || panelRef.current) { staleClipboard(); return; }
       if (!snapshot.files.length) { if (snapshot.text?.length) applyTextPaste(capture, snapshot.text); else setError("The clipboard is empty or its format is not supported."); return; }
       const parts = await frozenClipboardParts(snapshot, capture.code);
-      if (!ownsInput(capture)) { staleClipboard(); return; }
+      if (!ownsInput(capture) || panelRef.current) { staleClipboard(); return; }
       openPanel({ kind: "clipboard", snapshot: { id: crypto.randomUUID(), owner: services, target: capture.target, title: displayTitle(allContexts.find(context => context.id === capture.target)?.title), parts } });
     } catch (cause) { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not read the clipboard"); }
+    finally { if (live.current.services === services) clipboardBusy.current = false; }
   };
+  const receiveDrop = async (event: DragEvent<HTMLElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault(); setDraggingFiles(false);
+    if (!isLive() || accountBlocked || lifecycleLocked.current || panelRef.current || clipboardBusy.current) return;
+    const files = [...event.dataTransfer.files];
+    if (!files.length) return;
+    const capture = captureInput(); clipboardBusy.current = true;
+    try {
+      const parts = await fileParts(files);
+      if (!ownsInput(capture) || panelRef.current) {
+        if (isLive()) setError("Your chat or draft changed while reading the files. Nothing was sent. Drop the files again.");
+        return;
+      }
+      openPanel({ kind: "clipboard", snapshot: { source: "drop", id: crypto.randomUUID(), owner: services, target: capture.target, title: displayTitle(allContexts.find(context => context.id === capture.target)?.title), parts } });
+    } catch (cause) { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not read the files"); }
+    finally { if (live.current.services === services) clipboardBusy.current = false; }
+  };
+  // Never let a file dropped outside the chat navigate away from the application.
+  useEffect(() => {
+    const preventFileNavigation = (event: globalThis.DragEvent) => {
+      if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+    };
+    window.addEventListener("dragover", preventFileNavigation);
+    window.addEventListener("drop", preventFileNavigation);
+    return () => { window.removeEventListener("dragover", preventFileNavigation); window.removeEventListener("drop", preventFileNavigation); };
+  }, []);
   const fastPaste = async () => {
     if (!services.readClipboard || clipboardBusy.current || !isLive() || accountBlocked) return;
     clipboardBusy.current = true; const capture = captureInput();
@@ -1071,7 +1100,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const copyChatLink = (context: ContextRecord) => {
     void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${context.id}`).then(() => { if (isLive()) showToast("Chat link copied"); }).catch(cause => { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not copy the link"); });
   };
-  const panelTitle = panel?.kind === "context" ? "Chat options" : panel?.kind === "rename" ? "Rename chat" : panel?.kind === "delete-context" ? "Delete chat?" : panel?.kind === "item" ? "Message options" : panel?.kind === "delete-item" ? "Delete message?" : panel?.kind === "clipboard" ? "Send pasted files?" : panel?.kind === "add" ? "Add to this chat" : panel?.kind === "signout" ? "Sign out?" : "Settings";
+  const panelTitle = panel?.kind === "context" ? "Chat options" : panel?.kind === "rename" ? "Rename chat" : panel?.kind === "delete-context" ? "Delete chat?" : panel?.kind === "item" ? "Message options" : panel?.kind === "delete-item" ? "Delete message?" : panel?.kind === "clipboard" ? (panel.snapshot.source === "drop" ? "Send dropped files?" : "Send pasted files?") : panel?.kind === "add" ? "Add to this chat" : panel?.kind === "signout" ? "Sign out?" : "Settings";
   const option = (icon: Parameters<typeof WorkspaceIcon>[0]["name"], label: string, action: () => void, disabled = false, description?: string) => <button type="button" className={`dialog-action ${icon === "trash" ? "danger" : ""}`} onClick={action} disabled={disabled || dialogBusy}><WorkspaceIcon name={icon} /><span>{label}{description ? <small>{description}</small> : null}</span></button>;
   const confirmDelete = async () => {
     if (!panel || dialogBusy) return;
@@ -1100,7 +1129,16 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         }} onContextMenu={openChatMenu} onSettings={() => openPanel({ kind: "settings" })}
         onRefresh={() => void refresh(true)} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} name={viewer.name} email={viewer.email ?? (profileState.status === "loading" ? "Loading account…" : undefined)} avatarUrl={viewer.avatarUrl} />
       <SidebarResize accountId={services.viewer.uid} compact={compact} sidebarRef={sidebarRef} />
-      <main ref={mainRef} className="main-panel">
+      <main ref={mainRef} className={`main-panel${draggingFiles ? " dragging-files" : ""}`}
+        onDragOver={event => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          const allowed = isLive() && !accountBlocked && !lifecycleLocked.current && !panelRef.current && !clipboardBusy.current;
+          event.dataTransfer.dropEffect = allowed ? "copy" : "none"; setDraggingFiles(allowed);
+        }}
+        onDragLeave={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDraggingFiles(false); }}
+        onDrop={event => trackLocalInput(receiveDrop(event))}>
+        {draggingFiles ? <div className="file-drop-hint" role="status">Drop files to review and send</div> : null}
         <ChatTopbar title={selected?.title} status={syncLabel} offline={fromCache} drawerOpen={drawerOpen} menuRef={menuRef} onMenu={() => setDrawerOpen(true)} onRefresh={() => void refresh(true)}
           onOptions={() => openPanel({ kind: "context", context: selected ?? { id: selectedId, title: "New context", createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" } })} refreshing={refreshing} blocked={accountBlocked || lifecycleSaving} />
         {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" disabled={accountBlocked} onClick={() => void retry()}>Retry</button>{error ? <button type="button" className="icon-button" aria-label="Dismiss error" onClick={() => setError(undefined)}><WorkspaceIcon name="close" /></button> : null}</div> : null}
@@ -1121,7 +1159,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     </div>
     {chatMenu && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
     {toast && !lifecycleSaving ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
-    {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()}>
+    {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()} onConfirm={panel.kind === "clipboard" ? () => { void confirmClipboard(panel.snapshot); } : undefined}>
       {panel.kind === "context" ? <>
         <p className="dialog-description">{displayTitle(panel.context.title)}</p>
         {option("edit", "Rename chat", () => renameChat(panel.context))}
@@ -1138,7 +1176,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       </> : null}
       {panel.kind === "delete-context" || panel.kind === "delete-item" ? <><p className="dialog-description">{panel.kind === "delete-context" ? `“${displayTitle(panel.context.title)}” and all its messages will be permanently deleted from your devices.` : `${panel.item.content.kind === "attachment" ? `“${panel.item.content.name}”` : "This message"} will be permanently deleted from this chat on your devices.`} There is no undo.</p><div className="dialog-buttons"><button type="button" disabled={dialogBusy} onClick={() => closePanel()}>Cancel</button><button type="button" className="destructive" disabled={dialogBusy} onClick={() => void confirmDelete()}>{panel.kind === "delete-context" ? "Delete chat" : "Delete message"}</button></div></> : null}
       {panel.kind === "clipboard" ? <>
-        <p className="dialog-description">Send this captured clipboard content to <strong>{panel.snapshot.title}</strong>? Your typed draft stays unchanged.</p>
+        <p className="dialog-description">Send {panel.snapshot.source === "drop" ? "these dropped files" : "this captured clipboard content"} to <strong>{panel.snapshot.title}</strong>? Your typed draft stays unchanged.</p>
+        <p className="dialog-description">Press Enter to send, or Escape to cancel.</p>
         <ul className="clipboard-files">{panel.snapshot.parts.map((part, index) => <li key={index}>{part.content.kind === "attachment" ? <><WorkspaceIcon name="file" /><span>{part.content.name}<small>{formatFileSize(part.content.size)}</small></span></> : <p className="clipboard-text">{part.content.text}</p>}</li>)}</ul>
         <div className="dialog-buttons"><button type="button" disabled={dialogBusy} onClick={() => closePanel()}>Cancel</button><button type="button" className="primary" disabled={dialogBusy || deleted.current.has(panel.snapshot.target)} onClick={() => void confirmClipboard(panel.snapshot)}>Send files</button></div>
       </> : null}

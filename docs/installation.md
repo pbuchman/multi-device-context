@@ -66,7 +66,9 @@ Mac. Confirm login launch on the target Mac after a real logout/login cycle.
    Ordinary text paste edits the draft. Use **Send**, or Enter in desktop text
    mode, to share. Desktop code mode and Android use Enter for a new line;
    Ctrl/Cmd+Enter sends in either mode. Pasted files show a confirmation with
-   their captured target chat. **Paste and send** sends the current clipboard
+   their captured target chat. Press Enter in the confirmation to send, or Escape
+   to cancel. You can also drag files into the chat to review and confirm them
+   the same way; your typed draft stays unchanged. **Paste and send** sends the current clipboard
    immediately while preserving your typed draft.
 4. A newly shared context opens automatically on the other running computer.
    Unsent drafts are preserved. Choose **Copy** or **Save** on an item
