@@ -3,12 +3,12 @@
 // exact thumbprint in finally. No production certificate or TLS override is used.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID, X509Certificate } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID, X509Certificate } from "node:crypto";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:https";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import {
@@ -108,6 +108,15 @@ function runCapture(command, args, {
       }
     }));
   });
+}
+
+async function fileFingerprint(path) {
+  const bytes = await readFile(path);
+  return {
+    name: basename(path),
+    size: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 async function findOpenSsl() {
@@ -225,29 +234,15 @@ async function startHttpsFixture(certificatePath, keyPath) {
   };
 }
 
-export function childEntrySource() {
+export function probeEntrySource() {
   const helperPath = join(dirname(fileURLToPath(import.meta.url)), "native-system-trust-helpers.mjs");
   return `
-process.stderr.write("MDC native system trust child: bootstrap\\n");
-const { app } = require("electron");
-const { writeFileSync } = require("node:fs");
 const { desktopFetch } = require("./src/network.ts");
 const { classifyChromiumCertificateError } = require(${JSON.stringify(helperPath)});
 
-function argument(name) {
-  const index = process.argv.indexOf(name);
-  if (index < 0 || !process.argv[index + 1]) throw new Error(\`Missing \${name}\`);
-  return process.argv[index + 1];
-}
-
-const url = argument("--native-system-trust-url");
-const userDataPath = argument("--native-system-trust-user-data");
-const resultPath = argument("--native-system-trust-result");
-app.setPath("userData", userDataPath);
-(async () => {
+async function runSystemTrustProbe(url) {
   let result;
   try {
-    await app.whenReady();
     const response = await desktopFetch(url, {
       redirect: "follow",
       signal: AbortSignal.timeout(${FETCH_DEADLINE_MS}),
@@ -283,22 +278,21 @@ app.setPath("userData", userDataPath);
       ok: false,
       certificateError: classifyChromiumCertificateError(error),
     };
-  } finally {
-    writeFileSync(resultPath, JSON.stringify(result));
-    app.exit(0);
   }
-})();
+  return result;
+}
+module.exports = { runSystemTrustProbe };
 `;
 }
 
-export async function compileElectronChild(desktopDirectory, outputPath) {
+export async function compileElectronProbe(desktopDirectory, outputPath) {
   const networkPath = join(desktopDirectory, "src/network.ts");
   await readFile(networkPath);
   await withDeadline(build({
     stdin: {
-      contents: childEntrySource(),
+      contents: probeEntrySource(),
       resolveDir: desktopDirectory,
-      sourcefile: "native-system-trust-child.cjs",
+      sourcefile: "native-system-trust-probe.cjs",
       loader: "js",
     },
     outfile: outputPath,
@@ -311,46 +305,271 @@ export async function compileElectronChild(desktopDirectory, outputPath) {
   }), BUILD_DEADLINE_MS, "network.ts acceptance bundle build");
 }
 
-export async function prepareElectronChild(desktopDirectory, applicationDirectory) {
-  await mkdir(applicationDirectory, { recursive: true });
-  await writeFile(join(applicationDirectory, "package.json"), JSON.stringify({
-    name: "mdc-native-system-trust-child",
-    version: "1.0.0",
-    private: true,
-    main: "main.cjs",
-    type: "commonjs",
-  }, null, 2) + "\n");
-  const bundlePath = join(applicationDirectory, "main.cjs");
-  await compileElectronChild(desktopDirectory, bundlePath);
-  return bundlePath;
+export function packagedElectronExecutable(desktopDirectory) {
+  return join(desktopDirectory, "release", "win-unpacked", "Multi Device Context.exe");
 }
 
-async function launchElectronPhase({ electronPath, applicationDirectory, fixtureRoot, name, url }) {
-  const userData = join(fixtureRoot, `user-data-${name}`);
-  const resultPath = join(fixtureRoot, `result-${name}.json`);
-  await mkdir(userData, { recursive: true });
-  const electronEnvironment = {
-    ...process.env,
-    ELECTRON_ENABLE_LOGGING: "1",
+export function buildElectronProbeExpression(bundlePath, url) {
+  assert(isAbsolute(bundlePath), "Electron probe bundle path must be absolute");
+  return `(async () => {
+    const { app, BrowserWindow } = require("electron");
+    await app.whenReady();
+    const windowDeadline = Date.now() + ${ELECTRON_DEADLINE_MS};
+    while (BrowserWindow.getAllWindows().length === 0 && Date.now() < windowDeadline)
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+    if (BrowserWindow.getAllWindows().length === 0)
+      throw new Error("Packaged application did not finish startup");
+    let result;
+    try {
+      const { createRequire: createMainRequire } = process.getBuiltinModule("module");
+      const probe = createMainRequire(${JSON.stringify(bundlePath)})(${JSON.stringify(bundlePath)});
+      result = await probe.runSystemTrustProbe(${JSON.stringify(url)});
+    } finally {
+      app.setLoginItemSettings({ openAtLogin: false, args: ["--background"] });
+    }
+    return {
+      result,
+      runtime: {
+        electronVersion: process.versions.electron,
+        executablePath: process.execPath,
+        userDataPath: app.getPath("userData"),
+        packagedApplication: app.isPackaged,
+        loginItemDisabled: !app.getLoginItemSettings({
+          path: \`"\${process.execPath}"\`,
+          args: ["--background"],
+        }).openAtLogin,
+      },
+    };
+  })()`;
+}
+
+export function parseElectronPhaseArguments(arguments_) {
+  assert.equal(arguments_.length, 11, "Expected exact phase-controller arguments");
+  assert.equal(arguments_[0], "--native-system-trust-phase", "Expected exact phase-controller arguments");
+  const expectedNames = ["--electron", "--bundle", "--url", "--user-data", "--result"];
+  const values = {};
+  for (let index = 0; index < expectedNames.length; index += 1) {
+    const argumentIndex = 1 + index * 2;
+    assert.equal(arguments_[argumentIndex], expectedNames[index], "Expected exact phase-controller arguments");
+    assert(arguments_[argumentIndex + 1], "Expected exact phase-controller arguments");
+    values[expectedNames[index]] = arguments_[argumentIndex + 1];
+  }
+  const result = {
+    electronPath: values["--electron"],
+    bundlePath: values["--bundle"],
+    url: values["--url"],
+    userDataPath: values["--user-data"],
+    resultPath: values["--result"],
   };
+  for (const path of [result.electronPath, result.bundlePath, result.userDataPath, result.resultPath]) {
+    assert(isAbsolute(path), "Phase-controller paths must be absolute");
+  }
+  const parsedUrl = new URL(result.url);
+  assert(
+    parsedUrl.protocol === "https:" && ["localhost", "127.0.0.1"].includes(parsedUrl.hostname),
+    "Phase controller requires loopback HTTPS",
+  );
+  return result;
+}
+
+async function closeElectronApplication(application) {
+  const { child, inspector } = application;
+  if (inspector) {
+    await inspector.send("Runtime.evaluate", {
+      expression: "require('electron').app.exit(0)",
+      includeCommandLineAPI: true,
+    }, 5_000).catch(() => {});
+    inspector.close();
+  }
+  if (child.exitCode !== null) return;
+  let closeTimer;
+  const closed = await Promise.race([
+    new Promise(resolvePromise => child.once("close", () => resolvePromise(true))),
+    new Promise(resolvePromise => { closeTimer = setTimeout(() => resolvePromise(false), 10_000); }),
+  ]);
+  clearTimeout(closeTimer);
+  if (closed) return;
+  terminateProcessTree(child);
+  let terminateTimer;
+  const terminated = child.exitCode !== null || await Promise.race([
+    new Promise(resolvePromise => child.once("close", () => resolvePromise(true))),
+    new Promise(resolvePromise => { terminateTimer = setTimeout(() => resolvePromise(false), 5_000); }),
+  ]);
+  clearTimeout(terminateTimer);
+  throw new Error(terminated
+    ? "The packaged Electron phase required forced termination"
+    : "The packaged Electron phase could not be terminated");
+}
+
+function launchPackagedElectron(electronPath, userDataPath) {
+  const electronEnvironment = { ...process.env, ELECTRON_ENABLE_LOGGING: "1" };
   delete electronEnvironment.ELECTRON_RUN_AS_NODE;
   delete electronEnvironment.NODE_OPTIONS;
-  await runCapture(electronPath, [
-    "--enable-logging=stderr",
-    applicationDirectory,
-    "--native-system-trust-url", url,
-    "--native-system-trust-user-data", userData,
-    "--native-system-trust-result", resultPath,
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(electronPath, [
+      "--inspect=0",
+      `--user-data-dir=${userDataPath}`,
+      "--enable-logging=stderr",
+    ], {
+      env: electronEnvironment,
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    let stderrBytes = 0;
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(deadline);
+      child.removeListener("error", onError);
+      child.removeListener("close", onClose);
+    };
+    const finish = callback => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const detail = () => stderr.trim() || `${stderrBytes} stderr bytes`;
+    const onError = error => finish(() => reject(new Error(`Packaged Electron could not start: ${error.code ?? error.name}`)));
+    const onClose = (code, signal) => finish(() => reject(new Error(`Packaged Electron exited before inspection (${signal ?? code}): ${detail()}`)));
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const error = new Error(`Packaged Electron did not expose its inspector: ${detail()}`);
+      terminateProcessTree(child);
+      if (child.exitCode !== null) { reject(error); return; }
+      const terminateFallback = setTimeout(() => reject(error), 5_000);
+      child.once("close", () => { clearTimeout(terminateFallback); reject(error); });
+    }, ELECTRON_DEADLINE_MS);
+    child.once("error", onError);
+    child.once("close", onClose);
+    child.stderr.on("data", value => {
+      stderrBytes += value.length;
+      if (stderr.length < 2_000) stderr += value.toString("utf8").slice(0, 2_000 - stderr.length);
+      const match = stderr.match(/Debugger listening on (ws:\/\/[^\s]+)/u);
+      if (match) finish(() => resolvePromise({ child, inspectorUrl: match[1] }));
+    });
+  });
+}
+
+async function connectElectronInspector(url) {
+  const socket = new WebSocket(url);
+  await withDeadline(new Promise((resolvePromise, reject) => {
+    socket.addEventListener("open", resolvePromise, { once: true });
+    socket.addEventListener("error", () => reject(new Error("Could not connect to packaged Electron inspector")), { once: true });
+  }), COMMAND_DEADLINE_MS, "Packaged Electron inspector connection", () => socket.close());
+  let nextId = 0;
+  return {
+    send(method, params = {}, deadlineMs = ELECTRON_DEADLINE_MS) {
+      const id = ++nextId;
+      return withDeadline(new Promise((resolvePromise, reject) => {
+        const cleanup = () => {
+          socket.removeEventListener("message", onMessage);
+          socket.removeEventListener("close", onClose);
+          socket.removeEventListener("error", onError);
+        };
+        const onMessage = event => {
+          const message = JSON.parse(String(event.data));
+          if (message.id !== id) return;
+          cleanup();
+          if (message.error) reject(new Error(`Electron inspector ${method} failed: ${message.error.message}`));
+          else resolvePromise(message.result);
+        };
+        const onClose = () => { cleanup(); reject(new Error("Packaged Electron inspector closed unexpectedly")); };
+        const onError = () => { cleanup(); reject(new Error("Packaged Electron inspector failed")); };
+        socket.addEventListener("message", onMessage);
+        socket.addEventListener("close", onClose, { once: true });
+        socket.addEventListener("error", onError, { once: true });
+        socket.send(JSON.stringify({ id, method, params }));
+      }), deadlineMs, `Electron inspector ${method}`, () => socket.close());
+    },
+    close() { socket.close(); },
+  };
+}
+
+async function runElectronPhaseController(arguments_) {
+  const { electronPath, bundlePath, url, userDataPath, resultPath } = parseElectronPhaseArguments(arguments_);
+  let application;
+  let primaryFailure;
+  try {
+    application = await launchPackagedElectron(electronPath, userDataPath);
+    application.inspector = await connectElectronInspector(application.inspectorUrl);
+    await application.inspector.send("Runtime.enable");
+    const evaluation = await application.inspector.send("Runtime.evaluate", {
+      expression: buildElectronProbeExpression(bundlePath, url),
+      includeCommandLineAPI: true,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (evaluation.exceptionDetails) {
+      const detail = evaluation.exceptionDetails.exception?.description ?? evaluation.exceptionDetails.text;
+      throw new Error(`Packaged Electron probe failed: ${detail}`);
+    }
+    const output = evaluation.result?.value;
+    assert(output && typeof output === "object", "Packaged Electron probe returned no result");
+    assert.equal(output.runtime.electronVersion, "44.5.1", "Packaged acceptance runtime did not use Electron 44.5.1");
+    assert.equal(output.runtime.packagedApplication, true, "Acceptance probe did not run inside a packaged application");
+    assert.equal(
+      resolve(output.runtime.executablePath).toLocaleLowerCase("en-US"),
+      resolve(electronPath).toLocaleLowerCase("en-US"),
+      "The inspector did not evaluate the selected packaged executable",
+    );
+    assert.equal(
+      (await realpath(output.runtime.userDataPath)).toLocaleLowerCase("en-US"),
+      (await realpath(userDataPath)).toLocaleLowerCase("en-US"),
+      "Packaged acceptance runtime did not use the owned phase profile",
+    );
+    assert.equal(output.runtime.loginItemDisabled, true, "Packaged acceptance runtime left its login item enabled");
+    await writeFile(resultPath, JSON.stringify({
+      result: output.result,
+      runtime: {
+        electronVersion: output.runtime.electronVersion,
+        packagedExecutableOwned: true,
+        packagedApplication: true,
+        userDataOwned: true,
+        loginItemDisabled: true,
+      },
+    }));
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    if (application) {
+      try { await closeElectronApplication(application); }
+      catch (error) { if (!primaryFailure) throw error; }
+    }
+  }
+}
+
+async function launchElectronPhase({ electronPath, bundlePath, fixtureRoot, name, url }) {
+  const userDataPath = join(fixtureRoot, `user-data-${name}`);
+  const resultPath = join(fixtureRoot, `result-${name}.json`);
+  await mkdir(userDataPath, { recursive: true });
+  await runCapture(process.execPath, [
+    fileURLToPath(import.meta.url),
+    "--native-system-trust-phase",
+    "--electron", electronPath,
+    "--bundle", bundlePath,
+    "--url", url,
+    "--user-data", userDataPath,
+    "--result", resultPath,
   ], {
-    deadlineMs: ELECTRON_DEADLINE_MS,
-    cwd: applicationDirectory,
-    env: electronEnvironment,
+    deadlineMs: ELECTRON_DEADLINE_MS * 2 + 15_000,
+    cwd: dirname(fileURLToPath(import.meta.url)),
     includeStderr: true,
     stderrRedactions: [fixtureRoot, AUTHORIZATION],
   });
-  const result = JSON.parse(await readFile(resultPath, "utf8"));
-  assert.equal(typeof result.ok, "boolean", `Electron ${name} phase did not return a result`);
-  return result;
+  const output = JSON.parse(await readFile(resultPath, "utf8"));
+  assert.equal(typeof output.result?.ok, "boolean", `Electron ${name} phase did not return a result`);
+  assert.deepEqual(output.runtime, {
+    electronVersion: "44.5.1",
+    packagedExecutableOwned: true,
+    packagedApplication: true,
+    userDataOwned: true,
+    loginItemDisabled: true,
+  }, `Electron ${name} phase did not use the owned packaged runtime`);
+  return output.result;
 }
 
 async function nodeFetchCertificateError(url) {
@@ -394,12 +613,15 @@ export async function main(arguments_ = process.argv.slice(2)) {
     cleanup: {
       certificateAbsentInitially: false,
       certificateRemoved: false,
+      packagedRuntimeUnchanged: false,
       serverClosed: false,
       temporaryFilesRemoved: false,
     },
   };
   let certificate;
   let certificateStoreTouched = false;
+  let packagedRuntimeBefore;
+  let packagedRuntimePaths;
   let server;
   let primaryFailure;
   const cleanupFailures = [];
@@ -415,8 +637,24 @@ export async function main(arguments_ = process.argv.slice(2)) {
     const electronMetadata = JSON.parse(await readFile(require.resolve("electron/package.json"), "utf8"));
     assert.equal(electronMetadata.version, "44.5.1", "The acceptance test requires pinned Electron 44.5.1");
     report.electronVersion = electronMetadata.version;
-    const electronPath = require("electron");
-    assert.equal(typeof electronPath, "string", "Could not resolve the Electron executable");
+    const electronPath = packagedElectronExecutable(desktopDirectory);
+    const archivePath = join(dirname(electronPath), "resources", "app.asar");
+    await Promise.all([access(electronPath), access(archivePath)]);
+    packagedRuntimePaths = { electronPath, archivePath };
+    packagedRuntimeBefore = {
+      executable: await fileFingerprint(electronPath),
+      applicationArchive: await fileFingerprint(archivePath),
+    };
+    report.packagedRuntime = {
+      source: "electron-builder win-unpacked output",
+      artifacts: packagedRuntimeBefore,
+      networkProbe: {
+        source: "apps/desktop/src/network.ts",
+        separatelyBundled: true,
+      },
+      phaseProfiles: "fresh owned fixture directory per phase",
+    };
+    await checkpoint("Selected the packaged Electron 44.5.1 runtime and recorded its executable and ASAR fingerprints");
 
     const openSsl = await findOpenSsl();
     certificate = await generateCertificates(openSsl, fixtureRoot);
@@ -425,8 +663,8 @@ export async function main(arguments_ = process.argv.slice(2)) {
     await checkpoint("Generated a unique localhost CA and confirmed it was absent from CurrentUser Root");
 
     server = await startHttpsFixture(certificate.serverCertificate, certificate.serverKey);
-    const applicationDirectory = join(fixtureRoot, "electron-child");
-    await prepareElectronChild(desktopDirectory, applicationDirectory);
+    const bundlePath = join(fixtureRoot, "native-system-trust-probe.cjs");
+    await compileElectronProbe(desktopDirectory, bundlePath);
     await checkpoint("Compiled the production network.ts through the installed esbuild");
 
     const nodeBeforeTrust = await nodeFetchCertificateError(server.localhostUrl);
@@ -438,7 +676,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
     };
     assert(nodeBeforeTrust.certificateError, "Node fetch did not fail with a recognized untrusted-certificate code before installation");
     const beforeTrust = await launchElectronPhase({
-      electronPath, applicationDirectory, fixtureRoot, name: "before-trust", url: server.localhostUrl,
+      electronPath, bundlePath, fixtureRoot, name: "before-trust", url: server.localhostUrl,
     });
     assert.deepEqual(
       beforeTrust,
@@ -458,7 +696,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
     const nodeAfterTrust = await nodeFetchCertificateError(server.localhostUrl);
     assert(nodeAfterTrust.certificateError, "Node fetch did not retain a recognized untrusted-certificate failure after CurrentUser Root changed");
     const trusted = await launchElectronPhase({
-      electronPath, applicationDirectory, fixtureRoot, name: "trusted", url: server.localhostUrl,
+      electronPath, bundlePath, fixtureRoot, name: "trusted", url: server.localhostUrl,
     });
     assert.deepEqual(
       trusted,
@@ -493,7 +731,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
     await checkpoint("desktopFetch used CurrentUser Root for normal and manual redirect paths while Node fetch remained untrusted");
 
     const wrongHost = await launchElectronPhase({
-      electronPath, applicationDirectory, fixtureRoot, name: "wrong-host", url: server.wrongHostUrl,
+      electronPath, bundlePath, fixtureRoot, name: "wrong-host", url: server.wrongHostUrl,
     });
     assert.deepEqual(
       wrongHost,
@@ -506,6 +744,15 @@ export async function main(arguments_ = process.argv.slice(2)) {
     primaryFailure = error;
     report.failure = sanitizedFailure(error, [fixtureRoot]);
   } finally {
+    if (packagedRuntimePaths && packagedRuntimeBefore) {
+      try {
+        assert.deepEqual({
+          executable: await fileFingerprint(packagedRuntimePaths.electronPath),
+          applicationArchive: await fileFingerprint(packagedRuntimePaths.archivePath),
+        }, packagedRuntimeBefore, "Packaged Electron runtime changed during system-trust acceptance");
+        report.cleanup.packagedRuntimeUnchanged = true;
+      } catch (error) { cleanupFailures.push(error); }
+    }
     if (server) {
       try {
         await server.close();
@@ -546,7 +793,11 @@ export async function main(arguments_ = process.argv.slice(2)) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(error => {
+  const arguments_ = process.argv.slice(2);
+  const operation = arguments_[0] === "--native-system-trust-phase"
+    ? runElectronPhaseController(arguments_)
+    : main(arguments_);
+  operation.catch(error => {
     const failure = sanitizedFailure(error);
     console.error(`Native system trust failed: ${failure.name}: ${failure.message}`);
     process.exitCode = 1;
