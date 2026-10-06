@@ -1,7 +1,7 @@
 # Installing Multi Device Context
 
-After updating, reconnect and close older app tabs to complete the one-time local
-history migration. Unsent drafts and the outbox are preserved. Synchronized
+If the client requests the one-time local history migration, reconnect and close
+older app tabs to complete it. Unsent drafts and the outbox are preserved. Synchronized
 history is now memory-only and requires a connection after restarting the app.
 
 ## Choose your installer
@@ -11,7 +11,7 @@ history is now memory-only and requires a connection after restarting the app.
 | Windows | `Multi-Device-Context-VERSION-win-x64.exe` | x64 |
 | macOS | `Multi-Device-Context-VERSION-mac-arm64.dmg` | Apple Silicon, macOS 13+ |
 
-Download the installer from the versioned release in the private
+Download the installer from the versioned release in the public
 [pbuchman/multi-device-context repository](https://github.com/pbuchman/multi-device-context/releases).
 The release also contains `SHA256SUMS.txt`. Compare the installer checksum before
 running it if the file was copied between machines. No developer tools or manual
@@ -19,7 +19,7 @@ application configuration are required to use a published release.
 
 The Windows installer has no code-signing identity. The macOS application has an
 ad-hoc signature required for its Apple Silicon package; it is not Developer ID
-signed or notarized. These are initial private builds. Neither platform should be
+signed or notarized. These are Preview builds. Neither platform should be
 presented as having a verified publisher.
 
 ## Windows
@@ -45,6 +45,13 @@ to open this specific app, use **System Settings → Privacy & Security → Open
 Anyway**, then confirm the application name. This is Apple's documented per-app
 exception; a device-management policy can disallow it. See
 [Apple's instructions](https://support.apple.com/102445).
+
+After replacing an ad-hoc signed build, macOS may ask again to let **Multi Device
+Context** access its **Safe Storage** item in Keychain. Approve that application's
+request and enter your Mac login password if macOS asks for it. The existing
+encrypted local data needs this access to open. [Electron documents this
+permission prompt](https://www.electronjs.org/docs/latest/api/safe-storage) for
+builds without a consistent signing identity.
 
 The app remains in the menu bar when the window closes. Check **Launch at login**
 in the app's tray menu or settings, and verify the actual login launch on your
@@ -97,7 +104,7 @@ Narrowing the window does not replace that preference.
 The sidebar footer shows your account name and email. Open Settings to see the
 full values. If the identity provider is unavailable, sharing remains usable and
 the account area displays **Signed in / Account details unavailable**. Profile
-details are kept only for the current session. Desktop 0.5.4 uses the signed
+details are kept only for the current session. The desktop uses the signed
 profile already verified during sign-in and loads a bounded Google profile image
 without saving it to the account store. The browser uses its Auth0 SDK profile,
 and the server lookup is a fallback. Temporary lookup failures retry in the
@@ -128,6 +135,7 @@ hosted interface alone cannot update the native shell.
 | New chat | Cmd+N | Ctrl+N |
 | Reload interface | Cmd+R | Ctrl+R or F5 |
 | Delete current chat, with confirmation | Cmd+Shift+Backspace | Ctrl+Shift+Backspace |
+| Check for updates | File → Check for updates… | File → Check for updates… |
 | Quit application | Cmd+Q | Ctrl+Q |
 
 New chat preserves the previous chat's draft. Delete opens the existing
@@ -166,11 +174,61 @@ and choose **Try again** when the connection returns. Pending web shares use the
 account's local outbox and retry when the connection returns. Sign-out explains
 pending local data before it is discarded.
 
-For an update, download the newer release, quit the app from its tray menu, and
-install over the existing Windows application or replace the application in
-macOS Applications. Startup preferences and the protected login are retained
-unless the deployment's login configuration changes. There is no automatic
-updater in this first release.
+The desktop app checks the fixed Preview release catalog when it starts and every
+six hours while it is running. **File → Check for updates…** checks immediately.
+Checks do not download or install anything. Availability, download progress and
+the result appear in the app's update banner and Settings. The updater does not
+send a GitHub token or other account credential with its public catalog and
+release downloads.
+
+On Windows, choose **Update and restart**. The app downloads and verifies the
+installer, then waits for local draft and pending-send writes,
+then runs the verified per-user NSIS update in the existing installation location.
+Closing the window or using ordinary Quit never installs a downloaded update.
+The protected login, startup preference and retained application data stay in
+place. If the update is cancelled or fails verification, the installed version
+continues to run and can be retried. If Windows refuses to start the verified
+installer, the app stays open, reports the failure and keeps the verified update
+ready for another attempt.
+
+On macOS, choose **Download DMG**. The app downloads, verifies, and opens the
+DMG; **Open DMG** reopens an already verified download. Quit Multi Device Context, drag the new app
+over **Multi Device Context** in Applications, eject the disk image and reopen the
+app. This manual replacement is required because the macOS build is
+ad-hoc signed and not notarized. Keep using the per-app Gatekeeper steps above;
+the updater does not remove quarantine attributes or bypass Gatekeeper.
+
+Install the first updater-enabled desktop release manually using the instructions
+at the top of this page. Older releases cannot discover the new catalog. A manual
+download from the versioned release remains the recovery path on either platform;
+compare `SHA256SUMS.txt` before installing it. Updating does not clear app data.
+
+Maintainers run the native A→B updater acceptance only on ephemeral Windows x64
+and Apple Silicon macOS CI runners with an interactive desktop and OS secure
+storage available; `openssl` must be on `PATH`. First build the normal B
+installer, retaining its canonical release filename and exact bytes. Run the
+platform-neutral boundary tests with
+`pnpm --filter @mdc/desktop test:update-harness`. On the matching native runner,
+set `MDC_NATIVE_UPDATE_A_TO_B=1`, `MDC_NATIVE_UPDATE_B_VERSION` to B's numeric
+version, and `MDC_NATIVE_UPDATE_B_ARTIFACT` to the canonical B `.exe` or `.dmg`,
+then run `pnpm --filter @mdc/desktop test:update-native`. CI already supplies
+`CI=true`. The runner writes `apps/desktop/release/native-update-a-to-b.json`.
+
+The harness creates test A in a private temporary source copy, substitutes only
+compile-time localhost HTTPS catalog/feed constants in that copy, generates a
+short-lived test certificate and pins its SPKI, and forces electron-builder to
+`--publish never`. Normal
+package checks reject the test marker and local URLs. The production source and
+the B artifact are hashed before and after the run. Windows installs A to a
+non-default per-user directory, proves ordinary Quit does not install the cached
+update, then exercises the acknowledged NSIS restart in place. macOS opens the
+verified B DMG, performs the explicit quit/mount/manual application replacement,
+and restarts B. Both variants check that the installation path, encrypted native
+sentinel, and synthetic draft, outbox, and settings data survive. The report is
+native CI evidence; it is not a claim that a physical user device was tested.
+Before a later normal B installation, the Windows run disables the test login
+item, runs the isolated NSIS uninstaller, and verifies that the executable and
+non-default uninstall-registry reference are gone.
 
 Before uninstalling, finish or deliberately discard pending shares, sign out,
 turn off **Launch at login**, and quit. Use Windows Installed Apps to uninstall,

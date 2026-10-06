@@ -40,6 +40,15 @@ external processing. Provider credentials stay server-side. Failures leave a
 fallback title; a manual rename wins over delayed model results.
 Prompts/responses are not logged.
 
+## Update checks
+
+Native applications check the public GitHub Pages catalog automatically. They
+download installers from GitHub Releases only after a user action. Requests send ordinary
+network metadata, such as the IP address and user agent, but no context content,
+account credentials, agent keys, or GitHub token. The hosted interface checks its
+own server for a build identifier. See [application updates](updates.md) for the
+schedule, verification, and installation behavior.
+
 ## Local storage and offline use
 
 After the one-time migration, synchronized Firestore history uses memory only.

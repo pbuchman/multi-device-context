@@ -17,6 +17,10 @@ protocols:
     schemes:
       - multi-device-context
 artifactName: Multi-Device-Context-${version}-${os}-${arch}.${ext}
+electronUpdaterCompatibility: ">=2.16"
+publish:
+  provider: generic
+  url: https://pbuchman.github.io/multi-device-context/updates/preview/
 win:
   target:
     - target: nsis
@@ -32,6 +36,7 @@ nsis:
   createStartMenuShortcut: true
   runAfterFinish: true
   deleteAppDataOnUninstall: false
+  packElevateHelper: true
 mac:
   target:
     - target: dmg

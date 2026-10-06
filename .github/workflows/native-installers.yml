@@ -35,7 +35,7 @@ jobs:
             platform: mac
             architecture: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       MDC_APP_ORIGIN: ${{ github.event_name == 'pull_request' && 'https://example.invalid' || vars.MDC_APP_ORIGIN || 'https://example.invalid' }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -54,13 +54,51 @@ jobs:
           node-version: "22.12.0"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Validate native sources
-        run: pnpm vitest run apps/desktop/src
+      - name: Validate native sources and update harness
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { mkdtemp, writeFile, lstat, open, rm } from 'node:fs/promises';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          const directory = await mkdtemp(join(tmpdir(), 'mdc-native-stat-'));
+          const path = join(directory, 'synthetic.bin');
+          try {
+            await writeFile(path, 'synthetic fixture');
+            const handle = await open(path, 'r');
+            try {
+              const fields = ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'mtimeNs', 'ctimeNs'];
+              const select = stat => Object.fromEntries(fields.filter(key => key in stat).map(key => [key, String(stat[key])]));
+              console.log(JSON.stringify({ platform: process.platform, node: process.version,
+                pathStat: select(await lstat(path)), handleStat: select(await handle.stat()),
+                pathBigInt: select(await lstat(path, { bigint: true })), handleBigInt: select(await handle.stat({ bigint: true })) }));
+            } finally { await handle.close(); }
+          } finally { await rm(directory, { recursive: true, force: true }); }
+          NODE
+          pnpm vitest run apps/desktop/src
+          pnpm --filter @mdc/desktop test:update-harness
       - run: pnpm --filter @mdc/desktop typecheck
       - name: Build platform installers
         run: pnpm --filter @mdc/desktop package:${{ matrix.platform }}
       - name: Verify desktop dependency boundary
         run: pnpm --filter @mdc/desktop exec node scripts/check-package.mjs
+      - name: Locate the exact update candidate
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync, existsSync } from 'node:fs';
+          import { resolve } from 'node:path';
+          const { version } = JSON.parse(readFileSync('apps/desktop/package.json', 'utf8'));
+          const suffix = process.platform === 'win32' ? 'win-x64.exe' : 'mac-arm64.dmg';
+          const artifact = resolve('apps/desktop/release', `Multi-Device-Context-${version}-${suffix}`);
+          if (!existsSync(artifact)) throw new Error('The exact native update candidate is missing');
+          appendFileSync(process.env.GITHUB_ENV, `MDC_NATIVE_UPDATE_B_VERSION=${version}\nMDC_NATIVE_UPDATE_B_ARTIFACT=${artifact}\n`);
+          NODE
+      - name: Exercise isolated native A to B update
+        env:
+          CI: "true"
+          MDC_NATIVE_UPDATE_A_TO_B: "1"
+        run: pnpm --filter @mdc/desktop test:update-native
       - name: Install Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
@@ -102,6 +140,18 @@ jobs:
         run: pnpm --filter @mdc/desktop exec node scripts/native-smoke.mjs
       - name: Produce checksums
         run: pnpm --filter @mdc/desktop exec node scripts/checksums.mjs
+      - name: Preserve native update diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-update-report-${{ matrix.platform }}-${{ matrix.architecture }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            apps/desktop/release/native-update-a-to-b.json
+            apps/desktop/release/native-update-launch.png
+            apps/desktop/release/native-update-launch-sample.txt
+            apps/desktop/release/native-smoke.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         # PRs still build and test; publish only verified main installers.
         if: success() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -116,3 +166,4 @@ jobs:
             apps/desktop/release/SHA256SUMS.txt
             apps/desktop/release/native-smoke.json
             apps/desktop/release/native-smoke.png
+            apps/desktop/release/native-update-a-to-b.json

@@ -1,6 +1,6 @@
 import { App } from "@capacitor/app";
 import { Capacitor, registerPlugin } from "@capacitor/core";
-import { ContentSchema, DeviceSchema, IdSchema, MAX_ATTACHMENT_BYTES, MAX_TEXT_BYTES, type ClipboardSnapshot, type NativeFile, type PendingClipboardShare } from "@mdc/contracts";
+import { ContentSchema, DeviceSchema, IdSchema, MAX_ATTACHMENT_BYTES, MAX_TEXT_BYTES, UpdateStateSchema, type ClipboardSnapshot, type NativeFile, type PendingClipboardShare, type UpdateState } from "@mdc/contracts";
 import type { PlatformAdapter } from "./platform.js";
 
 type ListenerHandle = { remove(): Promise<void> };
@@ -24,7 +24,11 @@ export interface MdcNativePlugin {
   getPendingShares(): Promise<{ requests: NativeRequest[] }>;
   acknowledgeShare(options: { id: string }): Promise<void>;
   takeNavigation(): Promise<Navigation>;
-  addListener(event: "shareReceived" | "navigate", listener: (event: Navigation) => void): Promise<ListenerHandle>;
+  getUpdateState(): Promise<unknown>;
+  checkForUpdates(): Promise<unknown>;
+  startUpdate(): Promise<unknown>;
+  installUpdate(): Promise<void>;
+  addListener(event: "shareReceived" | "navigate" | "updateState", listener: (event: any) => void): Promise<ListenerHandle>;
 }
 export type AndroidDependencies = {
   plugin: MdcNativePlugin;
@@ -82,6 +86,7 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
   const activityListeners = new Set<(active: boolean) => void>();
   const shareListeners = new Set<() => void>();
   const navigationListeners = new Set<(event: Navigation) => void>();
+  const updateListeners = new Set<(state: UpdateState) => void>();
   const handles: ListenerHandle[] = [];
   const ensureCurrent = (expected = generation) => { if (disposed || expected !== generation) throw new Error("Android operation was cancelled"); };
   const subscribe = <T>(listeners: Set<T>, listener: T): (() => void) => {
@@ -90,7 +95,7 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
   const dispose = () => {
     if (disposed) return;
     disposed = true; generation++; controller.abort();
-    activityListeners.clear(); shareListeners.clear(); navigationListeners.clear();
+    activityListeners.clear(); shareListeners.clear(); navigationListeners.clear(); updateListeners.clear();
     for (const handle of handles) void handle.remove().catch(() => {});
   };
   try {
@@ -111,6 +116,11 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
     handles.push(await plugin.addListener("navigate", event => {
       const value = navigation(event);
       if (!disposed && value) for (const listener of navigationListeners) listener(value);
+    }));
+    handles.push(await plugin.addListener("updateState", event => {
+      if (disposed) return;
+      const state = UpdateStateSchema.safeParse(event);
+      if (state.success) for (const listener of updateListeners) listener(state.data);
     }));
   } catch (error) { dispose(); throw error; }
 
@@ -164,6 +174,13 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
       ensureCurrent(expected);
       return result.saved;
     } finally { await plugin.discardFile({ id }).catch(() => {}); }
+  }
+  async function updateState(operation: () => Promise<unknown>): Promise<UpdateState> {
+    const expected = generation;
+    ensureCurrent(expected);
+    const result = await operation();
+    ensureCurrent(expected);
+    return UpdateStateSchema.parse(result);
   }
   return {
     kind: "android", dispose,
@@ -219,6 +236,11 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
       takeNavigation: async () => { ensureCurrent(); return navigation(await plugin.takeNavigation()); },
       onNavigate: listener => subscribe(navigationListeners, listener),
       onShareClipboard: listener => subscribe(shareListeners, listener),
+      getUpdateState: () => updateState(() => plugin.getUpdateState()),
+      checkForUpdates: () => updateState(() => plugin.checkForUpdates()),
+      startUpdate: () => updateState(() => plugin.startUpdate()),
+      installUpdate: async () => { const expected = generation; ensureCurrent(expected); await plugin.installUpdate(); ensureCurrent(expected); },
+      onUpdateState: listener => subscribe(updateListeners, listener),
     },
   };
 }

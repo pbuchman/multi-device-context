@@ -6,7 +6,7 @@ type Command = DesktopCommandRequest["command"];
 /** A lifecycle acknowledgement belongs to exactly one renderer subscription. */
 export class DesktopCommands {
   #registration: string | undefined;
-  #pending: DesktopCommandRequest | undefined;
+  #pending: { request: DesktopCommandRequest; completion?: (allow: boolean) => void | Promise<void> } | undefined;
   constructor(private readonly actions: {
     send(request: DesktopCommandRequest): void;
     newChat(): void;
@@ -15,38 +15,57 @@ export class DesktopCommands {
     changed(): void;
   }) {}
   get ready() { return this.#registration !== undefined; }
-  subscribe(registration: string) { this.#registration = registration; this.#pending = undefined; this.actions.changed(); }
+  subscribe(registration: string) { this.#cancelPending(); this.#registration = registration; this.actions.changed(); }
   unsubscribe(registration: string) { if (this.#registration === registration) this.reset(); }
-  reset() { this.#registration = undefined; this.#pending = undefined; this.actions.changed(); }
-  request(command: Command) {
-    if (this.#pending) return;
+  reset() { this.#registration = undefined; this.#cancelPending(); this.actions.changed(); }
+  request(command: Command, completion?: (allow: boolean) => void | Promise<void>): boolean {
+    if (this.#pending) return false;
     if (!this.ready) {
-      if (command === "new-chat") this.actions.newChat();
-      if (command === "reload") this.actions.reload();
-      if (command === "quit") this.actions.quit();
-      return;
+      if (completion && (command === "reload" || command === "quit"))
+        void Promise.resolve().then(() => completion(true)).catch(() => {});
+      else {
+        if (command === "new-chat") this.actions.newChat();
+        if (command === "reload") this.actions.reload();
+        if (command === "quit") this.actions.quit();
+      }
+      return true;
     }
     const request = { id: randomUUID(), command };
-    if (command === "reload" || command === "quit") this.#pending = request;
+    if (command === "reload" || command === "quit") this.#pending = { request, ...(completion ? { completion } : {}) };
     this.actions.send(request);
+    return true;
   }
-  complete(registration: string, id: string, allow: boolean) {
-    if (registration !== this.#registration || this.#pending?.id !== id) throw new Error("This application command has expired.");
-    const command = this.#pending.command;
+  complete(registration: string, id: string, allow: boolean): Promise<void> {
+    if (registration !== this.#registration || this.#pending?.request.id !== id) throw new Error("This application command has expired.");
+    const { request, completion } = this.#pending;
     this.#pending = undefined;
-    if (!allow) return;
-    if (command === "reload") this.actions.reload();
-    if (command === "quit") this.actions.quit();
+    if (completion) return Promise.resolve(completion(allow));
+    if (!allow) return Promise.resolve();
+    if (request.command === "reload") this.actions.reload();
+    if (request.command === "quit") this.actions.quit();
+    return Promise.resolve();
+  }
+  #cancelPending() {
+    const completion = this.#pending?.completion;
+    this.#pending = undefined;
+    if (completion) void Promise.resolve().then(() => completion(false)).catch(() => {});
   }
 }
 
-export function applicationMenu(platform: string, name: string, ready: boolean, request: (command: Command) => void): MenuItemConstructorOptions[] {
+export function applicationMenu(
+  platform: string,
+  name: string,
+  ready: boolean,
+  request: (command: Command) => void,
+  checkForUpdates: () => void = () => {},
+): MenuItemConstructorOptions[] {
   const quit: MenuItemConstructorOptions = { id: "quit", label: `Quit ${name}`, role: "quit", accelerator: "CmdOrCtrl+Q" };
   const file: MenuItemConstructorOptions[] = [
     { id: "new-chat", label: "New chat", accelerator: "CmdOrCtrl+N", click: () => request("new-chat") },
     { id: "delete-chat", label: "Delete chat…", accelerator: "CmdOrCtrl+Shift+Backspace", enabled: ready, click: () => request("delete-chat") },
     { type: "separator" },
     { id: "reload", label: "Reload", accelerator: "CmdOrCtrl+R", click: () => request("reload") },
+    { id: "check-for-updates", label: "Check for updates…", click: checkForUpdates },
   ];
   if (platform !== "darwin") file.push({ type: "separator" }, quit);
   return [

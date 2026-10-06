@@ -2,6 +2,7 @@
 // no test server, alternate trusted origin, or authentication bypass is shipped.
 import { _electron as electron } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
+import { mkdirSync, writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 const executablePath = process.env.MDC_NATIVE_EXECUTABLE;
@@ -21,10 +22,36 @@ const report = {
   hostedUiRequired: process.env.MDC_REQUIRE_HOSTED_UI === "true",
 };
 let app;
+function saveProgress() {
+  mkdirSync("release", { recursive: true });
+  writeFileSync("release/native-smoke.json", JSON.stringify(report, null, 2) + "\n");
+}
+function checkpoint(message) {
+  report.checks.push(message);
+  saveProgress();
+  console.log(`Native smoke: ${message}`);
+}
+function step(message) {
+  report.currentStep = message;
+  saveProgress();
+  console.log(`Native smoke step: ${message}`);
+}
+// Electron evaluate/close can wait indefinitely after an OS modal or lost IPC.
+// Keep diagnostics and fail instead of consuming the full native-job timeout.
+const deadline = setTimeout(() => {
+  report.passed = false;
+  report.failure = "Installed-app verification exceeded its 180-second deadline";
+  saveProgress();
+  console.error(JSON.stringify(report, null, 2));
+  app?.process()?.kill("SIGKILL");
+  process.exit(1);
+}, 180_000);
 try {
+  step("Launch the installed application");
   app = await electron.launch({ executablePath, timeout: 60000 });
   const window = await app.firstWindow({ timeout: 60000 });
   await window.waitForLoadState("domcontentloaded");
+  step("Inspect the installed runtime");
   const runtime = await app.evaluate(({ app, BrowserWindow, safeStorage }) => ({
     packaged: app.isPackaged,
     encryption: safeStorage.isEncryptionAvailable(),
@@ -45,7 +72,7 @@ try {
     return {
       file: menu.items.some(item => item.label === "File"),
       visible: BrowserWindow.getAllWindows()[0].isMenuBarVisible(),
-      commands: ["new-chat", "delete-chat", "reload", "quit"].map(id => {
+      commands: ["new-chat", "delete-chat", "reload", "check-for-updates", "quit"].map(id => {
         const item = menu.getMenuItemById(id);
         return { id, accelerator: item?.accelerator, enabled: item?.enabled };
       }),
@@ -57,7 +84,8 @@ try {
     assert.equal(menus.commands.find(item => item.id === id).accelerator, accelerator);
   }
   assert.equal(menus.commands.find(item => item.id === "delete-chat").enabled, false);
-  report.checks.push("Visible native File menu and New/Delete/Reload/Quit accelerators on installed app");
+  assert.equal(menus.commands.find(item => item.id === "check-for-updates").enabled, true);
+  checkpoint("Visible native File menu, update check, and New/Delete/Reload/Quit accelerators on installed app");
   assert.equal(runtime.packaged, true);
   assert.equal(runtime.encryption, true);
   assert.equal(runtime.windows, 1);
@@ -69,7 +97,7 @@ try {
   assert.equal(runtime.preferences.contextIsolation, true);
   assert.equal(runtime.preferences.nodeIntegration, false);
   assert.equal(runtime.preferences.webSecurity, true);
-  report.checks.push(
+  checkpoint(
     "Installed packaged executable, expected architecture, secure preferences and OS encryption",
   );
   assert.equal(
@@ -83,7 +111,7 @@ try {
       true,
       "Windows StartupApproved must allow launch",
     );
-  report.checks.push(
+  checkpoint(
     "OS reports the installed app registered and enabled for login launch",
   );
   if (report.hostedUiRequired) {
@@ -98,18 +126,32 @@ try {
       accountAvatar: typeof window.contextDesktop.getAccountAvatar,
       device: await window.contextDesktop.getDevice(),
       startup: await window.contextDesktop.getLaunchAtLogin(),
+      updates: {
+        get: typeof window.contextDesktop.getUpdateState,
+        check: typeof window.contextDesktop.checkForUpdates,
+        start: typeof window.contextDesktop.startUpdate,
+        install: typeof window.contextDesktop.installUpdate,
+        subscribe: typeof window.contextDesktop.onUpdateState,
+        state: await window.contextDesktop.getUpdateState(),
+      },
       node: typeof window.require,
     }));
     assert.equal(bridge.version, 1);
     assert.equal(bridge.accountProfile, "function");
     assert.equal(bridge.accountAvatar, "function");
+    assert.deepEqual(
+      [bridge.updates.get, bridge.updates.check, bridge.updates.start, bridge.updates.install, bridge.updates.subscribe],
+      ["function", "function", "function", "function", "function"],
+    );
+    assert.equal(bridge.updates.state.platform, process.platform);
+    assert.match(bridge.updates.state.currentVersion, /^\d+\.\d+\.\d+$/);
     await assert.rejects(window.evaluate(() => window.contextDesktop.getAccountProfile()), /Sign in with Google/);
     await assert.rejects(window.evaluate(() => window.contextDesktop.getAccountAvatar()), /Sign in with Google/);
-    report.checks.push("Native account profile and avatar APIs require a verified signed-in identity");
+    checkpoint("Native account, update state and update subscription bridge methods are present and validated");
     assert.ok(bridge.device.id);
     assert.equal(bridge.node, "undefined");
     assert.equal(bridge.startup, true);
-    report.checks.push(
+    checkpoint(
       "Hosted interface loads with isolated native bridge and startup enabled",
     );
     await window.evaluate(async () => {
@@ -126,13 +168,13 @@ try {
       await window.evaluate(() => window.contextDesktop.getLaunchAtLogin()),
       true,
     );
-    report.checks.push("Actual OS startup setting toggles");
+    checkpoint("Actual OS startup setting toggles");
     const contextId = "00000000-0000-4000-8000-000000000088";
     await app.evaluate(({ app }, id) => app.emit("open-url", { preventDefault() {} }, `multi-device-context://context/${id}`), contextId);
     assert.deepEqual(await window.evaluate(() => window.contextDesktop.takeNavigation()), { contextId });
     await app.evaluate(({ app }) => app.emit("activate"));
     assert.deepEqual(await window.evaluate(() => window.contextDesktop.takeNavigation()), {});
-    report.checks.push("Native context links and manual reopen emit distinct navigation intents");
+    checkpoint("Native context links and manual reopen emit distinct navigation intents");
     // Exercise the public bridge on the real trusted hosted login page, without
     // authenticating, replacing app origin, or introducing a shipped test hook.
     report.currentStep = "Subscribe to native workspace commands";
@@ -193,7 +235,7 @@ try {
     await window.waitForFunction(() => window.contextDesktop?.version === 1);
     assert.equal(await window.evaluate(() => window.__nativeCommandSmoke), undefined);
     assert.equal(await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById("delete-chat").enabled), false);
-    report.checks.push("Native New/Delete dispatch, refused Quit remains open, acknowledged Reload navigates and clears subscription");
+    checkpoint("Native New/Delete dispatch, refused Quit remains open, acknowledged Reload navigates and clears subscription");
     delete report.currentStep;
 
     await window.evaluate(() =>
@@ -229,7 +271,7 @@ try {
         bytes: [0, 1, 255, 128],
       },
     ]);
-    report.checks.push(
+    checkpoint(
       "Real native clipboard text and copied-file round trip preserves bytes",
     );
     const png = await app.evaluate(
@@ -296,7 +338,7 @@ let pasteboard = NSPasteboard.general
       return snapshot.files.map((file) => ({ name: file.name, bytes: Array.from(file.bytes) }));
     });
     assert.deepEqual(copiedImageFile, [{ name: "native-screenshot.png", bytes: png }]);
-    report.checks.push(
+    checkpoint(
       "Screenshot capture and Copy expose an actual native clipboard image",
     );
   } else {
@@ -304,10 +346,11 @@ let pasteboard = NSPasteboard.general
       window.url().startsWith("file:") ||
         new URL(window.url()).origin === process.env.MDC_APP_ORIGIN,
     );
-    report.checks.push(
+    checkpoint(
       "Window or packaged recovery loads; hosted/native bridge acceptance remains pending",
     );
   }
+  step("Capture the installed window");
   await window.screenshot({ path: "release/native-smoke.png" });
   await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].close(),
@@ -318,7 +361,7 @@ let pasteboard = NSPasteboard.general
     ),
     false,
   );
-  report.checks.push(
+  checkpoint(
     "Closing the window hides it without terminating the application",
   );
   if (process.platform === "win32") {
@@ -329,6 +372,7 @@ let pasteboard = NSPasteboard.general
         args: ["--background"],
       }),
     );
+    step("Close and reopen after Windows startup disablement");
     await app.close();
     app = await electron.launch({ executablePath, timeout: 60000 });
     const reopened = await app.firstWindow({ timeout: 60000 });
@@ -345,7 +389,7 @@ let pasteboard = NSPasteboard.general
       false,
       "Reopening the app must preserve Windows-disabled startup",
     );
-    report.checks.push(
+    checkpoint(
       "Windows startup disablement remains respected after Quit and reopen",
     );
   }
@@ -357,7 +401,7 @@ let pasteboard = NSPasteboard.general
     await cold.waitForURL(url => url.origin === process.env.MDC_APP_ORIGIN, { timeout: 60000 });
     await cold.waitForFunction(() => typeof window.contextDesktop?.takeNavigation === "function");
     assert.deepEqual(await cold.evaluate(() => window.contextDesktop.takeNavigation()), { contextId });
-    report.checks.push("Cold-start context URL survives application startup and awaits sign-in");
+    checkpoint("Cold-start context URL survives application startup and awaits sign-in");
   }
   // Verify actual native quit after a renderer acknowledgement; login/recovery
   // without a bridge also retains an immediate native quit path.
@@ -374,11 +418,12 @@ let pasteboard = NSPasteboard.general
     }
     assert.equal(await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById("delete-chat").enabled), true);
   }
-  const exited = app.waitForEvent("close");
+  step("Quit the installed application");
+  const exited = app.waitForEvent("close", { timeout: 60_000 });
   await app.evaluate(({ app }) => app.quit()).catch(() => {});
   await exited;
   app = undefined;
-  report.checks.push("Installed application exits through native Quit and the workspace acknowledgement path when available");
+  checkpoint("Installed application exits through native Quit and the workspace acknowledgement path when available");
   report.passed = true;
 } catch (error) {
   report.passed = false;
@@ -405,4 +450,5 @@ let pasteboard = NSPasteboard.general
     JSON.stringify(report, null, 2) + "\n",
   );
   console.log(JSON.stringify(report, null, 2));
+  clearTimeout(deadline);
 }

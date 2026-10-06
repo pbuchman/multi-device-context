@@ -23,6 +23,28 @@ it("routes workspace actions and waits for matching acknowledgement before reloa
   commands.request("quit"); commands.complete("registration", actions.send.mock.lastCall![0].id, true);
   expect(actions.quit).toHaveBeenCalledOnce();
 });
+it("runs an update installer only after the renderer acknowledges the quit save", () => {
+  const { commands, actions } = fixture(); commands.subscribe("registration");
+  const install = vi.fn();
+  expect(commands.request("quit", allow => { if (allow) install(); })).toBe(true);
+  const refused = actions.send.mock.lastCall![0];
+  expect(install).not.toHaveBeenCalled();
+  commands.complete("registration", refused.id, false);
+  expect(install).not.toHaveBeenCalled();
+  expect(commands.request("quit", allow => { if (allow) install(); })).toBe(true);
+  const accepted = actions.send.mock.lastCall![0];
+  commands.complete("registration", accepted.id, true);
+  expect(install).toHaveBeenCalledOnce();
+  expect(actions.quit).not.toHaveBeenCalled();
+});
+it("propagates an acknowledged update installer failure to command completion", async () => {
+  const { commands, actions } = fixture(); commands.subscribe("registration");
+  const failure = new Error("installer failed");
+  commands.request("quit", async allow => { if (allow) throw failure; });
+  const accepted = actions.send.mock.lastCall![0];
+  await expect(commands.complete("registration", accepted.id, true)).rejects.toBe(failure);
+  expect(actions.quit).not.toHaveBeenCalled();
+});
 it("invalidates pending lifecycle requests on unsubscribe and navigation", () => {
   const { commands, actions } = fixture(); commands.subscribe("old"); commands.request("quit"); const old = actions.send.mock.lastCall![0];
   commands.subscribe("new"); commands.unsubscribe("old"); expect(commands.ready).toBe(true);
@@ -32,15 +54,18 @@ it("invalidates pending lifecycle requests on unsubscribe and navigation", () =>
   expect(actions.reload).not.toHaveBeenCalled(); expect(actions.quit).not.toHaveBeenCalled();
 });
 it.each(["darwin", "win32"])("provides visible %s menus with native shortcuts", platform => {
-  const action = vi.fn(); const template = applicationMenu(platform, "Multi Device Context", true, action);
+  const action = vi.fn(); const checkForUpdates = vi.fn();
+  const template = applicationMenu(platform, "Multi Device Context", true, action, checkForUpdates);
   const file = template.find(item => item.label === "File")!;
   const items = file.submenu as import("electron").MenuItemConstructorOptions[];
   expect(items.find(item => item.id === "new-chat")).toMatchObject({ accelerator: "CmdOrCtrl+N" });
   expect(items.find(item => item.id === "delete-chat")).toMatchObject({ accelerator: "CmdOrCtrl+Shift+Backspace", enabled: true });
   expect(items.find(item => item.id === "reload")).toMatchObject({ accelerator: "CmdOrCtrl+R" });
+  expect(items.find(item => item.id === "check-for-updates")).toMatchObject({ label: "Check for updates…" });
   const all = template.flatMap(item => Array.isArray(item.submenu) ? item.submenu : []);
   expect(all.find(item => item.id === "quit")).toMatchObject({ role: "quit", accelerator: "CmdOrCtrl+Q" });
   expect(template.some(item => item.role === "editMenu")).toBe(true);
   expect(template.some(item => item.role === "windowMenu")).toBe(true);
   (items.find(item => item.id === "reload")!.click as () => void)(); expect(action).toHaveBeenCalledWith("reload");
+  (items.find(item => item.id === "check-for-updates")!.click as () => void)(); expect(checkForUpdates).toHaveBeenCalledOnce();
 });

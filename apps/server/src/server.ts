@@ -1,6 +1,6 @@
 import type { SettingsPort } from "./settings.js";
 import { WindowLimit, Readiness } from "./limits.js";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import fastifyStatic from "@fastify/static";
@@ -40,6 +40,21 @@ export type BuildServerOptions = {
   attachments?: AttachmentPort;
   access?: AccessAdministrationPort;
 };
+
+type BuildMetadata = { uiBuild: string };
+
+function readBuildMetadata(webDist?: string): BuildMetadata {
+  if (!webDist) return { uiBuild: "dev" };
+  try {
+    const value: unknown = JSON.parse(readFileSync(join(webDist, "version.json"), "utf8"));
+    if (
+      typeof value === "object" && value !== null &&
+      Object.keys(value).length === 1 && "uiBuild" in value &&
+      typeof value.uiBuild === "string" && /^(?:[a-f0-9]{40}|dev)$/.test(value.uiBuild)
+    ) return { uiBuild: value.uiBuild };
+  } catch { /* Older hosted bundles did not include build metadata. */ }
+  return { uiBuild: "dev" };
+}
 
 function hasNoBodyFields(body: unknown): boolean {
   return (
@@ -110,7 +125,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.addHook("onRequest", async (request, reply) => {
     const path = request.url.split("?", 1)[0]!;
     if (/\.map$/i.test(path)) return reply.code(404).send({ error: "Not Found" });
-    if (!path.startsWith("/api/") || path === "/api/config") return;
+    if (!path.startsWith("/api/") || path === "/api/config" || path === "/api/version") return;
     const retry = preAuth.take(request.ip) || global.take("all");
     if (retry) return reply.header("retry-after", retry).code(429).send({ error: "Too Many Requests" });
   });
@@ -182,6 +197,11 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.get("/api/config", async (_request, reply) => {
     reply.header("cache-control", "no-store");
     return publicConfig;
+  });
+  const buildMetadata = readBuildMetadata(options.webDist);
+  app.get("/api/version", async (_request, reply) => {
+    reply.header("cache-control", "no-store");
+    return buildMetadata;
   });
 
   app.get("/api/profile", async (request, reply) => {

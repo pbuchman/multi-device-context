@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+import type { NativeUpdates } from "./updates.ts";
+
+export * from "./updates.ts";
+
 export const MAX_TEXT_BYTES = 262_144;
 export const MAX_ATTACHMENT_BYTES = 104_857_600;
 
@@ -165,6 +169,11 @@ export interface DesktopBridge {
   takeNavigation?(): Promise<{ contextId?: Id } | undefined>;
   onNavigate?(listener: (event: { contextId?: Id }) => void): () => void;
   onShareClipboard(listener: () => void): () => void;
+  getUpdateState?: NativeUpdates["getUpdateState"];
+  checkForUpdates?: NativeUpdates["checkForUpdates"];
+  startUpdate?: NativeUpdates["startUpdate"];
+  installUpdate?: NativeUpdates["installUpdate"];
+  onUpdateState?: NativeUpdates["onUpdateState"];
 }
 
 export function attachmentPath(uid: string, contextId: string, itemId: string): string {

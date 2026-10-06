@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.util.Base64
 import android.widget.Toast
 import androidx.activity.result.ActivityResult
@@ -19,6 +20,7 @@ import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
+import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -34,11 +36,17 @@ class MdcNativePlugin:Plugin() {
  private val prefs by lazy { context.getSharedPreferences("mdc-native",Context.MODE_PRIVATE) }
  @Volatile private var transferGeneration=0L
  private val saves=mutableMapOf<String,Pair<ExportedFile,Long>>()
+ private val updateOwner=UUID.randomUUID().toString()
+ private lateinit var updates:AndroidUpdateManager
+ @Volatile private var installPermissionPending=false
  override fun load() {
   NativeRuntime.attach(activity);inbox=NativeRuntime.inbox;clipboardFiles=NativeRuntime.clipboard
-  exports=NativeRuntime.exports;auth=NativeRuntime.auth
+  exports=NativeRuntime.exports;auth=NativeRuntime.auth;updates=AndroidUpdateManager.get(context)
+  updates.attach(updateOwner) {value->notifyListeners("updateState",JSObject(value.toString()))}
   receive(activity.intent)
  }
+ override fun handleOnResume() {super.handleOnResume();if(::updates.isInitialized)updates.foreground()}
+ override fun handleOnDestroy() {if(::updates.isInitialized)updates.detach(updateOwner);super.handleOnDestroy()}
  private fun background(call:PluginCall,block:()->Unit) { worker.execute { try { block() } catch(_:Exception) { call.reject("Native operation failed or exceeds limits") } } }
  @PluginMethod fun exchangeInstallationSession(call:PluginCall) = background(call) {
   val result=NativeRuntime.installation.session.exchange(requireNotNull(call.getString("accessToken")))
@@ -139,6 +147,28 @@ class MdcNativePlugin:Plugin() {
  @PluginMethod fun takeNavigation(call:PluginCall) {
   val result=JSObject();prefs.getString("navigation",null)?.let {result.put("contextId",it);prefs.edit().remove("navigation").commit()};call.resolve(result)
  }
+ @PluginMethod fun getUpdateState(call:PluginCall) {call.resolve(JSObject(updates.getState().toString()))}
+ @PluginMethod fun checkForUpdates(call:PluginCall)=update(call) {updates.check()}
+ @PluginMethod fun startUpdate(call:PluginCall)=update(call) {updates.startUpdate()}
+ @PluginMethod fun installUpdate(call:PluginCall) {
+  if(!context.packageManager.canRequestPackageInstalls()) {
+   synchronized(this) {if(installPermissionPending) {call.reject("Installation permission is already being requested");return};installPermissionPending=true}
+   try {
+    val intent=Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:${context.packageName}"))
+    startActivityForResult(call,intent,"unknownSourcesResult")
+   } catch(cause:Exception) {installPermissionPending=false;updates.permissionDenied();call.reject("Open Android settings and allow updates for this app")}
+   return
+  }
+  commitUpdate(call)
+ }
+ @ActivityCallback private fun unknownSourcesResult(call:PluginCall?,result:ActivityResult) {
+  installPermissionPending=false
+  if(call==null)return
+  if(context.packageManager.canRequestPackageInstalls())commitUpdate(call)
+  else {updates.permissionDenied();call.reject("Installation permission was not granted")}
+ }
+ private fun commitUpdate(call:PluginCall) {updates.execute {try {updates.install();call.resolve()} catch(cause:Exception) {call.reject(cause.message ?: "Update installation failed")}}}
+ private fun update(call:PluginCall,operation:()->JSONObject) {updates.execute {try {call.resolve(JSObject(operation().toString()))} catch(cause:Exception) {call.reject(cause.message ?: "Update operation failed")}}}
  override fun handleOnNewIntent(intent:Intent) { receive(intent) }
  private fun receive(intent:Intent?) {
   if(intent==null)return

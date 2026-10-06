@@ -47,3 +47,53 @@ it("subscribes trusted commands without exposing IPC and unregisters readiness",
   expect(electron.invoke).toHaveBeenLastCalledWith("mdc:commandSubscription", registration, false);
   await expect(bridge.completeCommand!(request.id, true)).rejects.toThrow("expired");
 });
+
+it("rejects command completion when the trusted main IPC handler reports an async failure", async () => {
+  vi.stubGlobal("process", { ...process, isMainFrame: true });
+  vi.stubGlobal("location", { origin: "https://app.example.test", protocol: "https:" });
+  vi.stubGlobal("MDC_APP_ORIGIN", "https://app.example.test");
+  electron.invoke.mockImplementation(async (method: string) => method === "mdc:completeCommand"
+    ? { ok: false, message: "NSIS launch failed" }
+    : { ok: true, value: undefined });
+  await import("./preload.js");
+  const bridge = electron.expose.mock.calls[0]![1] as DesktopBridge;
+  bridge.onCommand!(() => {});
+  await expect(bridge.completeCommand!("00000000-0000-4000-8000-000000000099", true)).rejects.toThrow("NSIS launch failed");
+  expect(electron.invoke).toHaveBeenLastCalledWith(
+    "mdc:completeCommand",
+    expect.stringMatching(/^[0-9a-f-]{36}$/i),
+    "00000000-0000-4000-8000-000000000099",
+    true,
+  );
+});
+
+it("validates update states, exposes parameterless update actions, and unsubscribes", async () => {
+  vi.stubGlobal("process", { ...process, isMainFrame: true, platform: "win32" });
+  vi.stubGlobal("location", { origin: "https://app.example.test", protocol: "https:" });
+  vi.stubGlobal("MDC_APP_ORIGIN", "https://app.example.test");
+  electron.invoke.mockResolvedValue({ ok: true, value: undefined });
+  await import("./preload.js");
+  const bridge = electron.expose.mock.calls[0]![1] as DesktopBridge;
+  await bridge.getUpdateState!();
+  await bridge.checkForUpdates!();
+  await bridge.startUpdate!();
+  await bridge.installUpdate!();
+  expect(electron.invoke.mock.calls.slice(-4)).toEqual([
+    ["mdc:getUpdateState"],
+    ["mdc:checkForUpdates"],
+    ["mdc:startUpdate"],
+    ["mdc:installUpdate"],
+  ]);
+  const listener = vi.fn();
+  const unsubscribe = bridge.onUpdateState!(listener);
+  const notify = electron.on.mock.calls.find(call => call[0] === "mdc:updateState")![1];
+  const valid = { status: "available", platform: "win32", currentVersion: "0.5.4", availableVersion: "0.5.5", progress: { transferred: 0, total: 24, percent: 0 } };
+  notify({}, valid);
+  notify({}, { ...valid, platform: "linux" });
+  notify({}, { ...valid, progress: { transferred: 25, total: 24, percent: 101 } });
+  expect(listener).toHaveBeenCalledOnce();
+  expect(listener).toHaveBeenCalledWith(valid);
+  unsubscribe(); notify({}, valid);
+  expect(listener).toHaveBeenCalledOnce();
+  expect(electron.removeListener).toHaveBeenCalledWith("mdc:updateState", notify);
+});

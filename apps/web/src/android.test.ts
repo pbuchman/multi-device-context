@@ -26,7 +26,11 @@ function fixture(overrides: Partial<MdcNativePlugin> = {}) {
     beginFile: vi.fn(async () => ({ id: "staged" })), appendFile: vi.fn(async () => {}),
     finishFile: vi.fn(async () => ({ saved: true })), discardFile: vi.fn(async () => {}),
     getPendingShares: vi.fn(async () => ({ requests: [] })), acknowledgeShare: vi.fn(async () => {}),
-    takeNavigation: vi.fn(async () => ({})), addListener, ...overrides,
+    takeNavigation: vi.fn(async () => ({})), addListener,
+    getUpdateState: vi.fn(async () => ({ status: "idle", platform: "android", currentVersion: "0.5.4" })),
+    checkForUpdates: vi.fn(async () => ({ status: "available", platform: "android", currentVersion: "0.5.4", availableVersion: "0.5.5", progress: { transferred: 0, total: 123, percent: 0 } })),
+    startUpdate: vi.fn(async () => ({ status: "ready", platform: "android", currentVersion: "0.5.4", availableVersion: "0.5.5", progress: { transferred: 123, total: 123, percent: 100 } })),
+    installUpdate: vi.fn(async () => {}), ...overrides,
   } as MdcNativePlugin;
   const dependencies: AndroidDependencies = {
     plugin, app: { getState: async () => ({ isActive: true }), minimizeApp: vi.fn(async () => {}), addListener },
@@ -46,6 +50,40 @@ it("sends files in bounded chunks and cleans staging when the chooser cancels", 
   expect(chunks.join("")).toBe(String.fromCharCode(42).repeat(bytes.length));
   expect(f.plugin.discardFile).toHaveBeenCalledWith({ id: "staged" });
   adapter.dispose();
+});
+
+it("exposes native updates, validates results, and forwards update events", async () => {
+  const f = fixture();
+  const adapter = await createAndroidAdapter(f.dependencies);
+  await expect(adapter.native!.getUpdateState!()).resolves.toMatchObject({ status: "idle", platform: "android" });
+  await expect(adapter.native!.checkForUpdates!()).resolves.toMatchObject({ status: "available", progress: { total: 123 } });
+  await expect(adapter.native!.startUpdate!()).resolves.toMatchObject({ status: "ready" });
+  await adapter.native!.installUpdate!();
+  const listener = vi.fn();
+  const stop = adapter.native!.onUpdateState!(listener);
+  f.callbacks.get("updateState")!({ status: "downloading", platform: "android", currentVersion: "0.5.4", availableVersion: "0.5.5", progress: { transferred: 2, total: 4, percent: 50 } });
+  expect(listener).toHaveBeenCalledWith(expect.objectContaining({ status: "downloading" }));
+  stop();
+  f.callbacks.get("updateState")!({ status: "ready", platform: "android", currentVersion: "0.5.4" });
+  expect(listener).toHaveBeenCalledTimes(1);
+  adapter.dispose();
+});
+
+it("rejects malformed native update state instead of exposing it to the UI", async () => {
+  const f = fixture({ getUpdateState: vi.fn(async () => ({ status: "ready", platform: "android", currentVersion: "5.4" })) as never });
+  const adapter = await createAndroidAdapter(f.dependencies);
+  await expect(adapter.native!.getUpdateState!()).rejects.toThrow();
+  adapter.dispose();
+});
+
+it("rejects a native update result that completes after adapter disposal", async () => {
+  let resolve!: (value: unknown) => void;
+  const f = fixture({ getUpdateState: vi.fn(() => new Promise(done => { resolve = done; })) });
+  const adapter = await createAndroidAdapter(f.dependencies);
+  const pending = adapter.native!.getUpdateState!();
+  adapter.dispose();
+  resolve({ status: "idle", platform: "android", currentVersion: "0.5.4" });
+  await expect(pending).rejects.toThrow("cancelled");
 });
 
 it("discards staging after a failed append and rejects oversized files before staging", async () => {
@@ -99,7 +137,7 @@ it("tracks current activity, sanitizes navigation, and removes all event listene
   f.callbacks.get("navigate")!({ contextId: id }); expect(navigate).toHaveBeenCalledWith({ contextId: id });
   stop(); adapter.dispose(); adapter.dispose();
   f.callbacks.get("shareReceived")!({}); expect(share).toHaveBeenCalledTimes(1);
-  expect(f.handles).toHaveLength(4);
+  expect(f.handles).toHaveLength(5);
   for (const handle of f.handles) expect(handle.remove).toHaveBeenCalledTimes(1);
 });
 

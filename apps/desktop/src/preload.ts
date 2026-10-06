@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { DesktopBridge, DesktopCommandRequest, NativeFile } from "@mdc/contracts";
+import { UpdateStateSchema, type DesktopBridge, type DesktopCommandRequest, type NativeFile } from "@mdc/contracts";
 declare const MDC_APP_ORIGIN: string;
 async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
   const result = (await ipcRenderer.invoke(`mdc:${method}`, ...args)) as
@@ -60,6 +60,24 @@ if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
     saveFile: (file: NativeFile) => invoke("saveFile", file),
     getLaunchAtLogin: () => invoke("getLaunchAtLogin"),
     setLaunchAtLogin: (enabled: boolean) => invoke("setLaunchAtLogin", enabled),
+    getUpdateState: () => invoke("getUpdateState"),
+    checkForUpdates: () => invoke("checkForUpdates"),
+    startUpdate: () => invoke("startUpdate"),
+    installUpdate: () => invoke("installUpdate"),
+    onUpdateState: listener => {
+      let active = true;
+      const notify = (_event: unknown, value: unknown) => {
+        if (!active) return;
+        const state = UpdateStateSchema.safeParse(value);
+        if (state.success) listener(state.data);
+      };
+      ipcRenderer.on("mdc:updateState", notify);
+      return () => {
+        if (!active) return;
+        active = false;
+        ipcRenderer.removeListener("mdc:updateState", notify);
+      };
+    },
     getPendingClipboardShares: () => invoke("getPendingClipboardShares"),
     acknowledgeClipboardShare: (id: string) =>
       invoke("acknowledgeClipboardShare", id),

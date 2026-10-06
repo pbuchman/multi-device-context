@@ -53,6 +53,19 @@ For browser checks install `playwright==1.58.0` in a Python environment and run
    set to your origin. Inspect their isolated bundle and SHA-256 checksums. They
    must not contain backend dependencies, credentials or source maps.
 
+The web build writes `version.json` with the exact source commit used for the
+bundle. The server exposes that public value at unauthenticated `GET /api/version`
+with `Cache-Control: no-store`. Browser and desktop clients check it at startup,
+every six hours, and on request from Settings. Android always uses the UI bundled
+in its APK and does not replace it from the host.
+
+Native self-updates are optional. Older desktop and Android installations keep
+working when the update bridge is absent; Settings explains that the current app
+is needed for native update details. If you publish signed native releases, use
+the catalog and release procedure in [updates](updates.md). Keep the UI bundle
+and server compatible across the server-first rollout in the
+[deployment guide](operations/deployment.md).
+
 New accounts start with AI off; enable it in Settings after reading the disclosure.
 For an existing deployment's previously opted-in owner, set the private optional
 `MDC_AI_EXISTING_OWNER_UID` or seed that owner's settings document explicitly.
