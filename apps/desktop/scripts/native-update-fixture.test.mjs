@@ -9,6 +9,7 @@ import { build } from "esbuild";
 import test from "node:test";
 import {
   TEST_FIXTURE_MARKER,
+  assertArtifactTransfers,
   buildTestCatalog,
   hashFile,
   preparePrivateTestWorkspace,
@@ -66,6 +67,52 @@ test("builds an exact local catalog around the immutable selected B bytes", () =
       url: "https://localhost:48765/repository/releases/download/v2.0.0/Multi-Device-Context-2.0.0-win-x64.exe",
       ...updateArtifact,
     },
+  );
+});
+
+test("accepts only interrupted-probe then exact-stream pairs for macOS artifacts", () => {
+  const probe = {
+    method: "GET", path: "/artifact.dmg", bytesServed: 65_536,
+    responseFinished: false, peerClosedEarly: true, sourceError: false,
+  };
+  const complete = {
+    method: "GET", path: "/artifact.dmg", bytesServed: 1_000_000,
+    responseFinished: true, peerClosedEarly: false, sourceError: false,
+  };
+  assert.deepEqual(
+    assertArtifactTransfers([probe, complete, { ...probe, bytesServed: 0 }, complete], 1_000_000, "darwin"),
+    { completed: 2, headerProbes: 2 },
+  );
+  assert.throws(
+    () => assertArtifactTransfers([probe], 1_000_000, "darwin"),
+    /completed|pairs/u,
+  );
+  assert.throws(
+    () => assertArtifactTransfers([probe, { ...complete, bytesServed: 999_999 }], 1_000_000, "darwin"),
+    /non-exact/u,
+  );
+  assert.throws(
+    () => assertArtifactTransfers([probe, { ...probe }], 1_000_000, "darwin"),
+    /completed|complete stream/u,
+  );
+  assert.throws(
+    () => assertArtifactTransfers([{ ...probe, sourceError: true }, complete], 1_000_000, "darwin"),
+    /failed while reading/u,
+  );
+});
+
+test("requires every Windows artifact response to complete the exact payload", () => {
+  const complete = {
+    method: "GET", path: "/artifact.exe", bytesServed: 2_000_000,
+    responseFinished: true, peerClosedEarly: false, sourceError: false,
+  };
+  assert.deepEqual(assertArtifactTransfers([complete], 2_000_000, "win32"), {
+    completed: 1,
+    headerProbes: 0,
+  });
+  assert.throws(
+    () => assertArtifactTransfers([{ ...complete, bytesServed: 65_536, responseFinished: false, peerClosedEarly: true }], 2_000_000, "win32"),
+    /never completed|interrupted/u,
   );
 });
 
