@@ -46,6 +46,8 @@ import { NativeUpdateManager } from "./updates.js";
 import { AwaitedWindowsInstaller, WindowsUpdateBackend, type WindowsUpdater } from "./windows-updates.js";
 import { installDesktopUpdate } from "./update-install.js";
 import { completeCommandAction, registerTrustedIpcHandler } from "./desktop-ipc.js";
+import { desktopFetch } from "./network.js";
+import { fetchUpdateCatalog } from "./update-files.js";
 
 declare const MDC_APP_ORIGIN: string;
 const recovery = pathToFileURL(join(__dirname, "resources/recovery.html")).href;
@@ -164,7 +166,7 @@ async function start(): Promise<void> {
   if (process.platform !== "darwin" && process.platform !== "win32")
     throw new Error("This desktop package does not support native updates on this platform.");
   const backend = process.platform === "darwin"
-    ? new MacUpdateBackend(join(directory, "updates"), shell)
+    ? new MacUpdateBackend(join(directory, "updates"), shell, desktopFetch)
     : new WindowsUpdateBackend(
       new NsisUpdater({
         provider: "generic",
@@ -180,6 +182,7 @@ async function start(): Promise<void> {
     platform: process.platform,
     arch: process.arch,
     currentVersion: app.getVersion(),
+    readCatalog: () => fetchUpdateCatalog(desktopFetch),
     systemVersion: (process as NodeJS.Process & { getSystemVersion(): string }).getSystemVersion(),
     backend,
   });
@@ -293,7 +296,7 @@ function connect(): Promise<void> {
   if (connecting) return connecting;
   connecting = (async () => {
     try {
-      const response = await fetch(`${MDC_APP_ORIGIN}/api/config`, {
+      const response = await desktopFetch(`${MDC_APP_ORIGIN}/api/config`, {
         redirect: "error",
         signal: AbortSignal.timeout(15000),
       });
@@ -307,6 +310,7 @@ function connect(): Promise<void> {
           writeSession: (value) => store.writeSession(value),
           clearSession: () => store.clearSession(),
           openBrowser: (url) => shell.openExternal(url),
+          fetch: desktopFetch,
         });
       for (const callback of callbacks.splice(0)) auth.handleCallback(callback);
       await window!.loadURL(MDC_APP_ORIGIN);
@@ -426,7 +430,7 @@ function wireBridge(): void {
   handle("exchangeInstallationSession", 1, async (token) => {
     if (typeof token !== "string") throw new Error("Invalid sign-in token.");
     if (installationExchange) throw new Error("Session exchange already running.");
-    installationExchange = exchangeInstallationSession(store, MDC_APP_ORIGIN, token);
+    installationExchange = exchangeInstallationSession(store, MDC_APP_ORIGIN, token, desktopFetch);
     try { return await installationExchange; } finally { installationExchange = undefined; }
   });
   handle("openAccessPanel", 1, id => shell.openExternal(accessPanelUrl(MDC_APP_ORIGIN, IdSchema.parse(id))));
