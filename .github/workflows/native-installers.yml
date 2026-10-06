@@ -78,6 +78,8 @@ jobs:
           pnpm vitest run apps/desktop/src
           pnpm --filter @mdc/desktop test:update-harness
       - run: pnpm --filter @mdc/desktop typecheck
+      - name: Build platform installers
+        run: pnpm --filter @mdc/desktop package:${{ matrix.platform }}
       - name: Verify Windows system certificate trust
         if: runner.os == 'Windows'
         env:
@@ -86,8 +88,6 @@ jobs:
         run: |
           $report = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/release/native-system-trust.json'
           pnpm --filter @mdc/desktop exec node scripts/native-system-trust.mjs --output $report
-      - name: Build platform installers
-        run: pnpm --filter @mdc/desktop package:${{ matrix.platform }}
       - name: Verify desktop dependency boundary
         run: pnpm --filter @mdc/desktop exec node scripts/check-package.mjs
       - name: Locate the exact update candidate
