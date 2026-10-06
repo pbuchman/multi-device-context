@@ -53,12 +53,14 @@ function terminateProcessTree(child) {
 function runCapture(command, args, {
   deadlineMs = COMMAND_DEADLINE_MS,
   cwd,
+  env,
   includeStderr = false,
   stderrRedactions = [],
 } = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -226,6 +228,7 @@ async function startHttpsFixture(certificatePath, keyPath) {
 export function childEntrySource() {
   const helperPath = join(dirname(fileURLToPath(import.meta.url)), "native-system-trust-helpers.mjs");
   return `
+process.stderr.write("MDC native system trust child: bootstrap\\n");
 const { app } = require("electron");
 const { writeFileSync } = require("node:fs");
 const { desktopFetch } = require("./src/network.ts");
@@ -282,6 +285,7 @@ app.setPath("userData", userDataPath);
     };
   } finally {
     writeFileSync(resultPath, JSON.stringify(result));
+    app.exit(0);
   }
 })();
 `;
@@ -307,58 +311,46 @@ export async function compileElectronChild(desktopDirectory, outputPath) {
   }), BUILD_DEADLINE_MS, "network.ts acceptance bundle build");
 }
 
-async function launchElectronPhase({ electronPath, bundlePath, fixtureRoot, name, url }) {
+export async function prepareElectronChild(desktopDirectory, applicationDirectory) {
+  await mkdir(applicationDirectory, { recursive: true });
+  await writeFile(join(applicationDirectory, "package.json"), JSON.stringify({
+    name: "mdc-native-system-trust-child",
+    version: "1.0.0",
+    private: true,
+    main: "main.cjs",
+    type: "commonjs",
+  }, null, 2) + "\n");
+  const bundlePath = join(applicationDirectory, "main.cjs");
+  await compileElectronChild(desktopDirectory, bundlePath);
+  return bundlePath;
+}
+
+async function launchElectronPhase({ electronPath, applicationDirectory, fixtureRoot, name, url }) {
   const userData = join(fixtureRoot, `user-data-${name}`);
   const resultPath = join(fixtureRoot, `result-${name}.json`);
   await mkdir(userData, { recursive: true });
-  const { _electron: playwrightElectron } = await import("playwright");
-  let application;
-  let stopPolling = false;
-  try {
-    application = await playwrightElectron.launch({
-      executablePath: electronPath,
-      args: [
-        bundlePath,
-        "--native-system-trust-url", url,
-        "--native-system-trust-user-data", userData,
-        "--native-system-trust-result", resultPath,
-      ],
-      timeout: ELECTRON_DEADLINE_MS,
-    });
-    const resultPromise = (async () => {
-      const deadline = Date.now() + ELECTRON_DEADLINE_MS;
-      while (!stopPolling && Date.now() < deadline) {
-        try {
-          const result = JSON.parse(await readFile(resultPath, "utf8"));
-          assert.equal(typeof result.ok, "boolean", `Electron ${name} phase did not return a result`);
-          return result;
-        } catch (error) {
-          if (error instanceof assert.AssertionError) throw error;
-          await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
-        }
-      }
-      if (stopPolling) throw new Error(`Electron ${name} result polling was cancelled`);
-      throw new Error(`Electron ${name} phase did not write a complete result before its deadline`);
-    })();
-    const closedPromise = application.waitForEvent("close").then(() => {
-      throw new Error(`Electron ${name} phase exited before writing its result (${application.process().exitCode ?? "unknown"})`);
-    });
-    return await Promise.race([resultPromise, closedPromise]);
-  } finally {
-    stopPolling = true;
-    if (application) {
-      let closeTimer;
-      const closed = await Promise.race([
-        application.close().then(() => true, () => false),
-        new Promise(resolvePromise => { closeTimer = setTimeout(() => resolvePromise(false), 10_000); }),
-      ]);
-      clearTimeout(closeTimer);
-      if (!closed) {
-        application.process().kill("SIGKILL");
-        throw new Error(`Electron ${name} phase did not close before its deadline`);
-      }
-    }
-  }
+  const electronEnvironment = {
+    ...process.env,
+    ELECTRON_ENABLE_LOGGING: "1",
+  };
+  delete electronEnvironment.ELECTRON_RUN_AS_NODE;
+  delete electronEnvironment.NODE_OPTIONS;
+  await runCapture(electronPath, [
+    "--enable-logging=stderr",
+    applicationDirectory,
+    "--native-system-trust-url", url,
+    "--native-system-trust-user-data", userData,
+    "--native-system-trust-result", resultPath,
+  ], {
+    deadlineMs: ELECTRON_DEADLINE_MS,
+    cwd: applicationDirectory,
+    env: electronEnvironment,
+    includeStderr: true,
+    stderrRedactions: [fixtureRoot, AUTHORIZATION],
+  });
+  const result = JSON.parse(await readFile(resultPath, "utf8"));
+  assert.equal(typeof result.ok, "boolean", `Electron ${name} phase did not return a result`);
+  return result;
 }
 
 async function nodeFetchCertificateError(url) {
@@ -433,8 +425,8 @@ export async function main(arguments_ = process.argv.slice(2)) {
     await checkpoint("Generated a unique localhost CA and confirmed it was absent from CurrentUser Root");
 
     server = await startHttpsFixture(certificate.serverCertificate, certificate.serverKey);
-    const bundlePath = join(fixtureRoot, "native-system-trust-child.cjs");
-    await compileElectronChild(desktopDirectory, bundlePath);
+    const applicationDirectory = join(fixtureRoot, "electron-child");
+    await prepareElectronChild(desktopDirectory, applicationDirectory);
     await checkpoint("Compiled the production network.ts through the installed esbuild");
 
     const nodeBeforeTrust = await nodeFetchCertificateError(server.localhostUrl);
@@ -446,7 +438,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
     };
     assert(nodeBeforeTrust.certificateError, "Node fetch did not fail with a recognized untrusted-certificate code before installation");
     const beforeTrust = await launchElectronPhase({
-      electronPath, bundlePath, fixtureRoot, name: "before-trust", url: server.localhostUrl,
+      electronPath, applicationDirectory, fixtureRoot, name: "before-trust", url: server.localhostUrl,
     });
     assert.deepEqual(
       beforeTrust,
@@ -466,7 +458,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
     const nodeAfterTrust = await nodeFetchCertificateError(server.localhostUrl);
     assert(nodeAfterTrust.certificateError, "Node fetch did not retain a recognized untrusted-certificate failure after CurrentUser Root changed");
     const trusted = await launchElectronPhase({
-      electronPath, bundlePath, fixtureRoot, name: "trusted", url: server.localhostUrl,
+      electronPath, applicationDirectory, fixtureRoot, name: "trusted", url: server.localhostUrl,
     });
     assert.deepEqual(
       trusted,
@@ -501,7 +493,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
     await checkpoint("desktopFetch used CurrentUser Root for normal and manual redirect paths while Node fetch remained untrusted");
 
     const wrongHost = await launchElectronPhase({
-      electronPath, bundlePath, fixtureRoot, name: "wrong-host", url: server.wrongHostUrl,
+      electronPath, applicationDirectory, fixtureRoot, name: "wrong-host", url: server.wrongHostUrl,
     });
     assert.deepEqual(
       wrongHost,
