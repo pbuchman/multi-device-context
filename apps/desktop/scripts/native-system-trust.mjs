@@ -1,4 +1,6 @@
-// This changes CurrentUser\\Root only on an ephemeral Windows GitHub runner.
+// This changes LocalMachine\\Root only on an ephemeral Windows GitHub runner.
+// The already-administrative runner uses the machine store; CurrentUser Root
+// requires interactive Windows consent. No user workstation is modified.
 // The generated CA is unique to this run, asserted absent first, and removed by
 // exact thumbprint in finally. No production certificate or TLS override is used.
 import assert from "node:assert/strict";
@@ -183,7 +185,7 @@ async function rootCertificateCount(thumbprint) {
     "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
   ], { includeStderr: true, stderrRedactions: [thumbprint] });
   const count = Number(output.trim());
-  assert(Number.isSafeInteger(count) && count >= 0, "Could not count the generated CA in CurrentUser Root");
+  assert(Number.isSafeInteger(count) && count >= 0, "Could not count the generated CA in LocalMachine Root");
   return count;
 }
 
@@ -658,9 +660,9 @@ export async function main(arguments_ = process.argv.slice(2)) {
 
     const openSsl = await findOpenSsl();
     certificate = await generateCertificates(openSsl, fixtureRoot);
-    assert.equal(await rootCertificateCount(certificate.thumbprint), 0, "Generated CA already exists in CurrentUser Root");
+    assert.equal(await rootCertificateCount(certificate.thumbprint), 0, "Generated CA already exists in LocalMachine Root");
     report.cleanup.certificateAbsentInitially = true;
-    await checkpoint("Generated a unique localhost CA and confirmed it was absent from CurrentUser Root");
+    await checkpoint("Generated a unique localhost CA and confirmed it was absent from LocalMachine Root");
 
     server = await startHttpsFixture(certificate.serverCertificate, certificate.serverKey);
     const bundlePath = join(fixtureRoot, "native-system-trust-probe.cjs");
@@ -690,11 +692,11 @@ export async function main(arguments_ = process.argv.slice(2)) {
     // the certificate and still return a failure status.
     certificateStoreTouched = true;
     report.cleanup.certificateRemoved = false;
-    await runCapture("certutil.exe", ["-user", "-addstore", "Root", certificate.caCertificate]);
-    assert.equal(await rootCertificateCount(certificate.thumbprint), 1, "Generated CA was not installed exactly once in CurrentUser Root");
+    await runCapture("certutil.exe", ["-addstore", "Root", certificate.caCertificate], { includeStderr: true, stderrRedactions: [fixtureRoot] });
+    assert.equal(await rootCertificateCount(certificate.thumbprint), 1, "Generated CA was not installed exactly once in LocalMachine Root");
 
     const nodeAfterTrust = await nodeFetchCertificateError(server.localhostUrl);
-    assert(nodeAfterTrust.certificateError, "Node fetch did not retain a recognized untrusted-certificate failure after CurrentUser Root changed");
+    assert(nodeAfterTrust.certificateError, "Node fetch did not retain a recognized untrusted-certificate failure after LocalMachine Root changed");
     const trusted = await launchElectronPhase({
       electronPath, bundlePath, fixtureRoot, name: "trusted", url: server.localhostUrl,
     });
@@ -728,7 +730,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
         authorizationPreserved: true,
       },
     };
-    await checkpoint("desktopFetch used CurrentUser Root for normal and manual redirect paths while Node fetch remained untrusted");
+    await checkpoint("desktopFetch used LocalMachine Root for normal and manual redirect paths while Node fetch remained untrusted");
 
     const wrongHost = await launchElectronPhase({
       electronPath, bundlePath, fixtureRoot, name: "wrong-host", url: server.wrongHostUrl,
@@ -762,11 +764,11 @@ export async function main(arguments_ = process.argv.slice(2)) {
     if (certificate) {
       try {
         const count = await rootCertificateCount(certificate.thumbprint);
-        assert(count <= 1, "Generated CA appeared more than once in CurrentUser Root");
+        assert(count <= 1, "Generated CA appeared more than once in LocalMachine Root");
         if (certificateStoreTouched && count === 1) {
-          await runCapture("certutil.exe", ["-user", "-delstore", "Root", certificate.thumbprint]);
+          await runCapture("certutil.exe", ["-delstore", "Root", certificate.thumbprint], { includeStderr: true, stderrRedactions: [certificate.thumbprint] });
         }
-        assert.equal(await rootCertificateCount(certificate.thumbprint), 0, "Generated CA remains in CurrentUser Root after cleanup");
+        assert.equal(await rootCertificateCount(certificate.thumbprint), 0, "Generated CA remains in LocalMachine Root after cleanup");
         report.cleanup.certificateRemoved = true;
       } catch (error) { cleanupFailures.push(error); }
     }

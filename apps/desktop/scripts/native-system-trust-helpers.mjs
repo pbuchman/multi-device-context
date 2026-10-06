@@ -83,7 +83,7 @@ export function buildWindowsRootCertificateCountScript(value) {
   return [
     "$ErrorActionPreference = 'Stop'",
     `$thumbprint = '${thumbprint}'`,
-    "$store = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)",
+    "$store = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)",
     "try { $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly); $count = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $thumbprint, $false).Count; [Console]::Write([string]$count) } finally { $store.Close() }",
   ].join("; ");
 }

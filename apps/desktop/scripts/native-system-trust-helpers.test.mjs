@@ -84,7 +84,7 @@ test("normalizes only complete SHA-1 certificate thumbprints", () => {
 test("builds a provider-independent read-only Windows certificate store query", () => {
   const script = buildWindowsRootCertificateCountScript("aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd");
   assert.match(script, /\$thumbprint = 'AABBCCDDEEFF00112233445566778899AABBCCDD'/u);
-  assert.match(script, /X509Store\]::new\('Root', [^)]+StoreLocation\]::CurrentUser\)/u);
+  assert.match(script, /X509Store\]::new\('Root', [^)]+StoreLocation\]::LocalMachine\)/u);
   assert.match(script, /OpenFlags\]::ReadOnly/u);
   assert.match(script, /X509FindType\]::FindByThumbprint, \$thumbprint, \$false\)\.Count/u);
   assert.match(script, /\[Console\]::Write\(\[string\]\$count\)/u);
