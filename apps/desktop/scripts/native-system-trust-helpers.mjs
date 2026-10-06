@@ -15,20 +15,23 @@ const CHROMIUM_CERTIFICATE_MESSAGES = new Map([
   ["net::ERR_CERT_COMMON_NAME_INVALID", "ERR_CERT_COMMON_NAME_INVALID"],
 ]);
 
-function errorChain(error) {
+function errorGraph(error) {
   const values = [];
   const seen = new Set();
-  let current = error;
-  while (current && typeof current === "object" && !seen.has(current) && values.length < 8) {
+  const pending = [error];
+  while (pending.length > 0 && values.length < 8) {
+    const current = pending.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
     seen.add(current);
     values.push(current);
-    current = current.cause;
+    pending.push(current.cause);
+    if (Array.isArray(current.errors)) pending.push(...current.errors.slice(0, 8));
   }
   return values;
 }
 
 export function classifyChromiumCertificateError(error) {
-  for (const current of errorChain(error)) {
+  for (const current of errorGraph(error)) {
     if (typeof current.message !== "string") continue;
     const code = CHROMIUM_CERTIFICATE_MESSAGES.get(current.message);
     if (code) return code;
@@ -38,10 +41,22 @@ export function classifyChromiumCertificateError(error) {
 
 export function classifyNodeCertificateError(error) {
   const allowed = new Set(NODE_UNTRUSTED_CERTIFICATE_CODES);
-  for (const current of errorChain(error)) {
+  for (const current of errorGraph(error)) {
     if (typeof current.code === "string" && allowed.has(current.code)) return current.code;
   }
   return undefined;
+}
+
+export function nodeErrorEvidence(error) {
+  return errorGraph(error).flatMap(current => {
+    const name = typeof current.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(current.name)
+      ? current.name
+      : undefined;
+    const code = typeof current.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/u.test(current.code)
+      ? current.code
+      : undefined;
+    return name || code ? [{ ...(name ? { name } : {}), ...(code ? { code } : {}) }] : [];
+  }).slice(0, 8);
 }
 
 export function parseOutputArgument(arguments_) {

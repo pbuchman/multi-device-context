@@ -6,6 +6,7 @@ import {
   buildWindowsRootCertificateCountScript,
   classifyChromiumCertificateError,
   classifyNodeCertificateError,
+  nodeErrorEvidence,
   normalizeThumbprint,
   parseOutputArgument,
   sanitizedFailure,
@@ -41,8 +42,27 @@ test("accepts fixed Node trust-chain codes only through the error cause chain", 
     classifyNodeCertificateError({ cause: { cause: { code: "SELF_SIGNED_CERT_IN_CHAIN" } } }),
     "SELF_SIGNED_CERT_IN_CHAIN",
   );
+  assert.equal(
+    classifyNodeCertificateError(new TypeError("fetch failed", {
+      cause: new AggregateError([Object.assign(new Error("private CA"), { code: "CERT_UNTRUSTED" })]),
+    })),
+    "CERT_UNTRUSTED",
+  );
   assert.equal(classifyNodeCertificateError(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })), undefined);
   assert.equal(classifyNodeCertificateError(new Error("UNABLE_TO_VERIFY_LEAF_SIGNATURE")), undefined);
+});
+
+test("reports only bounded Node error name and code tokens across aggregate causes", () => {
+  const refused = Object.assign(new Error("connect ECONNREFUSED ::1"), { code: "ECONNREFUSED" });
+  const aggregate = new AggregateError([refused, { name: "bad name!", code: "not-allowed" }], "both addresses failed");
+  const failure = new TypeError("fetch failed", { cause: aggregate });
+  assert.deepEqual(nodeErrorEvidence(failure), [
+    { name: "TypeError" },
+    { name: "AggregateError" },
+    { name: "Error", code: "ECONNREFUSED" },
+  ]);
+  const many = new AggregateError(Array.from({ length: 20 }, (_, index) => ({ name: `Error${index}`, code: `CODE_${index}` })));
+  assert.equal(nodeErrorEvidence(many).length, 8);
 });
 
 test("requires one absolute report path and rejects unrelated arguments", () => {

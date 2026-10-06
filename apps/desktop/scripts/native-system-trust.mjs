@@ -14,6 +14,7 @@ import { build } from "esbuild";
 import {
   buildWindowsRootCertificateCountScript,
   classifyNodeCertificateError,
+  nodeErrorEvidence,
   normalizeThumbprint,
   parseOutputArgument,
   sanitizedFailure,
@@ -205,7 +206,7 @@ async function startHttpsFixture(certificatePath, keyPath) {
   });
   await withDeadline(new Promise((resolvePromise, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolvePromise);
+    server.listen({ port: 0, host: "::", ipv6Only: false }, resolvePromise);
   }), COMMAND_DEADLINE_MS, "HTTPS fixture startup", () => server.close());
   const address = server.address();
   assert(address && typeof address === "object", "HTTPS fixture has no TCP address");
@@ -323,9 +324,12 @@ async function nodeFetchCertificateError(url) {
       headers: { Authorization: AUTHORIZATION },
     });
   } catch (error) {
-    return classifyNodeCertificateError(error);
+    return {
+      certificateError: classifyNodeCertificateError(error),
+      evidence: nodeErrorEvidence(error),
+    };
   }
-  return undefined;
+  return { certificateError: undefined, evidence: [] };
 }
 
 async function writeReport(path, report) {
@@ -389,7 +393,13 @@ export async function main(arguments_ = process.argv.slice(2)) {
     await checkpoint("Compiled the production network.ts through the installed esbuild");
 
     const nodeBeforeTrust = await nodeFetchCertificateError(server.localhostUrl);
-    assert(nodeBeforeTrust, "Node fetch did not fail with a recognized untrusted-certificate code before installation");
+    report.phases.beforeTrust = {
+      nodeFetch: {
+        ...(nodeBeforeTrust.certificateError ? { certificateError: nodeBeforeTrust.certificateError } : {}),
+        evidence: nodeBeforeTrust.evidence,
+      },
+    };
+    assert(nodeBeforeTrust.certificateError, "Node fetch did not fail with a recognized untrusted-certificate code before installation");
     const beforeTrust = await launchElectronPhase({
       electronPath, bundlePath, fixtureRoot, name: "before-trust", url: server.localhostUrl,
     });
@@ -398,10 +408,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
       { ok: false, certificateError: "ERR_CERT_AUTHORITY_INVALID" },
       "desktopFetch did not report the synthetic CA as an untrusted authority before installation",
     );
-    report.phases.beforeTrust = {
-      nodeFetch: { certificateError: nodeBeforeTrust },
-      desktopFetch: { certificateError: beforeTrust.certificateError },
-    };
+    report.phases.beforeTrust.desktopFetch = { certificateError: beforeTrust.certificateError };
     await checkpoint("Node fetch and desktopFetch reported certificate-authority failures for the untrusted synthetic CA");
 
     // Mark cleanup as required before invoking certutil because it can import
@@ -412,7 +419,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
     assert.equal(await rootCertificateCount(certificate.thumbprint), 1, "Generated CA was not installed exactly once in CurrentUser Root");
 
     const nodeAfterTrust = await nodeFetchCertificateError(server.localhostUrl);
-    assert(nodeAfterTrust, "Node fetch did not retain a recognized untrusted-certificate failure after CurrentUser Root changed");
+    assert(nodeAfterTrust.certificateError, "Node fetch did not retain a recognized untrusted-certificate failure after CurrentUser Root changed");
     const trusted = await launchElectronPhase({
       electronPath, bundlePath, fixtureRoot, name: "trusted", url: server.localhostUrl,
     });
@@ -434,7 +441,10 @@ export async function main(arguments_ = process.argv.slice(2)) {
     );
     assert(server.requests.every(request => request.authorized), "desktopFetch did not preserve Authorization on the same-origin redirect");
     report.phases.afterTrust = {
-      nodeFetch: { certificateError: nodeAfterTrust },
+      nodeFetch: {
+        certificateError: nodeAfterTrust.certificateError,
+        evidence: nodeAfterTrust.evidence,
+      },
       desktopFetch: {
         status: 200,
         redirectObserved: true,
