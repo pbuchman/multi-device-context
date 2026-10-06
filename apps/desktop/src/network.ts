@@ -6,7 +6,7 @@ import { net } from "electron";
 export const desktopFetch: typeof fetch = async (input, init) => {
   const source = input instanceof URL ? input.href : input;
   const options = { ...init, credentials: "omit" as const, cache: "no-store" as const, bypassCustomProtocolHandlers: true };
-  if (init?.redirect !== "manual") return net.fetch(source, options);
+  if ((init?.redirect ?? (input instanceof Request ? input.redirect : undefined)) !== "manual") return net.fetch(source, options);
 
   // Electron 44 net.fetch rejects manual redirects instead of returning a 3xx.
   // Probe headers with net.request so callers can validate every Location. Abort
@@ -20,6 +20,7 @@ export const desktopFetch: typeof fetch = async (input, init) => {
     const probe = net.request({
       url: request.url, method: request.method, redirect: "manual",
       credentials: "omit", useSessionCookies: false,
+      cache: "no-store", bypassCustomProtocolHandlers: true,
     });
     let settled = false;
     const finish = (value: Response | undefined, error?: unknown) => {
@@ -37,14 +38,14 @@ export const desktopFetch: typeof fetch = async (input, init) => {
         finish(undefined, new Error("Unexpected desktop redirect status."));
         return;
       }
-      finish(new Response(null, { status, headers: { location: destination } }));
+      try { finish(new Response(null, { status, headers: { location: destination } })); }
+      catch (error) { finish(undefined, error); }
     });
     probe.on("response", () => finish(undefined));
     request.signal.addEventListener("abort", abort, { once: true });
     try {
       if (request.signal.aborted) { abort(); return; }
       request.headers.forEach((value, name) => probe.setHeader(name, value));
-      probe.setHeader("Cache-Control", "no-cache");
       probe.end();
     } catch (error) { finish(undefined, error); }
   });

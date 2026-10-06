@@ -34,6 +34,9 @@ export class ConnectionFailure extends Error {
 }
 
 const CODE_MESSAGES = new Map<string, string>([
+  ["RENDERER_EXITED", "The application view stopped unexpectedly. Try again to reopen it."],
+  ["TIMEOUT", "The connection to the shared workspace timed out."],
+  ["CANCELLED", "The connection attempt was cancelled."],
   ...[
     "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
     "CERT_HAS_EXPIRED",
@@ -102,6 +105,9 @@ function recognizedCode(value: unknown): string | undefined {
     if (chromiumCode && CODE_MESSAGES.has(chromiumCode)) return chromiumCode;
   }
   const message = readString(value as object, "message");
+  const name = readString(value as object, "name");
+  if (name === "TimeoutError") return "TIMEOUT";
+  if (name === "AbortError") return "CANCELLED";
   const chromiumCode = message?.match(/^net::([A-Z0-9_]+)$/u)?.[1];
   return chromiumCode && CODE_MESSAGES.has(chromiumCode)
     ? chromiumCode

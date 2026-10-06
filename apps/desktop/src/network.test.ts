@@ -35,6 +35,7 @@ it("never inherits renderer cookies or cached responses and preserves manual red
   expect(result.headers.get("location")).toBe("https://release-assets.githubusercontent.com/file");
   expect(electron.request).toHaveBeenCalledWith({
     url: "https://github.com/example/release", method: "GET", redirect: "manual", credentials: "omit", useSessionCookies: false,
+    cache: "no-store", bypassCustomProtocolHandlers: true,
   });
   expect(probe.abort).toHaveBeenCalledOnce();
   expect(electron.fetch).not.toHaveBeenCalled();
@@ -73,4 +74,14 @@ it("propagates certificate failures without falling back or overriding verificat
   electron.fetch.mockRejectedValue(failure);
   await expect(desktopFetch("https://untrusted.example.test")).rejects.toBe(failure);
   expect(electron.fetch).toHaveBeenCalledOnce();
+});
+
+it("honors manual redirect policy carried by a Request input", async () => {
+  const probe = Object.assign(new EventEmitter(), { setHeader: vi.fn(), abort: vi.fn(), end: vi.fn() });
+  probe.end.mockImplementation(() => probe.emit("redirect", 302, "GET", "https://example.test/next"));
+  electron.request.mockReturnValue(probe);
+  const result = await desktopFetch(new Request("https://example.test", { redirect: "manual" }));
+  expect(result.status).toBe(302);
+  expect(result.headers.get("location")).toBe("https://example.test/next");
+  expect(electron.fetch).not.toHaveBeenCalled();
 });

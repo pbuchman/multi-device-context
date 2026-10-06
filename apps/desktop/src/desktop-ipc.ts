@@ -10,6 +10,27 @@ interface IpcMainLike {
   handle(channel: string, listener: (event: InvokeEventLike, ...args: unknown[]) => unknown): void;
 }
 
+export function registerRecoveryIpcHandler(
+  ipcMain: IpcMainLike,
+  options: {
+    method: string;
+    getWindow(): WindowLike | undefined;
+    recoveryUrl: string;
+    action(): unknown;
+    errorMessage(error: unknown): string;
+  },
+): void {
+  ipcMain.handle(`mdc:${options.method}`, async (event, ...args: unknown[]) => {
+    const window = options.getWindow();
+    if (!window || event.sender !== window.webContents ||
+      event.senderFrame !== window.webContents.mainFrame ||
+      event.senderFrame?.url !== options.recoveryUrl || args.length)
+      return { ok: false, message: "Invalid reconnect request." };
+    try { return { ok: true, value: await options.action() }; }
+    catch (error) { return { ok: false, message: options.errorMessage(error) }; }
+  });
+}
+
 export function registerTrustedIpcHandler(
   ipcMain: IpcMainLike,
   options: {

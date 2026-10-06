@@ -124,3 +124,10 @@ describe("recovery connection diagnostics", () => {
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(latest);
   });
 });
+
+it("distinguishes timeout, cancellation and renderer exit without copying details", async () => {
+  const { diagnostics } = await fixture();
+  await expect(diagnostics.record("configuration", new DOMException("private URL", "TimeoutError"))).resolves.toMatchObject({ code: "TIMEOUT" });
+  await expect(diagnostics.record("workspace", new DOMException("private URL", "AbortError"))).resolves.toMatchObject({ code: "CANCELLED" });
+  await expect(diagnostics.record("renderer", { code: "RENDERER_EXITED", reason: "private details" })).resolves.toMatchObject({ code: "RENDERER_EXITED" });
+});
