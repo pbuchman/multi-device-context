@@ -231,8 +231,15 @@ const { writeFileSync } = require("node:fs");
 const { desktopFetch } = require("./src/network.ts");
 const { classifyChromiumCertificateError } = require(${JSON.stringify(helperPath)});
 
-const [url, userDataPath, resultPath] = process.argv.slice(2);
-if (!url || !userDataPath || !resultPath) throw new Error("Missing native system trust child arguments");
+function argument(name) {
+  const index = process.argv.indexOf(name);
+  if (index < 0 || !process.argv[index + 1]) throw new Error(\`Missing \${name}\`);
+  return process.argv[index + 1];
+}
+
+const url = argument("--native-system-trust-url");
+const userDataPath = argument("--native-system-trust-user-data");
+const resultPath = argument("--native-system-trust-result");
 app.setPath("userData", userDataPath);
 (async () => {
   let result;
@@ -275,7 +282,6 @@ app.setPath("userData", userDataPath);
     };
   } finally {
     writeFileSync(resultPath, JSON.stringify(result));
-    app.exit(0);
   }
 })();
 `;
@@ -305,15 +311,54 @@ async function launchElectronPhase({ electronPath, bundlePath, fixtureRoot, name
   const userData = join(fixtureRoot, `user-data-${name}`);
   const resultPath = join(fixtureRoot, `result-${name}.json`);
   await mkdir(userData, { recursive: true });
-  await runCapture(electronPath, [
-    bundlePath,
-    url,
-    userData,
-    resultPath,
-  ], { deadlineMs: ELECTRON_DEADLINE_MS, cwd: dirname(bundlePath) });
-  const result = JSON.parse(await readFile(resultPath, "utf8"));
-  assert.equal(typeof result.ok, "boolean", `Electron ${name} phase did not return a result`);
-  return result;
+  const { _electron: playwrightElectron } = await import("playwright");
+  let application;
+  let stopPolling = false;
+  try {
+    application = await playwrightElectron.launch({
+      executablePath: electronPath,
+      args: [
+        bundlePath,
+        "--native-system-trust-url", url,
+        "--native-system-trust-user-data", userData,
+        "--native-system-trust-result", resultPath,
+      ],
+      timeout: ELECTRON_DEADLINE_MS,
+    });
+    const resultPromise = (async () => {
+      const deadline = Date.now() + ELECTRON_DEADLINE_MS;
+      while (!stopPolling && Date.now() < deadline) {
+        try {
+          const result = JSON.parse(await readFile(resultPath, "utf8"));
+          assert.equal(typeof result.ok, "boolean", `Electron ${name} phase did not return a result`);
+          return result;
+        } catch (error) {
+          if (error instanceof assert.AssertionError) throw error;
+          await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+        }
+      }
+      if (stopPolling) throw new Error(`Electron ${name} result polling was cancelled`);
+      throw new Error(`Electron ${name} phase did not write a complete result before its deadline`);
+    })();
+    const closedPromise = application.waitForEvent("close").then(() => {
+      throw new Error(`Electron ${name} phase exited before writing its result (${application.process().exitCode ?? "unknown"})`);
+    });
+    return await Promise.race([resultPromise, closedPromise]);
+  } finally {
+    stopPolling = true;
+    if (application) {
+      let closeTimer;
+      const closed = await Promise.race([
+        application.close().then(() => true, () => false),
+        new Promise(resolvePromise => { closeTimer = setTimeout(() => resolvePromise(false), 10_000); }),
+      ]);
+      clearTimeout(closeTimer);
+      if (!closed) {
+        application.process().kill("SIGKILL");
+        throw new Error(`Electron ${name} phase did not close before its deadline`);
+      }
+    }
+  }
 }
 
 async function nodeFetchCertificateError(url) {
