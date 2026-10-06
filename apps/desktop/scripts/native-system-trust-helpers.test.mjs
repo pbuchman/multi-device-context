@@ -2,10 +2,47 @@ import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import {
+  NODE_UNTRUSTED_CERTIFICATE_CODES,
+  classifyChromiumCertificateError,
+  classifyNodeCertificateError,
   normalizeThumbprint,
   parseOutputArgument,
   sanitizedFailure,
 } from "./native-system-trust-helpers.mjs";
+
+test("classifies only the exact Chromium certificate failures used by the harness", () => {
+  assert.equal(
+    classifyChromiumCertificateError(new TypeError("net::ERR_CERT_AUTHORITY_INVALID")),
+    "ERR_CERT_AUTHORITY_INVALID",
+  );
+  assert.equal(
+    classifyChromiumCertificateError(new TypeError("fetch failed", {
+      cause: new Error("net::ERR_CERT_COMMON_NAME_INVALID"),
+    })),
+    "ERR_CERT_COMMON_NAME_INVALID",
+  );
+  assert.equal(classifyChromiumCertificateError(new Error("net::ERR_CONNECTION_REFUSED")), undefined);
+  assert.equal(classifyChromiumCertificateError(new Error("ERR_CERT_AUTHORITY_INVALID")), undefined);
+  assert.equal(classifyChromiumCertificateError(new Error("Request failed: net::ERR_CERT_AUTHORITY_INVALID")), undefined);
+  assert.equal(classifyChromiumCertificateError(new Error("net::ERR_CERT_AUTHORITY_INVALID_EXTRA")), undefined);
+  assert.equal(classifyChromiumCertificateError({ code: "net::ERR_CERT_AUTHORITY_INVALID" }), undefined);
+});
+
+test("accepts fixed Node trust-chain codes only through the error cause chain", () => {
+  assert(Object.isFrozen(NODE_UNTRUSTED_CERTIFICATE_CODES));
+  assert.equal(
+    classifyNodeCertificateError(new TypeError("fetch failed", {
+      cause: Object.assign(new Error("private CA"), { code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" }),
+    })),
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  );
+  assert.equal(
+    classifyNodeCertificateError({ cause: { cause: { code: "SELF_SIGNED_CERT_IN_CHAIN" } } }),
+    "SELF_SIGNED_CERT_IN_CHAIN",
+  );
+  assert.equal(classifyNodeCertificateError(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })), undefined);
+  assert.equal(classifyNodeCertificateError(new Error("UNABLE_TO_VERIFY_LEAF_SIGNATURE")), undefined);
+});
 
 test("requires one absolute report path and rejects unrelated arguments", () => {
   const report = resolve("release/native-system-trust.json");

@@ -20,6 +20,8 @@ export const desktopFetch: typeof fetch = (input, init) => net.fetch(input insta
     assert.match(bundle, /native-system-trust-fixture/u);
     assert.match(bundle, /desktopFetch/u);
     assert.match(bundle, /require\("electron"\)/u);
+    assert.match(bundle, /ERR_CERT_AUTHORITY_INVALID/u);
+    assert.match(bundle, /redirect: "manual"/u);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

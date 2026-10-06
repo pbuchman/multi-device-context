@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import {
+  classifyNodeCertificateError,
   normalizeThumbprint,
   parseOutputArgument,
   sanitizedFailure,
@@ -19,7 +20,7 @@ import {
 
 const COMMAND_DEADLINE_MS = 20_000;
 const FETCH_DEADLINE_MS = 10_000;
-const ELECTRON_DEADLINE_MS = 30_000;
+const ELECTRON_DEADLINE_MS = 45_000;
 const BUILD_DEADLINE_MS = 30_000;
 const AUTHORIZATION = "Bearer native-system-trust-fixture";
 
@@ -212,10 +213,12 @@ async function startHttpsFixture(certificatePath, keyPath) {
 }
 
 export function childEntrySource() {
+  const helperPath = join(dirname(fileURLToPath(import.meta.url)), "native-system-trust-helpers.mjs");
   return `
 const { app } = require("electron");
 const { writeFileSync } = require("node:fs");
 const { desktopFetch } = require("./src/network.ts");
+const { classifyChromiumCertificateError } = require(${JSON.stringify(helperPath)});
 
 const [url, userDataPath, resultPath] = process.argv.slice(2);
 if (!url || !userDataPath || !resultPath) throw new Error("Missing native system trust child arguments");
@@ -229,16 +232,35 @@ app.setPath("userData", userDataPath);
       signal: AbortSignal.timeout(${FETCH_DEADLINE_MS}),
       headers: { Authorization: ${JSON.stringify(AUTHORIZATION)} },
     });
+    const body = await response.text();
+    const manualRedirect = await desktopFetch(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(${FETCH_DEADLINE_MS}),
+      headers: { Authorization: ${JSON.stringify(AUTHORIZATION)} },
+    });
+    const manualLocation = manualRedirect.headers.get("location");
+    const manualStream = await desktopFetch(new URL("/ok", url), {
+      redirect: "manual",
+      signal: AbortSignal.timeout(${FETCH_DEADLINE_MS}),
+      headers: { Authorization: ${JSON.stringify(AUTHORIZATION)} },
+    });
     result = {
       ok: true,
       status: response.status,
-      body: await response.text(),
+      body,
+      manualRedirect: {
+        status: manualRedirect.status,
+        locationPath: manualLocation ? new URL(manualLocation, url).pathname : undefined,
+      },
+      manualStream: {
+        status: manualStream.status,
+        body: await manualStream.text(),
+      },
     };
   } catch (error) {
     result = {
       ok: false,
-      errorName: error && typeof error.name === "string" ? error.name : "Error",
-      errorCode: error && typeof error.code === "string" ? error.code : undefined,
+      certificateError: classifyChromiumCertificateError(error),
     };
   } finally {
     writeFileSync(resultPath, JSON.stringify(result));
@@ -283,17 +305,17 @@ async function launchElectronPhase({ electronPath, bundlePath, fixtureRoot, name
   return result;
 }
 
-async function nodeFetchRejects(url) {
+async function nodeFetchCertificateError(url) {
   try {
     await fetch(url, {
       redirect: "follow",
       signal: AbortSignal.timeout(FETCH_DEADLINE_MS),
       headers: { Authorization: AUTHORIZATION },
     });
-  } catch {
-    return true;
+  } catch (error) {
+    return classifyNodeCertificateError(error);
   }
-  return false;
+  return undefined;
 }
 
 async function writeReport(path, report) {
@@ -356,13 +378,21 @@ export async function main(arguments_ = process.argv.slice(2)) {
     await compileElectronChild(desktopDirectory, bundlePath);
     await checkpoint("Compiled the production network.ts through the installed esbuild");
 
-    assert.equal(await nodeFetchRejects(server.localhostUrl), true, "Node fetch trusted the synthetic CA before installation");
+    const nodeBeforeTrust = await nodeFetchCertificateError(server.localhostUrl);
+    assert(nodeBeforeTrust, "Node fetch did not fail with a recognized untrusted-certificate code before installation");
     const beforeTrust = await launchElectronPhase({
       electronPath, bundlePath, fixtureRoot, name: "before-trust", url: server.localhostUrl,
     });
-    assert.equal(beforeTrust.ok, false, "desktopFetch trusted the synthetic CA before installation");
-    report.phases.beforeTrust = { nodeFetch: "rejected", desktopFetch: "rejected" };
-    await checkpoint("Node fetch and desktopFetch rejected the untrusted synthetic CA");
+    assert.deepEqual(
+      beforeTrust,
+      { ok: false, certificateError: "ERR_CERT_AUTHORITY_INVALID" },
+      "desktopFetch did not report the synthetic CA as an untrusted authority before installation",
+    );
+    report.phases.beforeTrust = {
+      nodeFetch: { certificateError: nodeBeforeTrust },
+      desktopFetch: { certificateError: beforeTrust.certificateError },
+    };
+    await checkpoint("Node fetch and desktopFetch reported certificate-authority failures for the untrusted synthetic CA");
 
     // Mark cleanup as required before invoking certutil because it can import
     // the certificate and still return a failure status.
@@ -371,33 +401,50 @@ export async function main(arguments_ = process.argv.slice(2)) {
     await runCapture("certutil.exe", ["-user", "-addstore", "Root", certificate.caCertificate]);
     assert.equal(await rootCertificateCount(certificate.thumbprint), 1, "Generated CA was not installed exactly once in CurrentUser Root");
 
-    assert.equal(await nodeFetchRejects(server.localhostUrl), true, "Node fetch unexpectedly used CurrentUser Root");
+    const nodeAfterTrust = await nodeFetchCertificateError(server.localhostUrl);
+    assert(nodeAfterTrust, "Node fetch did not retain a recognized untrusted-certificate failure after CurrentUser Root changed");
     const trusted = await launchElectronPhase({
       electronPath, bundlePath, fixtureRoot, name: "trusted", url: server.localhostUrl,
     });
     assert.deepEqual(
-      { ok: trusted.ok, status: trusted.status, body: trusted.body },
-      { ok: true, status: 200, body: "system trust ok" },
-      "desktopFetch did not complete the trusted HTTPS redirect",
+      trusted,
+      {
+        ok: true,
+        status: 200,
+        body: "system trust ok",
+        manualRedirect: { status: 302, locationPath: "/ok" },
+        manualStream: { status: 200, body: "system trust ok" },
+      },
+      "desktopFetch did not complete the trusted normal and manual redirect paths",
     );
     assert.deepEqual(
       server.requests.map(request => request.path),
-      ["/redirect", "/ok"],
-      "The trusted desktop request did not follow the expected redirect",
+      ["/redirect", "/ok", "/redirect", "/ok", "/ok"],
+      "The trusted desktop requests did not perform the expected follow, probe, and stream sequence",
     );
     assert(server.requests.every(request => request.authorized), "desktopFetch did not preserve Authorization on the same-origin redirect");
     report.phases.afterTrust = {
-      nodeFetch: "rejected",
-      desktopFetch: { status: 200, redirected: true, authorizationPreserved: true },
+      nodeFetch: { certificateError: nodeAfterTrust },
+      desktopFetch: {
+        status: 200,
+        redirectObserved: true,
+        manualRedirectStatus: 302,
+        manualStreamStatus: 200,
+        authorizationPreserved: true,
+      },
     };
-    await checkpoint("desktopFetch used CurrentUser Root while Node fetch remained untrusted");
+    await checkpoint("desktopFetch used CurrentUser Root for normal and manual redirect paths while Node fetch remained untrusted");
 
     const wrongHost = await launchElectronPhase({
       electronPath, bundlePath, fixtureRoot, name: "wrong-host", url: server.wrongHostUrl,
     });
-    assert.equal(wrongHost.ok, false, "desktopFetch accepted a certificate whose SAN excludes 127.0.0.1");
-    report.phases.wrongHost = { desktopFetch: "rejected" };
-    await checkpoint("desktopFetch continued to reject the trusted certificate on the wrong host");
+    assert.deepEqual(
+      wrongHost,
+      { ok: false, certificateError: "ERR_CERT_COMMON_NAME_INVALID" },
+      "desktopFetch did not report the SAN mismatch for 127.0.0.1",
+    );
+    report.phases.wrongHost = { desktopFetch: { certificateError: wrongHost.certificateError } };
+    await checkpoint("desktopFetch reported a common-name failure for the trusted certificate on the wrong host");
   } catch (error) {
     primaryFailure = error;
     report.failure = sanitizedFailure(error, [fixtureRoot]);

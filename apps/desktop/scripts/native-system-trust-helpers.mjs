@@ -1,6 +1,49 @@
 import assert from "node:assert/strict";
 import { isAbsolute, resolve } from "node:path";
 
+export const NODE_UNTRUSTED_CERTIFICATE_CODES = Object.freeze([
+  "CERT_UNTRUSTED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+]);
+
+const CHROMIUM_CERTIFICATE_MESSAGES = new Map([
+  ["net::ERR_CERT_AUTHORITY_INVALID", "ERR_CERT_AUTHORITY_INVALID"],
+  ["net::ERR_CERT_COMMON_NAME_INVALID", "ERR_CERT_COMMON_NAME_INVALID"],
+]);
+
+function errorChain(error) {
+  const values = [];
+  const seen = new Set();
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current) && values.length < 8) {
+    seen.add(current);
+    values.push(current);
+    current = current.cause;
+  }
+  return values;
+}
+
+export function classifyChromiumCertificateError(error) {
+  for (const current of errorChain(error)) {
+    if (typeof current.message !== "string") continue;
+    const code = CHROMIUM_CERTIFICATE_MESSAGES.get(current.message);
+    if (code) return code;
+  }
+  return undefined;
+}
+
+export function classifyNodeCertificateError(error) {
+  const allowed = new Set(NODE_UNTRUSTED_CERTIFICATE_CODES);
+  for (const current of errorChain(error)) {
+    if (typeof current.code === "string" && allowed.has(current.code)) return current.code;
+  }
+  return undefined;
+}
+
 export function parseOutputArgument(arguments_) {
   assert.deepEqual(
     arguments_.filter(value => value === "--output"),
