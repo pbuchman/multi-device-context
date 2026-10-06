@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.6 — Desktop system certificate trust
+
+- Desktop configuration, sign-in, session requests and update downloads now use Electron's Chromium network stack, including system certificate trust and proxy settings. This fixes connections intercepted by a trusted corporate CA such as Zscaler.
+- The reconnect screen shows a bounded error code. A private local diagnostic records only fixed messages, connection stage, application version and time, without tokens, URLs or account details.
+- Recovery retries report a failed connection accurately. TLS verification, installer checksums and redirect restrictions remain enforced.
+- Windows CI verifies rejection before a synthetic CA is trusted, successful access after adding it to the system store, and continued rejection of a wrong-host certificate.
+
 ## 0.5.5 — Preview updates
 
 - GitHub Preview updates with explicit downloads, verified installers, progress,
