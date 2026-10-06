@@ -97,5 +97,6 @@ if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
 } else if (process.isMainFrame && location.protocol === "file:") {
   contextBridge.exposeInMainWorld("contextRecovery", {
     retry: () => invoke("retry"),
+    getConnectionDiagnostic: () => invoke("getConnectionDiagnostic"),
   });
 }

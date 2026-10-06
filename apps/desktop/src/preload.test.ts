@@ -97,3 +97,32 @@ it("validates update states, exposes parameterless update actions, and unsubscri
   expect(listener).toHaveBeenCalledOnce();
   expect(electron.removeListener).toHaveBeenCalledWith("mdc:updateState", notify);
 });
+
+it("exposes only the recovery bridge to a file document", async () => {
+  vi.stubGlobal("process", { ...process, isMainFrame: true });
+  vi.stubGlobal("location", { origin: "null", protocol: "file:" });
+  vi.stubGlobal("MDC_APP_ORIGIN", "https://app.example.test");
+  const diagnostic = {
+    stage: "workspace",
+    code: "ERR_CERT_AUTHORITY_INVALID",
+    message: "The secure connection certificate could not be verified.",
+    occurredAt: "2026-10-06T10:00:00.000Z",
+    appVersion: "0.5.5",
+  };
+  electron.invoke.mockImplementation(async (method: string) => ({
+    ok: true,
+    value: method === "mdc:getConnectionDiagnostic" ? diagnostic : undefined,
+  }));
+
+  await import("./preload.js");
+  expect(electron.expose).toHaveBeenCalledTimes(1);
+  expect(electron.expose.mock.calls[0]![0]).toBe("contextRecovery");
+  const bridge = electron.expose.mock.calls[0]![1] as {
+    retry(): Promise<void>;
+    getConnectionDiagnostic(): Promise<typeof diagnostic>;
+  };
+  await expect(bridge.getConnectionDiagnostic()).resolves.toEqual(diagnostic);
+  expect(electron.invoke).toHaveBeenLastCalledWith("mdc:getConnectionDiagnostic");
+  await bridge.retry();
+  expect(electron.invoke).toHaveBeenLastCalledWith("mdc:retry");
+});
