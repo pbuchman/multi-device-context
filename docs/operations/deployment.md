@@ -7,6 +7,11 @@ fragment. Firestore and the private attachment bucket live in a dedicated GCP
 project. Keep any shared tunnel, unrelated Caddy sites, and other services outside
 this deployment's ownership.
 
+Agents should also follow the [Multi Device Context deployment skill](../../.agents/skills/mdc-deployment/SKILL.md).
+A hosted rollout is deployed only when its live `uiBuild` and asset bytes match
+the reviewed commit; acceptance also checks the reported behavior after reload
+when that browser check is available. A native installer version alone is not proof.
+
 ## Prepare private configuration
 
 Provision the cloud resources with the [infrastructure guide](../../infra/terraform/README.md).
