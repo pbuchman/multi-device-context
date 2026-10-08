@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountProfileStore, ProfileLoadError } from "./account-profile.js";
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 it("recovers a temporary failure automatically and keeps profile in this session only", async () => {
   vi.useFakeTimers();
   const load = vi.fn().mockRejectedValueOnce(new ProfileLoadError("Temporary failure", true)).mockResolvedValue({ name: "Alice", email: "alice@example.test" });
@@ -9,6 +9,16 @@ it("recovers a temporary failure automatically and keeps profile in this session
   await profile.refresh(); expect(profile.getState().status).toBe("unavailable");
   await vi.advanceTimersByTimeAsync(2000);
   expect(profile.getSnapshot()).toEqual({ uid: "owner", name: "Alice", email: "alice@example.test" });
+  expect(load).toHaveBeenCalledTimes(2);profile.dispose();
+});
+it("recovers a failed profile when connectivity returns after the retry window", async () => {
+  const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+  const load = vi.fn().mockRejectedValueOnce(new ProfileLoadError("Offline", true)).mockResolvedValue({ name: "Alice" });
+  const profile = new AccountProfileStore("owner", load, () => true);
+  await profile.refresh();
+  now.mockReturnValue(3_001);
+  window.dispatchEvent(new Event("online"));
+  await vi.waitFor(() => expect(profile.getState().status).toBe("ready"));
   expect(load).toHaveBeenCalledTimes(2);profile.dispose();
 });
 it("coalesces retries and ignores an old account's late response", async () => {

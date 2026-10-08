@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.7 — Android account lookup compatibility
+
+- Account lookup no longer depends on newer WebView AbortSignal static methods;
+  cancellation and timeout remain enforced through AbortController.
+- Account failures distinguish network, timeout, session, authorization and API
+  response errors, with a safe local attempt reference and HTTP status when available.
+- The workspace no longer reports **Synced** while account details are unavailable
+  or still loading. Retry does not require signing out or discarding local work.
+- Android retains the package and release signing identity, with version code 12.
+  New installations retain their restricted device access.
+
 ## 0.5.6 — Desktop system certificate trust
 
 - Desktop configuration, sign-in, session requests and update downloads now use Electron's Chromium network stack, including system certificate trust and proxy settings. This fixes connections intercepted by a trusted corporate CA such as Zscaler.

@@ -1088,7 +1088,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const pendingWrites = syncStreams.contexts.pending || syncStreams.items.pending;
   const fromCache = syncStreams.contexts.fromCache || syncStreams.items.fromCache;
   const syncLabel = refreshing ? "Refreshing…" : deletionFailed ? "Deletion needs retry" : deletionCount > 0 || activeDeletions > 0 ? "Deleting…" : queueCount > 0 || pendingWrites ? `Syncing ${Math.max(queueCount, 1)} item${Math.max(queueCount, 1) === 1 ? "" : "s"}`
-    : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete" : "Synced";
+    : fromCache ? "Offline history" : syncStreams.contexts.failed || syncStreams.items.failed || syncStreams.deleted.failed || !syncStreams.deleted.confirmed || syncStreams.deletedItems.failed || !syncStreams.deletedItems.confirmed ? "Sync incomplete"
+    : profileState.status === "loading" ? "Loading account details…" : profileState.status === "unavailable" ? "Account details unavailable" : "Synced";
 
   const openChatMenu = (context: ContextRecord, anchor: ChatMenuAnchor, opener: HTMLElement) => {
     if (!accountBlocked) setChatMenu({ context, anchor, opener, owner: services });

@@ -6,11 +6,12 @@ import { AccountDetails } from "./account-details.js";
 import { AccountProfileStore, ProfileLoadError } from "./account-profile.js";
 afterEach(cleanup);
 it("shows the failure and retries without a logout or a page reload", async () => {
-  const load=vi.fn().mockRejectedValueOnce(new ProfileLoadError("Provider lookup failed",false)).mockResolvedValue({name:"Alice",email:"alice@example.test"});
+  const load=vi.fn().mockRejectedValueOnce(new ProfileLoadError("Provider lookup failed",false,0,{category:"service",endpoint:"GET /api/profile",reference:"profile-0123456789abcdef",status:502})).mockResolvedValue({name:"Alice",email:"alice@example.test"});
   const profile=new AccountProfileStore("owner",load,()=>true);
   await profile.refresh();
   const view=render(<AccountDetails viewer={profile.getSnapshot()} profile={profile}/>);
   expect(screen.getByText("Provider lookup failed")).toBeTruthy();
+  expect(screen.getByText(/service · HTTP 502 · Local reference profile-0123456789abcdef/)).toBeTruthy();
   await userEvent.click(screen.getByRole("button",{name:"Retry account details"}));
   await waitFor(()=>expect(screen.getByRole("button",{name:"Refresh account details"})).toBeTruthy());
   view.rerender(<AccountDetails viewer={profile.getSnapshot()} profile={profile}/>);

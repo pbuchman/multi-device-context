@@ -17,7 +17,7 @@ export function AccountDetails({ viewer, profile }: { viewer: Viewer; profile?: 
   const loading = state.status === "loading";
   return <>
     <div className="profile-row"><AccountAvatar name={viewer.name} avatarUrl={viewer.avatarUrl} large /><span><strong>{viewer.name}</strong><small>{viewer.email ?? (loading ? "Loading account…" : "Account details unavailable")}</small></span></div>
-    {state.status === "unavailable" ? <p className="dialog-description" role="status">{state.message}</p> : null}
+    {state.status === "unavailable" ? <p className="dialog-description" role="status">{state.message}{state.diagnostic ? <><br /><small>Diagnostic: {state.diagnostic.category}{state.diagnostic.status ? ` · HTTP ${state.diagnostic.status}` : ""} · Local reference {state.diagnostic.reference}</small></> : null}</p> : null}
     {profile?.refresh ? <button type="button" className="dialog-action" aria-busy={loading} disabled={loading || state.retryAt > now} onClick={() => void profile.refresh!()}>{loading ? "Loading account details…" : state.status === "unavailable" ? "Retry account details" : "Refresh account details"}</button> : null}
   </>;
 }

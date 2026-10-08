@@ -67,6 +67,28 @@ function services(initialContexts = contexts) {
 
 const snap = (records = contexts) => ({ records, fromCache:false, hasPendingWrites:false });
 const deferred = <T,>() => { let resolve!: (value:T)=>void; const promise=new Promise<T>(r=>{resolve=r}); return {promise,resolve}; };
+it("does not report Synced until account details are ready", async () => {
+ const t=services();let state={status:"loading" as "loading"|"unavailable"|"ready",retryAt:0};let notify=()=>{};
+ t.value.profile={getSnapshot:()=>t.value.viewer,subscribe:listener=>{notify=listener;return()=>{}},getState:()=>state};
+ render(createElement(ContextWorkspace,{services:t.value}));
+ expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ expect(screen.getAllByText("Loading account details…").length).toBeGreaterThan(0);
+ act(()=>{state={status:"unavailable",retryAt:0};notify()});
+ expect(screen.queryAllByText("Synced")).toHaveLength(0);
+ expect(screen.getAllByText("Account details unavailable").length).toBeGreaterThan(0);
+ act(()=>{state={status:"ready",retryAt:0};notify()});
+ expect(screen.queryAllByText("Synced").length).toBeGreaterThan(0);
+});
+it.each([
+ ["Offline history", (t: ReturnType<typeof services>) => t.emitContexts([{...contexts[0]!,syncState:"cached"}],{fromCache:true,hasPendingWrites:false})],
+ ["Sync incomplete", (t: ReturnType<typeof services>) => {t.value.cloud.subscribeDeletedContexts=(_emit,fail)=>{fail(new Error("offline"));return()=>{}}}],
+] as const)("keeps %s ahead of an unavailable account profile", async (expected, configure) => {
+ const t=services();const state={status:"unavailable" as const,retryAt:0};
+ t.value.profile={getSnapshot:()=>t.value.viewer,subscribe:()=>()=>{},getState:()=>state};configure(t);
+ render(createElement(ContextWorkspace,{services:t.value}));
+ await vi.waitFor(()=>expect(screen.getAllByText(expected).length).toBeGreaterThan(0));
+ expect(screen.queryAllByText("Synced")).toHaveLength(0);
+});
 it("manual refresh suppresses realtime new-context auto selection", async () => {
  const t=services(); const d=deferred<CloudSnapshot<ContextRecord>>();
  t.value.cloud.refreshContexts=()=>d.promise; t.value.cloud.refreshDeletedContexts=async()=>[];
