@@ -3,7 +3,9 @@ import type { Viewer } from "./model.js";
 
 type LoadedAccountProfile = AccountProfile & { avatarUrl?: string | undefined };
 
-export type ProfileState = { status: "loading" | "ready" | "unavailable"; message?: string; retryAt: number };
+export type ProfileFailureCategory = "network" | "timeout" | "session" | "authorization" | "invalid_response" | "service";
+export type ProfileDiagnostic = { category: ProfileFailureCategory; endpoint: "GET /api/profile"; reference: string; status?: number };
+export type ProfileState = { status: "loading" | "ready" | "unavailable"; message?: string; retryAt: number; diagnostic?: ProfileDiagnostic };
 export type SessionProfile = {
   getSnapshot(): Viewer;
   subscribe(listener: () => void): () => void;
@@ -11,7 +13,7 @@ export type SessionProfile = {
   refresh?(): Promise<void>;
 };
 export class ProfileLoadError extends Error {
-  constructor(message: string, readonly retryable = true, readonly retryAfterMs = 0) { super(message); }
+  constructor(message: string, readonly retryable = true, readonly retryAfterMs = 0, readonly diagnostic?: ProfileDiagnostic) { super(message); }
 }
 /** In-memory account details; bounded recovery never delays opening the workspace. */
 export class AccountProfileStore implements SessionProfile {
@@ -61,7 +63,7 @@ export class AccountProfileStore implements SessionProfile {
         const error = cause instanceof ProfileLoadError ? cause : new ProfileLoadError("Could not load account details. Check your connection and retry.");
         this.#canRecover = error.retryable;
         const delay = Math.max(error.retryAfterMs, error.retryable ? 2000 : 0);
-        this.#state = { status: "unavailable", message: error.message, retryAt: Date.now() + delay };
+        this.#state = { status: "unavailable", message: error.message, retryAt: Date.now() + delay, ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}) };
         if (error.retryable && retries > 0) this.#timer = setTimeout(() => { void this.#run(retries - 1); }, delay);
       }
       if (this.#live()) {

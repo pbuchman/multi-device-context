@@ -17,11 +17,15 @@ import { SessionManager } from "./auth.js";
 sdk.signInWithCustomToken.mockImplementation(async () => ({ user: { uid: "uid", email: "user@example.test", getIdToken: sdk.getIdToken } }));
 const device = { id: "11111111-1111-4111-8111-111111111111", name: "Phone", platform: "android", mode: "own", version: 1, createdAt: 1, updatedAt: 1 };
 const config = { appOrigin: "https://app.example.test", auth0: { domain: "login.example.test", audience: "api", webClientId: "web", nativeClientId: "native", connection: "google-oauth2" }, firebase: { apiKey: "public", authDomain: "demo.firebaseapp.com", projectId: "demo", storageBucket: "demo" }, limits: { maxTextBytes: 262144, maxAttachmentBytes: 104857600 }, bridgeVersion: 1 };
-afterEach(() => { vi.clearAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 function fixture(kind: "android" | "desktop" = "android") {
   const native = { getAccessToken: vi.fn(async () => "access"), signOut: vi.fn(async () => {}) };
   const platform = { kind, native, exchangeSession: vi.fn(async () => ({ uid: "uid", customToken: "custom", device })), dispose: vi.fn() } as unknown as PlatformAdapter;
-  const fetcher = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input).endsWith("/api/session") ? { uid: "uid", customToken: "custom", device } : config)));
+  const fetcher = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const url = String(input);
+    return new Response(JSON.stringify(url.endsWith("/api/session") ? { uid: "uid", customToken: "custom", device }
+      : url.endsWith("/api/profile") ? { name: "User", email: "user@example.test" } : config));
+  });
   const manager = new SessionManager(fetcher, { platformFactory: async () => platform, mobile: kind === "android", appOrigin: config.appOrigin });
   return { manager, native, platform, fetcher };
 }
@@ -78,11 +82,17 @@ it("disposes Firebase when custom-token sign-in fails", async () => {
 
 it("keeps the browser session usable if profile lookup fails", async () => {
   const f = fixture();
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  f.fetcher.mockImplementation(async input => String(input).endsWith("/api/profile")
+    ? Promise.reject(new TypeError("private network failure"))
+    : new Response(JSON.stringify(String(input).endsWith("/api/session") ? { uid: "uid", customToken: "custom", device } : config)));
   sdk.createAuth0Client.mockResolvedValueOnce({ isAuthenticated: async () => true, getTokenSilently: async () => "access", getUser: async () => { throw new Error("profile unavailable"); } });
   const manager = new SessionManager(f.fetcher, { platformFactory: async () => ({ kind: "browser", dispose() {} }) });
   const session = (await manager.login())!;
-  expect(session.viewer.name).toBe("Signed in");
+  await vi.waitFor(() => expect(session.profile!.getState!().status).toBe("unavailable"));
+  expect(session.viewer.name).toBe("Signed in");expect(session.device.mode).toBe("own");
   expect(await session.accessToken()).toBe("firebase-access");
+  expect(warn).toHaveBeenCalledWith("Account profile lookup failed", expect.objectContaining({ category: "network", endpoint: "GET /api/profile" }));
   expect(sdk.deleteApp).not.toHaveBeenCalled();
 });
 
@@ -182,6 +192,107 @@ it.each(["android", "desktop"] as const)("loads %s profile in the background usi
   await vi.waitFor(() => expect(session.profile!.getSnapshot()).toEqual({ uid: "uid", name: "Alice", email: "alice@example.test" }));
   expect(listener).toHaveBeenCalledTimes(1);
   expect(f.fetcher).toHaveBeenCalledWith(expect.stringContaining("/api/profile"), expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer access" }) }));
+  await session.signOut();
+});
+it.each(["restore", "login"] as const)("loads the Android profile through %s when the WebView lacks static AbortSignal helpers", async method => {
+  const any = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+  const timeout = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+  Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
+  Object.defineProperty(AbortSignal, "timeout", { configurable: true, value: undefined });
+  const f = fixture();
+  f.fetcher.mockImplementation(async input => new Response(JSON.stringify(String(input).endsWith("/api/profile") ? { name: "Compatible", email: "compatible@example.test" } : config)));
+  try {
+    const session = (await f.manager[method]())!;
+    await vi.waitFor(() => expect(session.profile!.getSnapshot().email).toBe("compatible@example.test"));
+    expect(f.fetcher.mock.calls.some(([url]) => String(url).endsWith("/api/profile"))).toBe(true);
+    await session.signOut();
+  } finally {
+    if (any) Object.defineProperty(AbortSignal, "any", any);
+    if (timeout) Object.defineProperty(AbortSignal, "timeout", timeout);
+  }
+});
+it("classifies a timeout while reading the profile body and retains the received HTTP status", async () => {
+  vi.useFakeTimers();
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const f = fixture();
+  f.fetcher.mockImplementation(async (input, init) => {
+    if (!String(input).endsWith("/api/profile")) return new Response(JSON.stringify(config));
+    const response = new Response(null, { status: 200 });
+    Object.defineProperty(response, "json", { value: () => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("private timeout", "AbortError")), { once: true });
+    }) });
+    return response;
+  });
+  const session = (await f.manager.restore())!;
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(session.profile!.getState!().diagnostic).toEqual({ category: "timeout", endpoint: "GET /api/profile", reference: expect.any(String), status: 200 });
+  expect(warn).toHaveBeenCalledWith("Account profile lookup failed", session.profile!.getState!().diagnostic);
+  await session.signOut();
+});
+it("does not diagnose or publish a profile body that arrives after session disposal", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const f = fixture();let finish!: (value: unknown) => void;
+  f.fetcher.mockImplementation(async input => {
+    if (!String(input).endsWith("/api/profile")) return new Response(JSON.stringify(config));
+    const response = new Response(null, { status: 200 });
+    Object.defineProperty(response, "json", { value: () => new Promise(resolve => { finish = resolve; }) });
+    return response;
+  });
+  const session = (await f.manager.restore())!;
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  await session.signOut();
+  finish({ private: "late profile" });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(session.viewer).toEqual({ uid: "uid", name: "Signed in" });
+  expect(warn).not.toHaveBeenCalled();
+});
+it("does not mark a partial native profile ready when the endpoint rejects the session", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const f = fixture("desktop");
+  f.platform.native!.getAccountProfile = vi.fn(async () => ({ uid: "uid", name: "Partial name" }));
+  f.fetcher.mockImplementation(async input => String(input).endsWith("/api/profile")
+    ? new Response(JSON.stringify({ error: "private" }), { status: 401 }) : new Response(JSON.stringify(config)));
+  const session = (await f.manager.restore())!;
+  await vi.waitFor(() => expect(session.profile!.getState!().status).toBe("unavailable"));
+  expect(session.profile!.getState!().diagnostic?.category).toBe("session");
+  expect(session.viewer).toEqual({ uid: "uid", name: "Signed in" });
+  await session.signOut();
+});
+it("does not mark a partial native profile ready when the endpoint times out", async () => {
+  vi.useFakeTimers();vi.spyOn(console, "warn").mockImplementation(() => {});
+  const f = fixture("desktop");
+  f.platform.native!.getAccountProfile = vi.fn(async () => ({ uid: "uid", name: "Partial name" }));
+  f.fetcher.mockImplementation(async (input, init) => {
+    if (!String(input).endsWith("/api/profile")) return new Response(JSON.stringify(config));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("private timeout", "AbortError")), { once: true }));
+  });
+  const session = (await f.manager.restore())!;
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(session.profile!.getState!().status).toBe("unavailable");
+  expect(session.profile!.getState!().diagnostic?.category).toBe("timeout");
+  expect(session.viewer).toEqual({ uid: "uid", name: "Signed in" });
+  await session.signOut();
+});
+it.each([
+  ["network", () => Promise.reject(new TypeError("private network detail")), undefined],
+  ["session", () => Promise.resolve(new Response(JSON.stringify({ error: "private" }), { status: 401 })), 401],
+  ["authorization", () => Promise.resolve(new Response(JSON.stringify({ code: "profile_provider_rejected", private: "upstream" }), { status: 502 })), 502],
+  ["service", () => Promise.resolve(new Response(JSON.stringify({ code: "profile_provider_unavailable", private: "upstream" }), { status: 502 })), 502],
+  ["invalid_response", () => Promise.resolve(new Response(JSON.stringify({ private: "profile body" }))), 200],
+  ["invalid_response", () => Promise.resolve(new Response("null", { status: 502 })), 502],
+  ["invalid_response", () => Promise.resolve(new Response("not-json", { status: 502 })), 502],
+  ["invalid_response", () => Promise.resolve(new Response("{}")), 200],
+] as const)("records a sanitized %s profile diagnostic", async (category, profileResponse, status) => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const f = fixture();
+  f.fetcher.mockImplementation(async input => String(input).endsWith("/api/profile") ? profileResponse() : new Response(JSON.stringify(config)));
+  const session = (await f.manager.restore())!;
+  await vi.waitFor(() => expect(session.profile!.getState!().status).toBe("unavailable"));
+  const diagnostic = session.profile!.getState!().diagnostic;
+  expect(diagnostic).toEqual({ category, endpoint: "GET /api/profile", reference: expect.stringMatching(/^profile-[a-f0-9]{16}$/), ...(status ? { status } : {}) });
+  expect(warn).toHaveBeenCalledWith("Account profile lookup failed", diagnostic);
+  expect(JSON.stringify(warn.mock.calls)).not.toMatch(/private network detail|upstream|profile body/);
+  expect(session.device.mode).toBe("own");expect(await session.accessToken()).toBe("firebase-access");
   await session.signOut();
 });
 it("ignores a profile arriving after signout and never exposes a UID as the name", async () => {

@@ -1,4 +1,4 @@
-import { AccountProfileStore, ProfileLoadError, profileOwner, type SessionProfile } from "./account-profile.js";
+import { AccountProfileStore, ProfileLoadError, profileOwner, type ProfileDiagnostic, type ProfileFailureCategory, type SessionProfile } from "./account-profile.js";
 export type { SessionProfile } from "./account-profile.js";
 import { auth0ClientOptions } from "./browser-identity.js";
 import { apiUrl, createApiUrl, mobileBuild } from "./api.js";
@@ -13,6 +13,35 @@ import type { Viewer } from "./model.js";
 
 type Fetcher = typeof fetch;
 type SessionResponse = DeviceSession;
+
+function profileReference(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return `profile-${Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function profileFailure(
+  category: ProfileFailureCategory,
+  message: string,
+  options: { status?: number; retryable?: boolean; retryAfterMs?: number } = {},
+): ProfileLoadError {
+  const diagnostic: ProfileDiagnostic = { category, endpoint: "GET /api/profile", reference: profileReference(), ...(options.status === undefined ? {} : { status: options.status }) };
+  console.warn("Account profile lookup failed", diagnostic);
+  return new ProfileLoadError(message, options.retryable ?? true, options.retryAfterMs ?? 0, diagnostic);
+}
+
+function profileDeadline(source: AbortSignal, milliseconds: number) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort();
+  if (source.aborted) cancel();
+  else source.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, milliseconds);
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    dispose: () => { clearTimeout(timer); source.removeEventListener("abort", cancel); },
+  };
+}
 
 function nativeAvatarDataUrl(avatar: NativeFile | undefined): string | undefined {
   if (!avatar || avatar.bytes.byteLength > 524_288 || !["image/avif", "image/webp", "image/png", "image/jpeg"].includes(avatar.contentType)) return undefined;
@@ -243,12 +272,12 @@ export class SessionManager {
       try {
         if (platform.native?.getAccountProfile) {
           const result = await platform.native.getAccountProfile();
-          if (result.uid !== exchanged.uid) throw new ProfileLoadError("Account details do not match this session. Sign in again.", false);
+          if (result.uid !== exchanged.uid) throw profileFailure("authorization", "Account details do not match this session. Sign in again.", { retryable: false });
           known = AccountProfileSchema.parse({ ...(result.name ? { name: result.name } : {}), ...(result.email ? { email: result.email } : {}) });
         } else if (!platform.native) {
           const result = await this.#auth0?.getUser?.();
           if (result?.sub) {
-            if (await profileOwner(config.auth0.domain, result.sub) !== exchanged.uid) throw new ProfileLoadError("Account details do not match this session. Sign in again.", false);
+            if (await profileOwner(config.auth0.domain, result.sub) !== exchanged.uid) throw profileFailure("authorization", "Account details do not match this session. Sign in again.", { retryable: false });
             known = AccountProfileSchema.parse({ ...(result.name?.trim() ? { name: result.name.trim() } : {}), ...(result.email?.trim() ? { email: result.email.trim() } : {}) });
           }
         }
@@ -256,30 +285,67 @@ export class SessionManager {
       current();
       if (signal.aborted) throw new Error("Profile request cancelled");
       if (known.name && known.email) return known;
+      let token: string;
       try {
-        const token = firstProfileRequest ? accessToken : platform.native ? await platform.native.getAccessToken(false) : await browserToken(this.#auth0!);
+        token = firstProfileRequest ? accessToken : platform.native ? await platform.native.getAccessToken(false) : await browserToken(this.#auth0!);
         firstProfileRequest = false;
         current();
+      } catch (error) {
+        if (error instanceof ProfileLoadError) throw error;
+        if (signal.aborted) throw new Error("Profile request cancelled");
+        throw profileFailure("session", "Your session could not be refreshed. Sign in again.", { retryable: false });
+      }
+      const deadline = profileDeadline(signal, 10_000);
+      let responseStatus: number | undefined;
+      try {
         const response = await this.fetcher(createApiUrl(config.appOrigin)("/api/profile"), {
-          headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-          cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+          headers: { authorization: `Bearer ${token}`, accept: "application/json" }, cache: "no-store", signal: deadline.signal,
         });
+        responseStatus = response.status;
+        current();
+        if (signal.aborted) throw new Error("Profile request cancelled");
+        let body: unknown;
+        try {
+          body = await response.json();
+        } catch (error) {
+          if (signal.aborted || deadline.timedOut() || !(error instanceof Error) || error.name !== "SyntaxError") throw error;
+          throw profileFailure("invalid_response", "The account service returned an invalid response. You can keep using your chats.", { status: response.status });
+        }
+        if (signal.aborted || deadline.timedOut()) throw new Error("Profile request cancelled");
+        current();
         if (!response.ok) {
-          const data = await response.json().catch(() => ({})) as { code?: string };
-          const rejected = response.status === 401 || data.code === "profile_provider_rejected";
-          const mismatch = data.code === "profile_identity_mismatch";
+          if (!body || typeof body !== "object" || Array.isArray(body)) {
+            throw profileFailure("invalid_response", "The account service returned an invalid response. You can keep using your chats.", { status: response.status });
+          }
+          const code = "code" in body && typeof body.code === "string" ? body.code : undefined;
+          const expired = response.status === 401;
+          const rejected = response.status === 403 || code === "profile_provider_rejected";
+          const mismatch = code === "profile_identity_mismatch";
+          const invalid = mismatch || code === "profile_empty" || code === "profile_invalid_response";
+          const category: ProfileFailureCategory = expired ? "session" : rejected || mismatch ? "authorization" : invalid ? "invalid_response" : "service";
           const message = mismatch ? "Account details do not match this session. Sign in again."
+            : expired ? "Your session has expired. Sign in again."
             : rejected ? "Your sign-in provider could not verify the account lookup. Retry or sign in again."
-            : data.code === "profile_empty" ? "Your sign-in provider did not return a name or email."
-            : response.status === 429 || data.code === "profile_provider_rate_limited" ? "Account lookup is temporarily rate limited. Please wait before retrying."
+            : code === "profile_empty" ? "Your sign-in provider did not return a name or email."
+            : response.status === 429 || code === "profile_provider_rate_limited" ? "Account lookup is temporarily rate limited. Please wait before retrying."
             : "The account service is temporarily unavailable. You can keep using your chats.";
           const seconds = Number(response.headers.get("retry-after"));
-          throw new ProfileLoadError(message, !rejected && !mismatch && data.code !== "profile_empty", Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0);
+          throw profileFailure(category, message, {
+            status: response.status, retryable: !expired && !rejected && !invalid,
+            retryAfterMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0,
+          });
         }
-        return { ...known, ...AccountProfileSchema.parse(await response.json()) };
+        const parsed = AccountProfileSchema.safeParse(body);
+        if (!parsed.success || (!parsed.data.name && !parsed.data.email)) throw profileFailure("invalid_response", "The account service returned an invalid response. You can keep using your chats.", { status: response.status });
+        return { ...known, ...parsed.data };
       } catch (error) {
-        if (known.name || known.email) return known;
-        throw error;
+        if (error instanceof ProfileLoadError) throw error;
+        if (signal.aborted) throw new Error("Profile request cancelled");
+        throw profileFailure(deadline.timedOut() ? "timeout" : "network", deadline.timedOut()
+          ? "The account service took too long to respond. Check your connection and retry."
+          : "Could not reach the account service. Check your connection and retry.", { ...(responseStatus === undefined ? {} : { status: responseStatus }) });
+      } finally {
+        deadline.dispose();
       }
     }, () => !this.#disposed && generation === this.#generation && this.#session === session,
     platform.native?.getAccountAvatar ? async signal => {

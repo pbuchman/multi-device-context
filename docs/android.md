@@ -76,7 +76,7 @@ increase it for each update. It is not automatically incremented. Keep the
 application ID and signing key unchanged.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=11
+export MDC_ANDROID_VERSION_CODE=12
 pnpm --filter @mdc/mobile android:release
 ```
 
@@ -311,3 +311,29 @@ not established by source, unit, lint, or synthetic CI checks alone:
 - first launch, login launch, and sharing on the intended Windows and macOS
   target machines; and
 - DUDU 7 installation and behavior.
+
+## Account lookup diagnostics
+
+Account details use `GET /api/profile` with the Auth0 access token after the
+installation-bound backend session and Firebase sign-in. Android fetches these
+details in the WebView; a completed browser sign-in does not prove that this
+separate request succeeded. New installations still have `own` context access.
+An empty list is not evidence that contexts were deleted.
+
+Version 0.5.7 removes the profile request's dependency on `AbortSignal.any()` and
+`AbortSignal.timeout()`. Older WebViews can otherwise throw before issuing the
+HTTP request, producing the same generic account-details error as a network
+failure. The request retains cancellation and a bounded deadline.
+
+If lookup fails, use **Retry account details** and retain only the displayed
+safe diagnostic category, HTTP status when available, and local attempt
+reference. The reference identifies a client lookup attempt, not a server trace.
+Do not collect or publish tokens, account fields, context contents, or raw logs.
+A missing HTTP status means that no HTTP response was available; it does not by
+itself identify a server error. Account lookup errors keep the workspace status
+from claiming **Synced**, while existing drafts and device restrictions remain.
+
+Physical DUDU7 confirmation requires its actual WebView version and authenticated
+lookup result, then an in-place signed upgrade with draft retention and a
+separate synthetic-context synchronization check. Capability regression tests
+and emulator checks are not a substitute for that physical acceptance.
