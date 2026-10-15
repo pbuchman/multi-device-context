@@ -83,6 +83,43 @@ describe("agent persistence and title races", () => {
     expect((await store.getContext(owner, id)).title).toBe("Polski raport wdrożenia");
     vi.unstubAllGlobals();
   });
+  it("defaults the enabled title worker to GPT-6 Luna with its request policy", async () => {
+    const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: true });
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "Default worker title" } }] })));
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      const id = randomUUID(); await store.writeItem(owner, id, { id: randomUUID(), content }, true);
+      await new TitleWorker(db, "test-only", undefined, settings).process(store.context(owner, id));
+      const options = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1];
+      expect(JSON.parse(options.body as string)).toEqual({
+        model: "openai/gpt-6-luna", provider: { zdr: true }, max_tokens: 80,
+        reasoning: { effort: "none" }, prompt_cache_options: { mode: "explicit" },
+        messages: [{ role: "system", content: expect.any(String) }, { role: "user", content: content.text }],
+      });
+      expect((await store.getContext(owner, id)).title).toBe("Default worker title");
+      expect((await store.getContext(owner, id)).titleState).toBe("generated");
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("keeps the fallback title after three transient provider failures", async () => {
+    const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: true });
+    const fetcher = vi.fn(async () => new Response("transient provider failure", { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      const id = randomUUID(); await store.writeItem(owner, id, { id: randomUUID(), content }, true);
+      const original = (await store.getContext(owner, id)).title;
+      const ref = store.context(owner, id), worker = new TitleWorker(db, "test-only", undefined, settings);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await worker.process(ref);
+        const current = (await ref.get()).data()!;
+        expect(current.titleAttempts).toBe(attempt);
+        expect(current.titleState).toBe(attempt < 3 ? "pending" : "fallback");
+        expect(current.title).toBe(original);
+        if (attempt < 3) await ref.update({ titleLeaseUntil: 0 });
+      }
+      await worker.process(ref);
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("does not send image bytes deleted while the title worker is reading them", async () => {
     const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: true });
     const id = randomUUID(), itemId = randomUUID(), bytes = new Uint8Array([137, 80, 78, 71]);

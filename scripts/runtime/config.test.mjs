@@ -94,8 +94,8 @@ test('projects the runtime key privately and refuses symlink destinations', asyn
 
 test('accepts optional inference-only settings without broadening environment access', () => {
   const p = payload(); p.environment.MDC_OPENROUTER_API_KEY = 'private-test-placeholder';
-  p.environment.MDC_TITLE_MODEL = 'openai/gpt-4.1-nano';
-  assert.equal(parseRuntimePackage(p, bootstrap).environment.MDC_TITLE_MODEL, 'openai/gpt-4.1-nano');
+  p.environment.MDC_TITLE_MODEL = 'openai/gpt-6-luna';
+  assert.equal(parseRuntimePackage(p, bootstrap).environment.MDC_TITLE_MODEL, 'openai/gpt-6-luna');
   p.environment.MDC_OPENROUTER_MANAGEMENT_KEY = 'must-not-run-in-server';
   assert.throws(() => parseRuntimePackage(p, bootstrap), /package/i);
 });

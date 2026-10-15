@@ -47,6 +47,23 @@ New or missing account settings keep AI titles disabled; the existing-owner
 variable may preserve one previously opted-in account and must never enable every
 account.
 
+The title worker defaults to `openai/gpt-6-luna`. An explicit `MDC_TITLE_MODEL`
+overrides that default, so a pinned runtime package containing an older model
+must be updated to use Luna. For exactly `openai/gpt-6-luna`, requests send
+`reasoning: { effort: "none" }` and `prompt_cache_options: { mode: "explicit" }`,
+with no cache breakpoints or temperature. Other model overrides retain
+`temperature: 0.2` and omit those Luna-specific options. Every title request
+requires `provider: { zdr: true }`, allows at most 80 output tokens, and times out
+after 8 seconds. Transient failures receive at most three total attempts;
+exhausted attempts or rejected output retain the fallback title.
+
+AI titles use at most the first 8,000 text characters. Supported PNG, JPEG, WebP,
+and GIF attachments up to 5 MiB also send their private image bytes after upload
+completion; other attachments use only their name and content-type metadata.
+The prompt uses the content's language, or English when unclear, and requires a
+plain title of 2–6 words and at most 60 characters. Consent checks, manual title
+protection, and deletion checks remain in force throughout the worker job.
+
 Create a mode-0600 bootstrap file in a mode-0700 directory:
 
 ```json
