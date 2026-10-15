@@ -83,7 +83,7 @@ describe("agent persistence and title races", () => {
     expect((await store.getContext(owner, id)).title).toBe("Polski raport wdrożenia");
     vi.unstubAllGlobals();
   });
-  it("defaults the enabled title worker to GPT-6 Luna with its request policy", async () => {
+  it("defaults the enabled title worker to Gemini Flash Lite with its request policy", async () => {
     const settings = new AccountSettings(db); await settings.set(owner, { aiTitlesEnabled: true });
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "Default worker title" } }] })));
     vi.stubGlobal("fetch", fetcher);
@@ -92,8 +92,9 @@ describe("agent persistence and title races", () => {
       await new TitleWorker(db, "test-only", undefined, settings).process(store.context(owner, id));
       const options = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1];
       expect(JSON.parse(options.body as string)).toEqual({
-        model: "openai/gpt-6-luna", provider: { zdr: true }, max_tokens: 80,
-        reasoning: { effort: "none" }, prompt_cache_options: { mode: "explicit" },
+        model: "google/gemini-3.1-flash-lite",
+        provider: { zdr: true, only: ["google-vertex/global"], allow_fallbacks: false },
+        max_tokens: 80, temperature: 0.2, reasoning: { enabled: false },
         messages: [{ role: "system", content: expect.any(String) }, { role: "user", content: content.text }],
       });
       expect((await store.getContext(owner, id)).title).toBe("Default worker title");

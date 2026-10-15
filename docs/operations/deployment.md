@@ -47,15 +47,16 @@ New or missing account settings keep AI titles disabled; the existing-owner
 variable may preserve one previously opted-in account and must never enable every
 account.
 
-The title worker defaults to `openai/gpt-6-luna`. An explicit `MDC_TITLE_MODEL`
+The title worker defaults to `google/gemini-3.1-flash-lite`. An explicit `MDC_TITLE_MODEL`
 overrides that default, so a pinned runtime package containing an older model
-must be updated to use Luna. For exactly `openai/gpt-6-luna`, requests send
-`reasoning: { effort: "none" }` and `prompt_cache_options: { mode: "explicit" }`,
-with no cache breakpoints or temperature. Other model overrides retain
-`temperature: 0.2` and omit those Luna-specific options. Every title request
-requires `provider: { zdr: true }`, allows at most 80 output tokens, and times out
-after 8 seconds. Transient failures receive at most three total attempts;
-exhausted attempts or rejected output retain the fallback title.
+must be updated to use Gemini Flash Lite. For exactly `google/gemini-3.1-flash-lite`,
+requests send `reasoning: { enabled: false }` and pin the provider to
+`{ zdr: true, only: ["google-vertex/global"], allow_fallbacks: false }`.
+Other model overrides use `provider: { zdr: true }` and omit the Gemini-specific
+reasoning and routing options. Every title request uses `temperature: 0.2`, allows
+at most 80 output tokens, and times out after 8 seconds. Transient failures receive
+at most three total attempts; exhausted attempts or rejected output retain the
+fallback title.
 
 AI titles use at most the first 8,000 text characters. Supported PNG, JPEG, WebP,
 and GIF attachments up to 5 MiB also send their private image bytes after upload
