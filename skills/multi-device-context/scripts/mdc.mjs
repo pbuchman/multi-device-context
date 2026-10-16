@@ -11,17 +11,23 @@ class InputError extends Error {}
 const args = process.argv.slice(2);
 const command = args.shift();
 const flags = {};
+let flagError;
 for (let i = 0; i < args.length;) {
   if (args[i].startsWith('--')) {
     const name = args.splice(i, 1)[0].slice(2);
-    flags[name] = name === 'once' || name === 'code' ? true : args.splice(i, 1)[0];
+    if (Object.hasOwn(flags, name)) flagError = `Duplicate --${name} option`;
+    if (name === 'once' || name === 'code' || name === 'help') flags[name] = true;
+    else if (!args[i] || args[i].startsWith('--')) { flags[name] = undefined; flagError = `Supply a value for --${name}`; }
+    else flags[name] = args.splice(i, 1)[0];
   } else i++;
 }
 const help = `MDC agent CLI (Node.js 22+)
 Config: MDC_CONFIG or ~/.config/multi-device-context/agent.json (mode 0600).
 JSON: {"url":"https://your-host","key":"your-agent-key"}
 Commands:
-  list [--after CURSOR] [--limit 50]
+  devices
+  list [--device NAME | --device-id UUID] [--after CURSOR] [--limit 50]
+  latest [--device NAME | --device-id UUID] [--limit 50]
   get CONTEXT_ID
   watch [--after CURSOR] [--once]
   create --text TEXT [--code] [--id UUID] [--item-id UUID]
@@ -32,33 +38,65 @@ Commands:
   download CONTEXT_ID ITEM_ID OUTPUT
 Use --file FILE instead of --text for long text. '-' reads stdin.
 Watch emits JSON lines; save cursor only after processing the event.
+Latest retrieves the newest context by creation time and every item, not the most recently appended conversation.
+Device names match exactly after trimming and ignoring case; ambiguous names require --device-id.
 Delete is permanent. Keys have full access to their owner's contexts.`;
 if (!command || command === 'help' || flags.help) { console.log(help); process.exit(0); }
 try {
+  if (flagError) throw new InputError(flagError);
+  const hasDeviceName = Object.hasOwn(flags, 'device');
+  const hasDeviceId = Object.hasOwn(flags, 'device-id');
+  if (hasDeviceName && hasDeviceId) throw new InputError('--device and --device-id are mutually exclusive');
+  if ((hasDeviceName || hasDeviceId) && command !== 'list' && command !== 'latest') throw new InputError('Device filters are supported only by list and latest');
+  if (hasDeviceName && !flags.device.trim()) throw new InputError('Supply a non-empty --device name');
+  if (command === 'latest' && Object.hasOwn(flags, 'after')) throw new InputError('latest does not accept --after');
   const file = process.env.MDC_CONFIG ?? join(homedir(), '.config/multi-device-context/agent.json');
   const info = await stat(file);
   if (process.platform !== 'win32' && ((info.mode & 0o077) || info.uid !== process.getuid())) throw new InputError('Config must be owned by you with mode 0600');
   const config = JSON.parse(await readFile(file, 'utf8'));
   const url = new URL(config.url);
   if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^mdc_/.test(config.key)) throw new InputError('Invalid agent configuration');
-  const base = url.origin + '/api/agent/v1/contexts';
+  const base = url.origin + '/api/agent/v1';
   const id = value => { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? '')) throw new InputError('A valid UUID is required'); return value; };
-  async function request(path = '', method = 'GET', body, binary = false) {
+  async function apiRequest(path, method = 'GET', body, binary = false) {
     const response = await fetch(base + path, { method, redirect: 'error', signal: AbortSignal.timeout(binary ? 300_000 : 30_000),
       headers: { authorization: `Bearer ${config.key}`, ...(body ? { 'content-type': binary ? 'application/octet-stream' : 'application/json' } : {}) },
       ...(body ? { body: binary ? body : JSON.stringify(body) } : {}), ...(binary && body ? { duplex: 'half' } : {}) });
     if (!response.ok) throw new InputError(`API returned ${response.status}${response.status === 429 ? '; retry after ' + response.headers.get('retry-after') + ' seconds' : ''}`);
     return response;
   }
+  const request = (path = '', ...options) => apiRequest('/contexts' + path, ...options);
   const output = value => console.log(JSON.stringify(value));
-  const page = async (path, after) => (await request(path + '?' + new URLSearchParams({ limit: String(flags.limit ?? 50), ...(after ? { after } : {}) }))).json();
-  if (command === 'list') output(await page('', flags.after));
-  else if (command === 'get') {
-    const context = await (await request('/' + id(args[0]))).json();
-    const items = []; let after;
-    do { const result = await page(`/${args[0]}/items`, after); items.push(...result.records); after = result.hasMore ? result.cursor : undefined; } while (after);
-    output({ context, items });
-  } else if (command === 'watch') {
+  const page = async (path, after, extra = {}) => (await request(path + '?' + new URLSearchParams({ limit: String(flags.limit ?? 50), ...(after ? { after } : {}), ...extra }))).json();
+  async function getContext(contextId) {
+    const context = await (await request('/' + id(contextId))).json();
+    const items = []; const cursors = new Set(); let after;
+    do {
+      const result = await page(`/${contextId}/items`, after);
+      items.push(...result.records);
+      after = result.hasMore ? result.cursor : undefined;
+      if (result.hasMore && (typeof after !== 'string' || !after || cursors.has(after))) throw new InputError('Item pagination did not advance; conversation retrieval is incomplete');
+      if (after) cursors.add(after);
+    } while (after);
+    return { context, items };
+  }
+  async function deviceFilter() {
+    if (hasDeviceId) return { deviceId: id(flags['device-id']) };
+    if (!hasDeviceName) return {};
+    const { records } = await (await apiRequest('/devices')).json();
+    const name = flags.device.trim().toLowerCase();
+    const matches = records.filter(device => device.name.trim().toLowerCase() === name);
+    if (!matches.length) throw new InputError('Device name not found; run devices to see available names');
+    if (matches.length > 1) throw new InputError(`Device name is ambiguous; use --device-id with one of: ${matches.map(device => id(device.id)).join(', ')}`);
+    return { deviceId: id(matches[0].id) };
+  }
+  if (command === 'devices') output(await (await apiRequest('/devices')).json());
+  else if (command === 'list') output(await page('', flags.after, await deviceFilter()));
+  else if (command === 'latest') {
+    const result = await page('', undefined, { ...await deviceFilter(), order: 'desc', limit: '1' });
+    output(result.records.length ? await getContext(result.records[0].id) : { context: null, items: [], message: 'No contexts found' });
+  } else if (command === 'get') output(await getContext(args[0]));
+  else if (command === 'watch') {
     let after = flags.after;
     while (true) {
       const result = await page('', after);

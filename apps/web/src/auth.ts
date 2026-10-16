@@ -1,3 +1,4 @@
+import { browserDeviceName } from "./device-name.js";
 import { AccountProfileStore, ProfileLoadError, profileOwner, type ProfileDiagnostic, type ProfileFailureCategory, type SessionProfile } from "./account-profile.js";
 export type { SessionProfile } from "./account-profile.js";
 import { auth0ClientOptions } from "./browser-identity.js";
@@ -118,7 +119,7 @@ export async function exchangeSession(
     const enrolled = await fetcher(resolveApi("/api/devices/enroll"), {
       method: "POST", credentials: "same-origin",
       headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ name: "Browser", platform: "browser" }),
+      body: JSON.stringify({ name: browserDeviceName(), platform: "browser" }),
     });
     if (!enrolled.ok) throw new Error("Could not register this browser installation");
     response = await request();

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { AccessDeviceSchema, DeviceEnrollmentSchema, IdSchema, type AccessDevice } from "@mdc/contracts";
+import { AccessDeviceSchema, DeviceEnrollmentSchema, DeviceRenameSchema, IdSchema, type AccessDevice } from "@mdc/contracts";
 import type { Auth } from "firebase-admin/auth";
 import { Timestamp, type Firestore, type Transaction } from "firebase-admin/firestore";
 
@@ -12,6 +12,7 @@ export const deviceIdentity = (principal: DevicePrincipal): DeviceIdentity => ({
 export interface DeviceAccessPort {
   enroll(uid: string, input: { name: string; platform: "browser" | "desktop" | "android" }): Promise<{ device: AccessDevice; credential: string }>;
   exchange(uid: string, id: string, credential: string): Promise<AccessDevice>;
+  rename(identity: DeviceIdentity, input: { name: string }): Promise<AccessDevice>;
   authenticate(token: string): Promise<DevicePrincipal>;
 }
 const digest = (value: string) => createHash("sha256").update(value).digest();
@@ -63,5 +64,17 @@ export class DeviceAccessStore implements DeviceAccessPort {
       const device = accessDevice(id, (await this.db.doc(`users/${claims.uid}/devices/${id}`).get()).data());
       return { uid: claims.uid, device };
     } catch { throw new DeviceUnauthorized(); }
+  }
+  async rename(identity: DeviceIdentity, input: { name: string }): Promise<AccessDevice> {
+    const { name } = DeviceRenameSchema.parse(input);
+    const ref = this.db.doc(`users/${identity.uid}/devices/${identity.deviceId}`);
+    return this.db.runTransaction(async tx => {
+      const current = await tx.get(ref);
+      let device: AccessDevice;
+      try { device = accessDevice(identity.deviceId, current.data()); } catch { throw new DeviceUnauthorized(); }
+      const updatedAt = Timestamp.now();
+      tx.update(ref, { name, updatedAt });
+      return { ...device, name, updatedAt: updatedAt.toMillis() };
+    });
   }
 }

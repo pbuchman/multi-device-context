@@ -27,7 +27,9 @@ export type Device = z.infer<typeof DeviceSchema>;
 export const DeviceAccessSchema = z.enum(["own", "all"]);
 export type DeviceAccess = z.infer<typeof DeviceAccessSchema>;
 export const DevicePlatformSchema = z.enum(["browser", "desktop", "android"]);
-export const DeviceEnrollmentSchema = z.object({ name: z.string().trim().min(1).max(80), platform: DevicePlatformSchema }).strict();
+export const DeviceNameSchema = z.string().trim().min(1).max(80);
+export const DeviceRenameSchema = z.object({ name: DeviceNameSchema }).strict();
+export const DeviceEnrollmentSchema = z.object({ name: DeviceNameSchema, platform: DevicePlatformSchema }).strict();
 export const AccessDeviceSchema = DeviceSchema.extend({
   platform: DevicePlatformSchema,
   mode: DeviceAccessSchema,
@@ -43,6 +45,7 @@ export const DeviceSessionSchema = z.object({ uid: z.string().min(1), customToke
 export type DeviceSession = z.infer<typeof DeviceSessionSchema>;
 export const AccessActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("set-device-access"), targetId: IdSchema, expectedVersion: z.number().int().positive(), mode: DeviceAccessSchema }).strict(),
+  z.object({ action: z.literal("rename-device"), targetId: IdSchema, name: DeviceNameSchema }).strict(),
   z.object({ action: z.literal("create-agent-key"), name: z.string().trim().min(1).max(80) }).strict(),
   z.object({ action: z.literal("revoke-agent-key"), targetId: IdSchema }).strict(),
 ]);

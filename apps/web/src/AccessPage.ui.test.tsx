@@ -62,3 +62,10 @@ it("leaves the displayed grant unchanged when passkey approval is cancelled", as
   expect((await screen.findByRole("alert")).textContent).toContain("cancelled");
   expect(screen.getByRole("button", { name: "Allow all contexts on Phone" })).toBeTruthy();
 });
+it("renames a listed device with the exact passkey action while preserving its access mode",async()=>{
+ const api=client();api.perform.mockResolvedValue({kind:"device",device:{...device,name:"Travel phone"}} as never);api.devices.mockResolvedValueOnce([device]).mockResolvedValue([{...device,name:"Travel phone"}]);
+ render(<AccessPanel client={api as unknown as AccessClient} account="owner@example.test"/>);
+ await userEvent.click(await screen.findByRole("button",{name:"Rename device Phone"}));const input=screen.getByRole("textbox",{name:"Device name"});await userEvent.clear(input);await userEvent.type(input," Travel phone ");await userEvent.click(screen.getByRole("button",{name:"Save device name"}));
+ await waitFor(()=>expect(api.perform).toHaveBeenCalledWith({action:"rename-device",targetId:id,name:"Travel phone"}));
+ expect(await screen.findByRole("heading",{name:"Travel phone"})).toBeTruthy();expect(screen.getByText("Own contexts")).toBeTruthy();expect(screen.getByRole("button",{name:"Allow all contexts on Travel phone"})).toBeTruthy();
+});

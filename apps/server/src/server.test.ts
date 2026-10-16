@@ -55,6 +55,7 @@ const verifier = vi.fn(async (token: string) => {
 const TEST_DEVICE_ID = "00000000-0000-4000-8000-000000000010";
 const testDevice = { id: TEST_DEVICE_ID, name: "Test", platform: "android" as const, mode: "all" as const, version: 1, createdAt: 1, updatedAt: 1 };
 const devices: DeviceAccessPort = {
+  rename: async (_identity, input) => ({ ...testDevice, name: input.name }),
   enroll: async () => ({ device: testDevice, credential: "a".repeat(43) }),
   exchange: async (_uid, id, credential) => { if (id !== TEST_DEVICE_ID || credential !== "a".repeat(43)) throw new Error(); return testDevice; },
   authenticate: async token => { if (token !== "valid-token") throw new Error(); return { uid: "derived_uid", device: testDevice }; },

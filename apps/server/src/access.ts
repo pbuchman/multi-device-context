@@ -89,10 +89,10 @@ export class FirestoreAccessAdministration implements AccessAdministrationPort {
     const stored = (await this.credential(uid).get()).data() as Passkey | undefined;
     if (!stored) return fail(403);
     // Do not let a challenge obtained for one owner reference another owner's resources.
-    if (action.action === "set-device-access") {
+    if (action.action === "set-device-access" || action.action === "rename-device") {
       const target = await this.db.doc(`users/${uid}/devices/${action.targetId}`).get();
       if (!target.exists) return fail(404);
-      if (target.data()?.version !== action.expectedVersion) return fail(409);
+      if (action.action === "set-device-access" && target.data()?.version !== action.expectedVersion) return fail(409);
     }
     if (action.action === "revoke-agent-key" && (await this.db.doc(`agentKeys/${action.targetId}`).get()).data()?.uid !== uid) return fail(404);
     const options = await this.webauthn.generateAuthenticationOptions({ rpID: this.rpId, userVerification: "required", allowCredentials: [{ id: stored.id, transports: stored.transports ?? [] }] });
@@ -124,6 +124,13 @@ export class FirestoreAccessAdministration implements AccessAdministrationPort {
         if (!target.exists) return fail(404);
         if (target.data()?.version !== action.expectedVersion) return fail(409);
         const changed = { mode: action.mode, version: action.expectedVersion + 1, updatedAt: changedAt };
+        result = { kind: "device", device: serializeDevice(target.id, { ...target.data(), ...changed }) };
+        tx.update(targetRef, changed);
+      } else if (action.action === "rename-device") {
+        const targetRef = this.db.doc(`users/${uid}/devices/${action.targetId}`);
+        const target = await tx.get(targetRef);
+        if (!target.exists) return fail(404);
+        const changed = { name: action.name, updatedAt: changedAt };
         result = { kind: "device", device: serializeDevice(target.id, { ...target.data(), ...changed }) };
         tx.update(targetRef, changed);
       } else if (action.action === "create-agent-key") {

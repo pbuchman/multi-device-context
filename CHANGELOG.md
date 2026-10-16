@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.5.9 — Device names and agent lookup
+
+- Name the current installation in Settings, or rename a registered installation
+  through passkey-confirmed access administration. Names persist on the account
+  without changing device access or historical message metadata.
+- Agent tools can list device names and find contexts by installation name or ID.
+  `latest` retrieves the newest context created on that installation, including
+  every message; ambiguous names require an explicit device ID.
+- The portable MDC skill documents named-device lookup, complete conversation
+  retrieval, refresh instructions and retries using stable item UUIDs.
+- Android bundles the updated interface under the existing package and signing
+  identity, with version code 15.
+
 ## 0.5.7 — Android account lookup compatibility
 
 - Account lookup no longer depends on newer WebView AbortSignal static methods;

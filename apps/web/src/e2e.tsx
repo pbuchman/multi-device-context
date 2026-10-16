@@ -1,3 +1,7 @@
+import { AccessDeviceSchema } from "@mdc/contracts";
+import { AccessPanel } from "./AccessPage.js";
+import { AccessClient } from "./access-client.js";
+import { DurableOutbox } from "./outbox.js";
 import { AccountProfileStore, ProfileLoadError } from "./account-profile.js";
 import type { Content, Id } from "@mdc/contracts";
 import { createRoot } from "react-dom/client";
@@ -6,6 +10,12 @@ import { ContextWorkspace, type WorkspaceServices } from "./App.js";
 import type { CloudSnapshot } from "./cloud.js";
 import type { ContextRecord, ItemRecord } from "./model.js";
 
+const deviceNames = new URLSearchParams(window.location.search).has("deviceNames");
+const fixtureRequest = async (path: string, init?: RequestInit) => {
+ const response = await fetch(`/__e2e/api${path}`, init);
+ if (!response.ok) throw new Error("Synthetic API request failed");
+ return response;
+};
 const showcase = new URLSearchParams(window.location.search).has("showcase");
 const ids = {
   website: "00000000-0000-4000-8000-000000000001" as Id,
@@ -118,10 +128,34 @@ Object.assign(window, {
   mdcProfileTest: { async fail() { profileFailure = true; await profile.refresh(); } },
   mdcDeletionTest: { pause() { deleteGate = new Promise<void>(resolve => { finishDelete = resolve; }); }, finish() { finishDelete?.(); } },
 });
+let currentDevice = { ...dell };
+const deviceListeners = new Set<(device: typeof dell) => void>();
+const fixtureOutbox = deviceNames ? new DurableOutbox({ projectId: "device-name-fixture", uid: "browser-test" }) : undefined;
+const readFixtureDevice = async () => {
+ const value = AccessDeviceSchema.parse(await (await fixtureRequest("/device")).json());
+ currentDevice = { id: value.id, name: value.name };
+ for (const listener of deviceListeners) listener(currentDevice);
+ return currentDevice;
+};
+Object.assign(window, { mdcDeviceTest: {
+ async failNext() { await fixtureRequest("/fail-next", { method: "POST" }); },
+ async refresh() { return readFixtureDevice(); },
+ async reset() { await fixtureRequest("/reset", { method: "POST" }); await fixtureOutbox?.clear(); return readFixtureDevice(); },
+ async queued() { return fixtureOutbox?.list() ?? []; },
+} });
 const services: WorkspaceServices = {
   profile,
   viewer: { uid: "browser-test", name: viewerName, email: "alex@example.com", ...(avatarUrl ? { avatarUrl } : {}) },
-  device: dell,
+  get device() { return currentDevice; },
+  ...(deviceNames ? {
+    subscribeDevice(listener: (device: typeof dell) => void) { deviceListeners.add(listener); return () => { deviceListeners.delete(listener); }; },
+    async renameDevice(name: string) {
+      const value = AccessDeviceSchema.parse(await (await fixtureRequest("/device", {method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({name})})).json());
+      currentDevice = {id:value.id,name:value.name};for(const listener of deviceListeners)listener(currentDevice);return currentDevice;
+    },
+    accessMode: "all" as const,
+    async openAccessPanel() { window.open("/e2e.html?deviceNames&access", "_blank", "noopener,noreferrer"); },
+  } : {}),
   cloud: {
     async refreshContexts() { await refreshGate; return { records: contexts, fromCache: false, hasPendingWrites: false }; },
     async refreshDeletedContexts() { return []; },
@@ -136,7 +170,7 @@ const services: WorkspaceServices = {
     async deleteItem(contextId, itemId) { items.set(contextId, (items.get(contextId) ?? []).filter((entry) => entry.id !== itemId)); emitItems(contextId); },
     async attachmentBytes(_contextId, _itemId, content) { return showcase && content.name === "calm-workspace-board.png" ? illustrationBytes() : png; },
   },
-  outbox: { namespace: "browser-test:browser-test", async enqueue() {}, async count() { return 0; }, async clear() {}, async retry() {}, async list() { return []; } },
+  outbox: fixtureOutbox ?? { namespace: "browser-test:browser-test", async enqueue() {}, async count() { return 0; }, async clear() {}, async retry() {}, async list() { return []; } },
   async drain() {},
   async copyText() {},
   async copyFile() {},
@@ -144,4 +178,10 @@ const services: WorkspaceServices = {
   async signOut() {},
 };
 
-createRoot(document.getElementById("root")!).render(<ContextWorkspace services={services} />);
+async function renderFixture() {
+ if (deviceNames) await readFixtureDevice();
+ const access = deviceNames && new URLSearchParams(window.location.search).has("access");
+ const accessClient = new AccessClient(async () => "synthetic-fixture", (input, init) => fetch(String(input).replace("/api/", "/__e2e/api/"), init), { authenticate: async () => ({ id: "synthetic-passkey" }) as never, register: async () => ({}) as never });
+ createRoot(document.getElementById("root")!).render(access ? <AccessPanel client={accessClient} account="Synthetic fixture · no real account" /> : <ContextWorkspace services={services} />);
+}
+void renderFixture();

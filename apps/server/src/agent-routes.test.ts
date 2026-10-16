@@ -12,6 +12,7 @@ function fixture() {
   const store = {
     authenticate: vi.fn(async (token: string) => token === "agent" ? { uid: "owner", keyId: id } : undefined),
     listContexts: vi.fn(async () => ({ records: [], cursor: null, hasMore: false })),
+    listDevices: vi.fn(async (_uid: string) => ({ records: [{ id, name: "MacBook" }] })),
     listItems: vi.fn(async () => ({ records: [], cursor: null, hasMore: false })),
     writeItem: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })), getContext: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })), rename: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })),
     listKeys: vi.fn(async () => []), createKey: vi.fn(async () => ({ id, key: "one-time-key", name: "Test", createdAt: 1, lastUsedAt: null })), revokeKey: vi.fn(async () => {}),
@@ -31,7 +32,26 @@ describe("agent API trust boundaries", () => {
     expect((await app.inject({ url: "/api/session", method: "POST", headers: { authorization: "Bearer agent" } })).statusCode).toBe(401);
     expect((await app.inject({ url: "/api/agent-keys", headers: { authorization: "Bearer google" } })).statusCode).toBe(200);
     await app.inject({ url: "/api/agent/v1/contexts", headers: { authorization: "Bearer agent" } });
-    expect(store.listContexts).toHaveBeenCalledWith("owner", undefined, 50);
+    expect(store.listContexts).toHaveBeenCalledWith("owner", undefined, 50, { order: "asc" });
+  });
+  it("authenticates device discovery with the agent key and returns only device metadata", async () => {
+    const { app, store } = fixture();
+    for (const authorization of [undefined, "Bearer google"]) {
+      expect((await app.inject({ url: "/api/agent/v1/devices", headers: authorization ? { authorization } : {} })).statusCode).toBe(401);
+    }
+    const response = await app.inject({ url: "/api/agent/v1/devices", headers: { authorization: "Bearer agent" } });
+    expect(response.statusCode).toBe(200); expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual({ records: [{ id, name: "MacBook" }] });
+    expect(store.listDevices).toHaveBeenCalledWith("owner");
+  });
+  it("validates origin filters and context order before paging", async () => {
+    const { app, store } = fixture(); const headers = { authorization: "Bearer agent" };
+    for (const query of ["deviceId=bad", "deviceId=", `deviceId=${id}&deviceId=${itemId}`, "order=newest", "order=", "order=asc&order=desc"]) {
+      expect((await app.inject({ url: `/api/agent/v1/contexts?${query}`, headers })).statusCode).toBe(400);
+    }
+    expect(store.listContexts).not.toHaveBeenCalled();
+    expect((await app.inject({ url: `/api/agent/v1/contexts?deviceId=${id}&order=desc&limit=1&after=cursor`, headers })).statusCode).toBe(200);
+    expect(store.listContexts).toHaveBeenCalledWith("owner", "cursor", 1, { deviceId: id, order: "desc" });
   });
   it("validates ownership inputs, identifiers and bodies before writes", async () => {
     const { app, backend, store } = fixture(); const headers = { authorization: "Bearer agent" };
