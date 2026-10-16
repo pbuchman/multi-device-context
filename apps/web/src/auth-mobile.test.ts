@@ -43,6 +43,25 @@ it("restores Android through native auth and uses Firebase memory persistence", 
   expect(sdk.signOut).toHaveBeenCalledTimes(1);
   await expect(session!.accessToken()).rejects.toThrow("expired");
 });
+it.each(["restore", "login"] as const)("loads the Android profile through %s without rebinding the default browser fetch", async method => {
+  const f = fixture();
+  vi.stubGlobal("fetch", async function(this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+    if (this !== undefined && this !== globalThis) throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    return f.fetcher(input, init);
+  });
+  const manager = new SessionManager(undefined, { platformFactory: async () => f.platform, mobile: true, appOrigin: config.appOrigin });
+  try {
+    const session = (await manager[method]())!;
+    await vi.waitFor(() => expect(session.profile!.getState!().status).toBe("ready"));
+    expect(session.profile!.getSnapshot().email).toBe("user@example.test");
+    expect(f.fetcher).toHaveBeenCalledWith(`${config.appOrigin}/api/profile`, expect.objectContaining({
+      headers: { authorization: "Bearer access", accept: "application/json" }, cache: "no-store", signal: expect.any(AbortSignal),
+    }));
+  } finally {
+    manager.dispose();
+    vi.unstubAllGlobals();
+  }
+});
 it("retains desktop bridge with installation-bound Firebase memory authentication", async () => {
   const f = fixture("desktop");
   const session = await f.manager.login();

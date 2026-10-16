@@ -73,10 +73,11 @@ update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
 increase it for each update. It is not automatically incremented. Keep the
-application ID and signing key unchanged.
+application ID and signing key unchanged. Version 0.6.0 uses code 17, above the
+previous official code 15 and private code 16; do not reuse either code.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=12
+export MDC_ANDROID_VERSION_CODE=17
 pnpm --filter @mdc/mobile android:release
 ```
 
@@ -140,6 +141,10 @@ acceptance.
 
 ## Sharing and offline behavior
 
+- In the shared composer, the first primary mouse click, touch or pen contact
+  on an unfocused field places the cursor at the end of its existing draft.
+  While it remains focused, later gestures support normal cursor placement and
+  selection. This behavior also applies in browser and desktop clients.
 - Ordinary text paste edits the draft at the cursor. Use **Send** to publish;
   Android Enter adds a new line in both text and code modes. **Paste and send**
   immediately shares a captured clipboard snapshot without clearing your draft.
@@ -169,6 +174,19 @@ acceptance.
   resumes. Failed refreshes and incomplete cached reads do not imply deletion.
   A failed context or item refresh keeps synchronization incomplete until that
   stream receives a fresh server result.
+
+## Preparing the dictation keyboard
+
+Version 0.6.0 handles `com.multidevicecontext.mobile.PREPARE_DICTATION` on an
+existing activity as a keyboard request. It preserves the current draft,
+selection and chat. The request is bounded, cleared when the activity pauses,
+and not restored after activity recreation, so a late request cannot reopen
+the keyboard later. If there is no chat, normal startup presents a local empty
+draft; opening the app or preparing the keyboard does not send a message.
+
+This action does not insert a transcription or send it. APP1/Wispr automatic
+sending and Spotify pause/resume require separate adapter integration and are
+not included in 0.6.0.
 
 ## Production configuration prerequisites
 
@@ -324,6 +342,11 @@ Version 0.5.7 removes the profile request's dependency on `AbortSignal.any()` an
 `AbortSignal.timeout()`. Older WebViews can otherwise throw before issuing the
 HTTP request, producing the same generic account-details error as a network
 failure. The request retains cancellation and a bounded deadline.
+
+Version 0.6.0 also wraps native `fetch` calls so that account and interface-update
+requests use the browser's required receiver. Calling a stored native `fetch`
+as an object method could throw **Illegal invocation** in Android WebView
+before any HTTP request. This fix needs no OAuth, CORS or permission changes.
 
 If lookup fails, use **Retry account details** and retain only the displayed
 safe diagnostic category, HTTP status when available, and local attempt
