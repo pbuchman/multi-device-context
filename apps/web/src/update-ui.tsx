@@ -52,7 +52,7 @@ export function useUpdateController(options: {
 
   useEffect(() => {
     if (options.platformKind === "android") return;
-    const next = new HostedUpdateMonitor(currentUiBuild, fetch, setHostedBuild, message => {
+    const next = new HostedUpdateMonitor(currentUiBuild, (...args) => fetch(...args), setHostedBuild, message => {
       setError(message); setErrorAction("check");
     });
     monitor.current = next;

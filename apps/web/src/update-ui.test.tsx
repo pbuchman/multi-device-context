@@ -39,6 +39,28 @@ function options(nativeUpdates: NativeUpdateClient, scope: unknown = nativeUpdat
   };
 }
 
+it("checks hosted UI updates without rebinding the browser fetch to the monitor", async () => {
+  const fetcher = vi.fn(async function(this: unknown, _input: RequestInfo | URL, _init?: RequestInit) {
+    if (this !== undefined && this !== globalThis) throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    return new Response(JSON.stringify({ uiBuild: "b".repeat(40) }));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const view = renderHook(() => useUpdateController({
+    platformKind: "browser", settle: async () => {}, freeze: () => {}, reload: () => {},
+    current: () => true, canInstall: () => true, scope: "browser-fetch-test",
+  }));
+  try {
+    await vi.waitFor(() => expect(view.result.current.hostedBuild).toBe("b".repeat(40)));
+    await act(async () => view.result.current.check());
+    expect(view.result.current.error).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenLastCalledWith("/api/version", { cache: "no-store", signal: expect.any(AbortSignal) });
+  } finally {
+    view.unmount();
+    vi.unstubAllGlobals();
+  }
+});
+
 it("does not let a delayed initial read overwrite a newer subscription event", async () => {
   const initial = deferred<UpdateState>();
   const native = nativeClient({ getUpdateState: () => initial.promise });

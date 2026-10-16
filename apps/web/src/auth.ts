@@ -167,7 +167,7 @@ export class SessionManager {
   #disposed = false;
   #signOutActive = false;
 
-  constructor(private readonly fetcher: Fetcher = fetch, private readonly options: RuntimeLoadOptions & {
+  constructor(private readonly fetcher: Fetcher = (...args) => fetch(...args), private readonly options: RuntimeLoadOptions & {
     platformFactory?: () => Promise<PlatformAdapter>;
     navigateAfterSignOut?: (url: string) => void;
   } = {}) {}
