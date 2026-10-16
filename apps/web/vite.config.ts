@@ -1,6 +1,5 @@
-import { deviceFixtureMiddleware } from "./e2e-device-api.js";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import { execFileSync } from "node:child_process";
 
 function sourceBuild(): string {
@@ -12,11 +11,16 @@ function sourceBuild(): string {
   }
 }
 
-export default defineConfig(() => {
+export default defineConfig(async ({ command }) => {
+  const fixturePlugins: Plugin[] = [];
+  if (command === "serve") {
+    const { deviceFixtureMiddleware } = await import("./e2e-device-api.js");
+    fixturePlugins.push({ name: "synthetic-device-fixture", configureServer(server) { server.middlewares.use(deviceFixtureMiddleware()); } });
+  }
   const uiBuild = sourceBuild();
   return {
     define: { __MDC_UI_BUILD__: JSON.stringify(uiBuild) },
-    plugins: [react(), { name: "synthetic-device-fixture", configureServer(server) { server.middlewares.use(deviceFixtureMiddleware()); } }, {
+    plugins: [react(), ...fixturePlugins, {
       name: "mdc-build-metadata",
       generateBundle() {
         this.emitFile({ type: "asset", fileName: "version.json", source: `${JSON.stringify({ uiBuild })}\n` });

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { AccessActionSchema, DeviceRenameSchema, type AccessDevice, type AccessAction } from "@mdc/contracts";
+// Relative source import lets Vite bundle TypeScript for the Node 22.12 config runtime.
+import { AccessActionSchema, DeviceRenameSchema, type AccessDevice, type AccessAction } from "../../packages/contracts/src/index.ts";
 
 /** Dev-server-only synthetic HTTP state. Never installed on production API paths. */
 export function deviceFixtureMiddleware() {
