@@ -3,6 +3,7 @@ import { openLocalDatabase, changed } from "./local-db.js";
 import type { Id } from "@mdc/contracts";
 
 import type { ShareDraft } from "./model.js";
+import type { DictationAuthority } from "./dictation.js";
 
 export type AccountNamespace = { projectId: string; uid: string };
 
@@ -22,12 +23,13 @@ type NativeMarker = {
   namespace: string;
   requestId: Id;
 };
+type DictationMarker = { key: string; kind: "dictation"; namespace: string; sessionId: Id; contextId: Id; itemId: Id };
 
 type StoredAction = QueuedShare & { kind: "action" };
 type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
 export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
 type ItemMarker = { key: string; kind: "deleted-item"; namespace: string; contextId: Id; itemId: Id };
-type StoredRecord = StoredAction | NativeMarker | DeletedMarker | ItemMarker | Deletion;
+type StoredRecord = StoredAction | NativeMarker | DictationMarker | DeletedMarker | ItemMarker | Deletion;
 
 const STORE_NAME = "records";
 
@@ -70,6 +72,72 @@ export class DurableOutbox {
   }
 
   async enqueue(draft: ShareDraft): Promise<void> { await this.enqueueBatch([draft]); }
+  /** Permanent per-account idempotency marker and action commit in one transaction. */
+  async enqueueDictation(sessionId: Id, draft: ShareDraft, authority: DictationAuthority): Promise<{ contextId: Id; itemId: Id; created: boolean }> {
+    const check = () => { if (authority.signal.aborted || !authority.current()) throw new Error("Dictation ownership revoked"); };
+    const claim = { contextId: draft.contextId, itemId: draft.itemId };
+    let admissionTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      check();
+      await Promise.race([authority.validate(claim), new Promise<never>((_, reject) => { admissionTimer = setTimeout(() => reject(new Error("Native dictation admission timed out")), 1500); })]);
+    } finally { clearTimeout(admissionTimer); }
+    const database = await this.#db(); check();
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const complete = transactionDone(transaction), store = transaction.objectStore(STORE_NAME);
+    void complete.catch(() => {});
+    const abort = () => { try { transaction.abort(); } catch { /* already committed */ } };
+    authority.signal.addEventListener("abort", abort, { once: true });
+    try {
+      check();
+      const key = `dictation:${this.namespace}:${sessionId}`;
+      const previous = await requestResult(store.get(key)) as DictationMarker | undefined;
+      check();
+      if (previous) {
+        if (previous.contextId !== draft.contextId) throw new Error("Dictation target changed");
+        await complete; return { contextId: previous.contextId, itemId: previous.itemId, created: false };
+      }
+      await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
+      check();
+      const existing = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
+      check();
+      const removed = await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)); check();
+      if (finalDeletionPending(existing, draft.contextId) || removed) throw new PublishFailure("This context was deleted", false);
+      store.add({ key, kind: "dictation", namespace: this.namespace, sessionId, contextId: draft.contextId, itemId: draft.itemId } satisfies DictationMarker);
+      await requestResult(store.add({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction));
+      // Keep IDB active only for a bounded local native admission check. The
+      // final live check+commit run together in an active IDB request callback.
+      await new Promise<void>((resolve, reject) => {
+        let finished = false, admitted = false, denied = false, validationError: unknown;
+        const finish = (error?: unknown) => {
+          if (finished) return; finished = true; clearTimeout(admissionTimer);
+          if (error) { abort(); reject(error); } else resolve();
+        };
+        admissionTimer = setTimeout(() => finish(new Error("Native dictation admission timed out")), 1500);
+        void authority.validate(claim).then(() => { admitted = true; }, error => { denied = true; validationError = error; });
+        const keepAlive = () => {
+          if (finished) return;
+          try {
+            check(); const request = store.get(key);
+            request.onerror = () => finish(request.error ?? new Error("Dictation transaction aborted"));
+            request.onsuccess = () => {
+              if (finished) return;
+              try {
+                check();
+                if (denied) { finish(validationError ?? new Error("Native dictation admission denied")); return; }
+                if (!admitted) { keepAlive(); return; }
+                transaction.commit(); finish();
+              } catch (error) { finish(error); }
+            };
+          } catch (error) { finish(error); }
+        };
+        keepAlive();
+      });
+      await complete; changed(); return { contextId: draft.contextId, itemId: draft.itemId, created: true };
+    } catch (error) {
+      try { transaction.abort(); } catch { /* already settled */ }
+      await complete.catch(() => {}); throw error;
+    } finally { authority.signal.removeEventListener("abort", abort); }
+  }
   async enqueueBatch(drafts: ShareDraft[]): Promise<void> {
     const database = await this.#db();
     const transaction = database.transaction(STORE_NAME, "readwrite"); const complete = transactionDone(transaction);

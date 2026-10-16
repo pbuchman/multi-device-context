@@ -37,3 +37,6 @@ apps/mobile/android/local.properties
 android-signing.json
 .env.android*
 apps/desktop/bundle/
+
+# Local Kotlin compiler session/cache state
+apps/mobile/android/.kotlin/

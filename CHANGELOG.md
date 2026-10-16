@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### 0.6.1 — Local owned dictation bridge
+
+- Android offers a local Binder integration for the approved steering adapter. Each
+  transaction checks the real caller UID, exact package and existing signing
+  certificate. External callers cannot supply message text or choose a chat.
+- An owned recording captures the current local/existing chat, draft revision and
+  caret/range. Only confirmed processing, native Accessibility insertion and a
+  settled replacement can enqueue the whole editor through the normal outbox.
+  Session-to-message mapping and enqueue are atomic and idempotent.
+- Only the exact message observed from the server can acknowledge the session;
+  cache, pending writes and overall connection status do not. Restart, cancellation,
+  edits and navigation revoke automation while retaining ordinary queued sync.
+- Android version code is 18. The private adapter and its Spotify media ownership
+  remain separate installs. Emulator/JVM checks and physical radio acceptance are
+  separate; see the local bridge contract in `docs/android-dictation.md`.
+
 ## 0.6.0 — Android account lookup and dictation preparation
 
 - Account and interface-update requests preserve the browser's native `fetch`

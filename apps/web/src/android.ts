@@ -2,6 +2,7 @@ import { App } from "@capacitor/app";
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { ContentSchema, DeviceSchema, IdSchema, MAX_ATTACHMENT_BYTES, MAX_TEXT_BYTES, UpdateStateSchema, type ClipboardSnapshot, type NativeFile, type PendingClipboardShare, type UpdateState } from "@mdc/contracts";
 import type { PlatformAdapter } from "./platform.js";
+import type { DictationBridge, DictationStatus } from "./dictation.js";
 
 type ListenerHandle = { remove(): Promise<void> };
 type Navigation = { contextId?: string };
@@ -9,6 +10,9 @@ export type NativeFileRef = { id: string; name: string; contentType: string; siz
 type NativeSnapshot = { text?: string; files: NativeFileRef[] };
 type NativeRequest = NativeSnapshot & { id: string; capturedAt: number };
 export interface MdcNativePlugin {
+  readDictation?(): Promise<DictationStatus>;
+  reportDictation?(value: Parameters<DictationBridge["report"]>[0]): Promise<void>;
+  authorizeDictation?(value: Parameters<DictationBridge["authorize"]>[0]): Promise<{ allowed: boolean }>;
   getDevice(): Promise<{ id: string; name: string }>;
   exchangeInstallationSession(options: { accessToken: string }): Promise<unknown>;
   openAccessPanel(options: { deviceId: string }): Promise<void>;
@@ -28,7 +32,7 @@ export interface MdcNativePlugin {
   checkForUpdates(): Promise<unknown>;
   startUpdate(): Promise<unknown>;
   installUpdate(): Promise<void>;
-  addListener(event: "shareReceived" | "navigate" | "updateState", listener: (event: any) => void): Promise<ListenerHandle>;
+  addListener(event: "shareReceived" | "navigate" | "updateState" | "dictationRevoked", listener: (event: any) => void): Promise<ListenerHandle>;
 }
 export type AndroidDependencies = {
   plugin: MdcNativePlugin;
@@ -87,6 +91,7 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
   const shareListeners = new Set<() => void>();
   const navigationListeners = new Set<(event: Navigation) => void>();
   const updateListeners = new Set<(state: UpdateState) => void>();
+  const dictationRevoked = new Set<(id: string) => void>();
   const handles: ListenerHandle[] = [];
   const ensureCurrent = (expected = generation) => { if (disposed || expected !== generation) throw new Error("Android operation was cancelled"); };
   const subscribe = <T>(listeners: Set<T>, listener: T): (() => void) => {
@@ -96,6 +101,7 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
     if (disposed) return;
     disposed = true; generation++; controller.abort();
     activityListeners.clear(); shareListeners.clear(); navigationListeners.clear(); updateListeners.clear();
+    dictationRevoked.clear();
     for (const handle of handles) void handle.remove().catch(() => {});
   };
   try {
@@ -121,6 +127,9 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
       if (disposed) return;
       const state = UpdateStateSchema.safeParse(event);
       if (state.success) for (const listener of updateListeners) listener(state.data);
+    }));
+    if (plugin.readDictation && plugin.reportDictation && plugin.authorizeDictation) handles.push(await plugin.addListener("dictationRevoked", event => {
+      if (!disposed && IdSchema.safeParse(event.id).success) for (const listener of dictationRevoked) listener(event.id);
     }));
   } catch (error) { dispose(); throw error; }
 
@@ -184,6 +193,12 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
   }
   return {
     kind: "android", dispose,
+    ...(plugin.readDictation && plugin.reportDictation && plugin.authorizeDictation ? { dictation: {
+      subscribeRevoked: (listener: (id: string) => void) => subscribe(dictationRevoked, listener),
+      authorize: async (value: Parameters<DictationBridge["authorize"]>[0]) => { ensureCurrent(); if (!(await plugin.authorizeDictation!(value)).allowed) throw new Error("Native dictation ownership revoked"); },
+      read: async () => { ensureCurrent(); return plugin.readDictation!(); },
+      report: async (value: Parameters<DictationBridge["report"]>[0]) => { ensureCurrent(); await plugin.reportDictation!(value); },
+    } } : {}),
     exchangeSession: async accessToken => { const expected = generation; ensureCurrent(expected); const value = await plugin.exchangeInstallationSession({ accessToken }); ensureCurrent(expected); return value; },
     openAccessPanel: async deviceId => { ensureCurrent(); await plugin.openAccessPanel({ deviceId: IdSchema.parse(deviceId) }); },
     invalidateTransfers: async () => { ensureCurrent(); generation++; controller.abort(); controller = new AbortController(); pending = undefined; await plugin.invalidateTransfers(); },

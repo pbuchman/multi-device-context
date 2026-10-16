@@ -43,10 +43,19 @@ class MdcNativePlugin:Plugin() {
   NativeRuntime.attach(activity);inbox=NativeRuntime.inbox;clipboardFiles=NativeRuntime.clipboard
   exports=NativeRuntime.exports;auth=NativeRuntime.auth;updates=AndroidUpdateManager.get(context)
   updates.attach(updateOwner) {value->notifyListeners("updateState",JSObject(value.toString()))}
+  DictationRuntime.attach(updateOwner) {id->notifyListeners("dictationRevoked",JSObject().put("id",id))}
   receive(activity.intent)
  }
  override fun handleOnResume() {super.handleOnResume();if(::updates.isInitialized)updates.foreground()}
- override fun handleOnDestroy() {if(::updates.isInitialized)updates.detach(updateOwner);super.handleOnDestroy()}
+ override fun handleOnDestroy() {DictationRuntime.cancel();DictationRuntime.detach(updateOwner);if(::updates.isInitialized)updates.detach(updateOwner);super.handleOnDestroy()}
+ @PluginMethod fun authorizeDictation(call:PluginCall) {
+  val allowed=DictationRuntime.authorize(requireNotNull(call.getString("id")),requireNotNull(call.getString("contextId")),requireNotNull(call.getInt("revision")),requireNotNull(call.getString("itemId")),android.os.SystemClock.elapsedRealtime())
+  call.resolve(JSObject().put("allowed",allowed))
+ }
+ @PluginMethod fun readDictation(call:PluginCall) {call.resolve(JSObject(DictationRuntime.snapshot().toString()))}
+ @PluginMethod fun reportDictation(call:PluginCall) {
+  DictationRuntime.report(requireNotNull(call.getString("id")),requireNotNull(call.getString("phase")),call.getString("contextId"),call.getInt("revision"),call.getString("itemId"));call.resolve()
+ }
  private fun background(call:PluginCall,block:()->Unit) { worker.execute { try { block() } catch(_:Exception) { call.reject("Native operation failed or exceeds limits") } } }
  @PluginMethod fun exchangeInstallationSession(call:PluginCall) = background(call) {
   val result=NativeRuntime.installation.session.exchange(requireNotNull(call.getString("accessToken")))
@@ -58,6 +67,7 @@ class MdcNativePlugin:Plugin() {
   } catch(_:Exception) {call.reject("Could not open access settings")}
  }
  @PluginMethod fun invalidateTransfers(call:PluginCall) {
+  DictationRuntime.cancel()
   transferGeneration++
   background(call) {exports.invalidate();call.resolve()}
  }
@@ -67,6 +77,7 @@ class MdcNativePlugin:Plugin() {
  }
  @PluginMethod fun getAccessToken(call:PluginCall) { auth.token(call) }
  @PluginMethod fun signOut(call:PluginCall) {
+  DictationRuntime.cancel()
   NativeRuntime.installation.session.invalidate()
   background(call) {
   val values=call.getArray("reviewedNativeIds") ?: JSArray()

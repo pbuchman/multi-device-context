@@ -90,13 +90,21 @@ registration requires one. Verify public `uiBuild` and served asset hashes
 against the exact candidate, readiness, and older client compatibility. Then
 publish the complete release as a **prerelease**.
 
-For 0.6.0, use Android version code 17 with the existing package ID and release
-key. It must update both official code 15 and private code 16 in place. Record
+For 0.6.1, use Android version code 18 with the existing package ID and release
+key. It must update official0.6.0/code17 in place, preserving existing data; earlier
+compatible signed codes15/16 remain eligible for an in-place update. Record
 the APK's certificate digest and exact bytes before publication; a new version
 label alone does not prove signing continuity or a successful upgrade. Target
 radio acceptance uses **Settings → Check for updates → Download and install**
 and Android's confirmation, with existing data retained. Keep that result
 separate from any phone, emulator or CI checks.
+
+MDC0.6.1 bundles the [owned local dictation contract](android-dictation.md). Its
+private adapter/code11 is a separate installation and is not a public installer
+asset. The Binder lease and per-item server acknowledgement require both sides.
+The debug-only `DictationLeaseProbeService` and synthetic configuration must be
+absent from the final release APK. Verify its production configuration, manifest
+and exact certificate before publication; `src/debug` is excluded from release.
 
 Report physical device tests separately from runner-based checks. If a real Mac,
 Windows computer, or Android device was unavailable, say that its physical

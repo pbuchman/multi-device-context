@@ -31,6 +31,9 @@ import { HostedUpdateNotice, UpdateSettings, useUpdateController } from "./updat
 import { createNativeUpdateClient, type NativeUpdateClient } from "./updates.js";
 import { frozenClipboardParts, insertClipboardText, keyboardSends, type SharePart } from "./workspace-input.js";
 import "./theme.css";
+import { useDictation } from "./use-dictation.js";
+import type { DictationBridge, DictationAuthority } from "./dictation.js";
+import { watchDictationItems } from "./dictation.js";
 
 type Unsubscribe = () => void;
 const emptySubscribe = () => () => {};
@@ -52,6 +55,7 @@ export type WorkspaceCloud = {
 };
 
 export type WorkspaceOutbox = {
+  enqueueDictation?(sessionId: Id, draft: ShareDraft, authority: DictationAuthority): Promise<{ contextId: Id; itemId: Id; created: boolean }>;
   readonly namespace: string;
   removeContext?(id: Id): Promise<void>;
   removeItem?(contextId: Id, itemId: Id): Promise<void>;
@@ -66,6 +70,7 @@ export type WorkspaceOutbox = {
 };
 
 export type WorkspaceServices = {
+  dictation?: DictationBridge;
   remove?(contextId: Id, itemId?: Id, deleteEmptyContext?: boolean): Promise<boolean>;
   initialContextId?: Id;
   settings?: { getSettings(): Promise<{ aiTitlesEnabled: boolean }>; setSettings(enabled: boolean): Promise<{ aiTitlesEnabled: boolean }> };
@@ -802,6 +807,46 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     return operation;
   }, [accountBlocked, contexts, isLive, navigation.commit, navigation.selectedRef, refreshQueue, scroll.scrollToBottom, services, showToast]);
 
+  useDictation({
+    ...(services.dictation ? { bridge: services.dictation } : {}),
+    eligible: () => isLive() && !accountBlocked && !lifecycleLocked.current && !panelRef.current && !navigation.issue,
+    read: () => {
+      const node = textareaRef.current, current = navigation.selectedRef.current;
+      const draft = current.drafts[current.id];
+      if (!node || !draft || node.value !== draft.text) return undefined;
+      return { chatId: current.id, revision: navigation.revisionRef.current, text: draft.text, start: node.selectionStart, end: node.selectionEnd, code: draft.code, focused: document.activeElement === node };
+    },
+    send: (sessionId, editor, authority) => {
+      const operation = (async () => {
+      if (!services.outbox.enqueueDictation || !isLive() || deleted.current.has(editor.chatId) || navigation.selectedRef.current.id !== editor.chatId || navigation.revisionRef.current !== editor.revision) throw new Error("Dictation editor changed");
+      const createsContext = !contexts.some(context => context.id === editor.chatId) && !localQueuedContexts.current.has(editor.chatId);
+      const localTitle = navigation.selectedRef.current.drafts[editor.chatId]?.title;
+      const manualTitle = Boolean(createsContext && localTitle && localTitle !== "New context");
+      const content = ContentSchema.parse({ kind: editor.code ? "code" : "text", text: editor.text });
+      const title = manualTitle ? localTitle! : deriveTitle(content);
+      const result = await services.outbox.enqueueDictation(sessionId, { contextId: editor.chatId, itemId: newId(), title, content, device: services.device, createsContext, ...(manualTitle ? { manualTitle: true } : {}) }, {
+        signal: authority.signal,
+        validate: authority.validate,
+        current: () => authority.current() && navigation.selectedRef.current.id === editor.chatId && navigation.revisionRef.current === editor.revision && !deleted.current.has(editor.chatId),
+      });
+      if (!result.created || !authority.current() || !live.current.mounted || live.current.services !== services || deleted.current.has(editor.chatId)) return result;
+      navigation.commit(editor.chatId, editor.text);
+      if (createsContext) {
+        localQueuedContexts.current.add(editor.chatId);
+        setContexts(current => [{ id: editor.chatId, title, createdAt: Date.now(), updatedAt: Date.now(), syncState: "pending" }, ...current.filter(context => context.id !== editor.chatId)]);
+      }
+      setOptimisticItems(current => [...current, { id: result.itemId, contextId: editor.chatId, content, device: services.device, createdAt: Date.now(), ready: true, syncState: "pending" }]);
+      void services.drain().then(refreshQueue).catch(() => {});
+      await refreshQueue();
+      return result;
+      })();
+      pendingPublishes.current.add(operation);
+      void operation.finally(() => pendingPublishes.current.delete(operation)).catch(() => {});
+      return operation;
+    },
+    watch: (chat, emit, fail) => watchDictationItems(services.cloud, chat, emit, fail),
+  });
+
   const captureInput = () => ({
     target: navigation.selectedRef.current.id, owner: services, revision: navigation.revisionRef.current,
     text: navigation.selectedRef.current.drafts[navigation.selectedRef.current.id]?.text ?? "",
@@ -1367,6 +1412,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
       remove: (contextId, itemId) => operations.remove(contextId, itemId),
       isDesktop: session.platform.kind === "desktop",
       platformKind: session.platform.kind,
+      ...(session.platform.dictation ? { dictation: session.platform.dictation } : {}),
       appOrigin: session.config.appOrigin,
       ...(session.platform.activity ? { activity: session.platform.activity } : {}),
       ...(native?.onNavigate ? { subscribeNavigation: (listener: (id?: Id) => void) => {

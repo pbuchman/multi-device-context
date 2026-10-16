@@ -360,3 +360,9 @@ Physical DUDU7 confirmation requires its actual WebView version and authenticate
 lookup result, then an in-place signed upgrade with draft retention and a
 separate synthetic-context synchronization check. Capability regression tests
 and emulator checks are not a substitute for that physical acceptance.
+
+## Owned local dictation integration
+
+MDC 0.6.1 adds the optional [local dictation bridge](android-dictation.md). The
+existing launch/focus/IME contract remains available. The private steering adapter
+requires its own installation and user-granted Accessibility/media access.
