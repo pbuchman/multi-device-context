@@ -85,6 +85,11 @@ links to local files, empty files and unsupported application-specific clipboard
 formats produce an explanation. Rich content with a plain-text representation is
 shared as text. Files retain their original bytes.
 
+The shared message field places the cursor at the end of the draft on the first
+primary mouse click, touch or pen contact while it is unfocused. Once the field
+has focus, later gestures move the cursor and select text normally. Clicking
+elsewhere and returning to the field places the cursor at the end again.
+
 Below 840 CSS pixels, **Open chats menu** reveals the searchable chat list,
 **New chat**, refresh, and Settings. Wider windows keep that same sidebar open.
 An empty new chat stays out of the list until it has content or a name. Search

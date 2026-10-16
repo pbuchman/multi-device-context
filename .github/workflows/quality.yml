@@ -57,6 +57,7 @@ jobs:
           python apps/web/e2e/context_ui.py
           python apps/web/e2e/device_names.py
           python apps/web/e2e/file_input.py
+          python apps/web/e2e/native_fetch_composer.py
           pnpm exec firebase emulators:exec --project demo-mdc --only firestore,storage 'python apps/web/e2e/history_migration.py'
       - name: Desktop dependency boundary
         env:

@@ -81,9 +81,22 @@ private content before uploading. Do not rebuild after artifact acceptance.
 
 Create a draft release tagged `vVERSION` at the reviewed commit. Upload the
 three installers, catalog, sums, and concise installation/release information.
-Deploy the compatible server before the hosted interface using the
-[deployment procedure](operations/deployment.md). Verify readiness and older
-client compatibility. Then publish the complete release as a **prerelease**.
+Compare deployed and candidate inputs before following the
+[deployment procedure](operations/deployment.md) and
+[deployment skill](../.agents/skills/mdc-deployment/SKILL.md). Deploy a changed
+server before the hosted interface; when server inputs are identical, record
+the server as unchanged and skip reinstallation and restart unless static asset
+registration requires one. Verify public `uiBuild` and served asset hashes
+against the exact candidate, readiness, and older client compatibility. Then
+publish the complete release as a **prerelease**.
+
+For 0.6.0, use Android version code 17 with the existing package ID and release
+key. It must update both official code 15 and private code 16 in place. Record
+the APK's certificate digest and exact bytes before publication; a new version
+label alone does not prove signing continuity or a successful upgrade. Target
+radio acceptance uses **Settings → Check for updates → Download and install**
+and Android's confirmation, with existing data retained. Keep that result
+separate from any phone, emulator or CI checks.
 
 Report physical device tests separately from runner-based checks. If a real Mac,
 Windows computer, or Android device was unavailable, say that its physical

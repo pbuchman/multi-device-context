@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.6.0 — Android account lookup and dictation preparation
+
+- Account and interface-update requests preserve the browser's native `fetch`
+  receiver, avoiding Android WebView's **Illegal invocation** failure before an
+  HTTP request is sent.
+- In the shared composer, the first primary mouse click, touch or pen contact
+  on an unfocused field places the cursor at the end of the draft. Once focused,
+  the field supports normal cursor movement and selection gestures.
+- `PREPARE_DICTATION` on an existing Android activity requests the keyboard
+  without changing the draft, selection or chat. Requests expire and are not
+  carried through activity recreation. Starting without a chat keeps a local
+  empty draft and sends nothing automatically.
+- Desktop and Android package versions are 0.6.0; Android uses version code 17
+  with the existing application ID and release signing identity.
+- APP1/Wispr automatic sending and Spotify pause/resume remain separate
+  integration work and are not features of this release. Physical installation,
+  updater and DUDU7 acceptance must be recorded separately from CI results.
+
 ## 0.5.9 — Device names and agent lookup
 
 - Name the current installation in Settings, or rename a registered installation
