@@ -19,7 +19,7 @@
   "dependencies": {
     "@capacitor/android": "8.5.2",
     "@capacitor/core": "8.5.2",
-    "@capacitor/app": "8.1.1",
+    "@capacitor/app": "8.1.2",
     "@mdc/contracts": "workspace:*"
   },
   "devDependencies": {
