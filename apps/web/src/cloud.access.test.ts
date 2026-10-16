@@ -33,3 +33,12 @@ it.each(["text/plain", "image/png"])("uploads %s with the API's raw-byte transpo
    expect(calls.find(call => call.method === "PUT")?.headers).toMatchObject({ authorization: "Bearer firebase", "content-type": "application/octet-stream" });
  } finally { vi.unstubAllGlobals(); }
 });
+it("renames the authenticated installation through Firebase authorization and parses the persisted device", async () => {
+ const renamed={...device,name:"Saved alias",updatedAt:2};
+ const fetcher=vi.fn(async()=>new Response(JSON.stringify(renamed)));vi.stubGlobal("fetch",fetcher);
+ try {
+  const cloud=new FirebaseCloud({} as FirebaseApp,"uid",async()=>"firebase",device);
+  await expect(cloud.renameDevice("Saved alias")).resolves.toEqual(renamed);
+  expect(fetcher).toHaveBeenCalledWith("/api/device",expect.objectContaining({method:"PATCH",headers:expect.objectContaining({authorization:"Bearer firebase"}),body:JSON.stringify({name:"Saved alias"})}));
+ } finally {vi.unstubAllGlobals();}
+});

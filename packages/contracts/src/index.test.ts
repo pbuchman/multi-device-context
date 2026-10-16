@@ -5,6 +5,8 @@ import {
   MAX_TEXT_BYTES,
   ContentSchema,
   DeviceSchema,
+  DeviceRenameSchema,
+  AccessActionSchema,
   IdSchema,
   RuntimeConfigSchema,
   attachmentPath,
@@ -71,6 +73,18 @@ describe("shared constants and inferred types", () => {
 });
 
 describe("IdSchema and DeviceSchema", () => {
+  it("normalizes bounded device rename bodies and binds access rename actions", () => {
+    expect(DeviceRenameSchema.parse({ name: "  Łódź MacBook  " })).toEqual({ name: "Łódź MacBook" });
+    expect(AccessActionSchema.parse({ action: "rename-device", targetId: UUID_A, name: "  Radio  " })).toEqual({ action: "rename-device", targetId: UUID_A, name: "Radio" });
+    for (const name of ["", "   ", "x".repeat(81), null, 123]) {
+      expect(DeviceRenameSchema.safeParse({ name }).success).toBe(false);
+      expect(AccessActionSchema.safeParse({ action: "rename-device", targetId: UUID_A, name }).success).toBe(false);
+    }
+    for (const extra of [{ mode: "all" }, { targetId: UUID_B }, { version: 2 }, { credential: "secret" }]) {
+      expect(DeviceRenameSchema.safeParse({ name: "Phone", ...extra }).success).toBe(false);
+    }
+    expect(AccessActionSchema.safeParse({ action: "rename-device", targetId: UUID_A, name: "Phone", mode: "all" }).success).toBe(false);
+  });
   it("accepts UUID IDs and bounded device names", () => {
     expect(IdSchema.parse(UUID_A)).toBe(UUID_A);
     expect(DeviceSchema.parse({ id: UUID_A, name: "Laptop" })).toEqual({

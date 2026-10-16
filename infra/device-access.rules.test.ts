@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { emulatorAddress } from "./emulator-address.js";
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from "@firebase/rules-unit-testing";
 import { collection, doc, getDoc, getDocs, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from "firebase/firestore";
 import { getBytes, ref, uploadBytes } from "firebase/storage";
@@ -9,8 +10,7 @@ let env: RulesTestEnvironment;
 const context = (id: string) => `users/${uid}/contexts/${id}`;
 async function seed(path: string, data: Record<string, unknown>) { await env.withSecurityRulesDisabled(async context => setDoc(doc(context.firestore(), path), data)); }
 beforeAll(async () => {
-  if (process.env.FIRESTORE_EMULATOR_HOST !== "127.0.0.1:18080" || process.env.FIREBASE_STORAGE_EMULATOR_HOST !== "127.0.0.1:19199") throw new Error("Dedicated emulators required");
-  env = await initializeTestEnvironment({ projectId: "demo-mdc", firestore: { host: "127.0.0.1", port: 18080, rules: await readFile("infra/firestore.rules", "utf8") }, storage: { host: "127.0.0.1", port: 19199, rules: await readFile("infra/storage.rules", "utf8") } });
+  env = await initializeTestEnvironment({ projectId: "demo-mdc", firestore: { ...emulatorAddress(process.env.FIRESTORE_EMULATOR_HOST), rules: await readFile("infra/firestore.rules", "utf8") }, storage: { ...emulatorAddress(process.env.FIREBASE_STORAGE_EMULATOR_HOST), rules: await readFile("infra/storage.rules", "utf8") } });
   await seed(`users/${uid}/devices/${radio}`, { mode: "own", version: 1 });
   await seed(`users/${uid}/devices/${phone}`, { mode: "all", version: 1 });
   for (const [id, origin] of [[own, radio], [foreign, phone]]) await seed(context(id!), { title: "Private", deleting: false, originDeviceId: origin, createdAt: new Date(), updatedAt: new Date() });

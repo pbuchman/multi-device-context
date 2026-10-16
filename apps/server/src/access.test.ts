@@ -50,6 +50,26 @@ function fixture() {
 const action = { action: "set-device-access" as const, targetId, expectedVersion: 1, mode: "all" as const };
 
 describe("passkey protected access administration", () => {
+  it("binds a trimmed device alias to a passkey assertion without changing policy", async () => {
+    const f = fixture(); await f.enroll();
+    const devicePath = `users/${uid}/devices/${targetId}`;
+    const before = { ...f.db.values.get(devicePath) };
+    const challenge = await f.service.challenge(uid, { action: "rename-device", targetId, name: "  MacBook  " });
+    const result = await f.service.complete(uid, challenge.challengeId, {} as any);
+    expect(result).toEqual({ kind: "device", device: { id: targetId, ...before, name: "MacBook" } });
+    expect(f.db.values.get(devicePath)).toEqual({ ...before, name: "MacBook", updatedAt: expect.anything() });
+    await expect(f.service.complete(uid, challenge.challengeId, {} as any)).rejects.toMatchObject({ statusCode: 410 });
+  });
+  it("checks rename ownership before and inside the transaction", async () => {
+    const f = fixture(); await f.enroll();
+    const foreignId = "00000000-0000-4000-8000-000000000003";
+    f.db.values.set(`users/other/devices/${foreignId}`, { name: "Other", mode: "all", version: 1 });
+    await expect(f.service.challenge(uid, { action: "rename-device", targetId: foreignId, name: "Stolen" })).rejects.toMatchObject({ statusCode: 404 });
+    const c = await f.service.challenge(uid, { action: "rename-device", targetId, name: "Missing" });
+    f.db.values.delete(`users/${uid}/devices/${targetId}`);
+    await expect(f.service.complete(uid, c.challengeId, {} as any)).rejects.toMatchObject({ statusCode: 404 });
+    expect(f.db.values.get(`users/${uid}/accessChallenges/${c.challengeId}`)).not.toHaveProperty("consumedAt");
+  });
   it("registers exactly one verified passkey and never saves its private material", async () => {
     const f = fixture(); await f.enroll();
     expect(await f.service.status(uid)).toEqual({ passkeyRegistered: true });

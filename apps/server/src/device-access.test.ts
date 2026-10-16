@@ -10,7 +10,7 @@ function fixture() {
     },
     async runTransaction<T>(operation: (tx: unknown) => Promise<T>) {
       const writes: (() => void)[] = [];
-      const result = await operation({ get: (ref: { get(): unknown }) => ref.get(), create: (ref: { path: string }, data: Record<string, unknown>) => writes.push(() => documents.set(ref.path, data)) });
+      const result = await operation({ get: (ref: { get(): unknown }) => ref.get(), create: (ref: { path: string }, data: Record<string, unknown>) => writes.push(() => documents.set(ref.path, data)), update: (ref: { path: string }, data: Record<string, unknown>) => writes.push(() => documents.set(ref.path, { ...documents.get(ref.path), ...data })) });
       writes.forEach(write => write()); return result;
     },
   };
@@ -21,6 +21,33 @@ function fixture() {
 }
 
 describe("registered installation access", () => {
+  it("persists trimmed aliases across exchange while preserving grants and credential material", async () => {
+    const f = fixture(); const { device, credential } = await f.store.enroll("owner", { name: "Phone", platform: "android" });
+    const path = `users/owner/devices/${device.id}`;
+    f.documents.set(path, { ...f.documents.get(path), mode: "all", version: 9 });
+    const before = f.documents.get(path)!; const credentials = f.documents.get(`internalDeviceCredentials/${device.id}`);
+    const renamed = await f.store.rename({ uid: "owner", deviceId: device.id }, { name: "  Łódź MacBook  " });
+    expect(renamed).toMatchObject({ id: device.id, name: "Łódź MacBook", mode: "all", version: 9, createdAt: device.createdAt });
+    expect(f.documents.get(path)).toEqual({ ...before, name: "Łódź MacBook", updatedAt: expect.anything() });
+    expect(f.documents.get(`internalDeviceCredentials/${device.id}`)).toEqual(credentials);
+    expect(await f.store.exchange("owner", device.id, credential)).toEqual(renamed);
+  });
+
+  it("renames own-only devices without elevation and rejects missing or other-owner identities", async () => {
+    const f = fixture(); const { device } = await f.store.enroll("owner", { name: "Phone", platform: "android" });
+    expect(await f.store.rename({ uid: "owner", deviceId: device.id }, { name: "Radio" })).toMatchObject({ name: "Radio", mode: "own", version: 1 });
+    await expect(f.store.rename({ uid: "other", deviceId: device.id }, { name: "Stolen" })).rejects.toMatchObject({ statusCode: 401 });
+    f.documents.delete(`users/owner/devices/${device.id}`);
+    await expect(f.store.rename({ uid: "owner", deviceId: device.id }, { name: "Missing" })).rejects.toMatchObject({ statusCode: 401 });
+  });
+
+  it("rejects malformed rename metadata before mutating a device", async () => {
+    const f = fixture(); const { device } = await f.store.enroll("owner", { name: "Phone", platform: "android" });
+    for (const input of [{ name: " " }, { name: "x".repeat(81) }, { name: "Phone", mode: "all" }]) {
+      await expect(f.store.rename({ uid: "owner", deviceId: device.id }, input)).rejects.toThrow();
+    }
+    expect(f.documents.get(`users/owner/devices/${device.id}`)).toMatchObject({ name: "Phone", mode: "own", version: 1 });
+  });
   it("enrolls with server ID and own-only access; stores no raw credential", async () => {
     const f = fixture(); const result = await f.store.enroll("owner", { name: "Radio", platform: "android" });
     expect(result.device).toMatchObject({ name: "Radio", mode: "own", version: 1 });

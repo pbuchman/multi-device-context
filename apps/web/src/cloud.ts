@@ -171,6 +171,7 @@ export class FirebaseCloud {
   }
   #markers(name: "deletedContexts" | "deletedItems") { this.#current(); return query(collection(this.#firestore, `users/${this.uid}/${name}`), ...this.#scope()); }
   async refreshDevice(): Promise<AccessDevice> { return AccessDeviceSchema.parse(await (await this.#api("/api/device", "GET")).json()); }
+  async renameDevice(name: string): Promise<AccessDevice> { return AccessDeviceSchema.parse(await (await this.#api("/api/device", "PATCH", { name })).json()); }
   subscribeDevice(emit: (device: AccessDevice) => void, fail: (error: Error) => void): Unsubscribe {
     this.#current();
     const stop = onSnapshot(doc(this.#firestore, `users/${this.uid}/devices/${this.device.id}`), snapshot => {

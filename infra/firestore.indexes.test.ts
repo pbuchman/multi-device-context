@@ -14,6 +14,18 @@ type FieldOverride = {
 };
 
 describe("Firestore deleting indexes", () => {
+  it("indexes context creation order with and without immutable origin filtering in either direction", () => {
+    const config = JSON.parse(readFileSync(new URL("./firestore.indexes.json", import.meta.url), "utf8")) as { indexes: { collectionGroup: string; queryScope: string; fields: { fieldPath: string; order: string }[] }[] };
+    for (const order of ["ASCENDING", "DESCENDING"]) {
+      for (const origin of [false, true]) {
+        expect(config.indexes).toContainEqual({ collectionGroup: "contexts", queryScope: "COLLECTION", fields: [
+          { fieldPath: "deleting", order: "ASCENDING" },
+          ...(origin ? [{ fieldPath: "originDeviceId", order: "ASCENDING" }] : []),
+          { fieldPath: "createdAt", order },
+        ] });
+      }
+    }
+  });
   it("keeps live client collection queries and bounded cleanup collection-group queries indexed", () => {
     const config = JSON.parse(
       readFileSync(new URL("./firestore.indexes.json", import.meta.url), "utf8"),

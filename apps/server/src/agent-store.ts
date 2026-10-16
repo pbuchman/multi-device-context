@@ -2,13 +2,14 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { AttachmentStore } from "./attachments.js";
 import { FieldPath, FieldValue, Timestamp, type Firestore, type Query } from "firebase-admin/firestore";
 import type { Storage } from "firebase-admin/storage";
-import { type AgentItemInput, type AgentKeyInfo, IdSchema, attachmentPath } from "@mdc/contracts";
+import { type AgentItemInput, type AgentKeyInfo, type Device, DeviceSchema, IdSchema, attachmentPath } from "@mdc/contracts";
 import type { Backend } from "./server.js";
 import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
 
 type Bucket = ReturnType<Storage["bucket"]>;
 const agentDevice = { id: "00000000-0000-4000-8000-000000000002", name: "Agent" };
 export class BadInputError extends Error { statusCode = 400; }
+export type AgentContextListOptions = { deviceId?: string; order?: "asc" | "desc" };
 const hash = (value: string) => createHash("sha256").update(value).digest();
 export function parseAgentToken(token: string): { id: string; digest: Buffer } | undefined {
   const match = /^mdc_([0-9a-f-]{36})_([A-Za-z0-9_-]{43})$/.exec(token);
@@ -76,8 +77,8 @@ export class AgentStore extends AttachmentStore {
     if (!doc.exists || doc.data()?.deleting !== false) throw new BackendNotFoundError();
     return serialize(doc);
   }
-  async page(query: Query, after?: string, limit = 50) {
-    let ordered = query.orderBy("createdAt").orderBy(FieldPath.documentId());
+  async page(query: Query, after?: string, limit = 50, order: "asc" | "desc" = "asc") {
+    let ordered = query.orderBy("createdAt", order).orderBy(FieldPath.documentId(), order);
     if (after) ordered = ordered.startAfter(...decodeCursor(after));
     const result = await ordered.limit(limit).get();
     const last = result.docs.at(-1);
@@ -88,8 +89,44 @@ export class AgentStore extends AttachmentStore {
       hasMore: result.size === limit,
     };
   }
-  async listContexts(uid: string, after?: string, limit?: number) {
-    return this.page(this.db.collection(`users/${uid}/contexts`).where("deleting", "==", false), after, limit);
+  async listContexts(uid: string, after?: string, limit?: number, options: AgentContextListOptions = {}) {
+    let query = this.db.collection(`users/${uid}/contexts`).where("deleting", "==", false);
+    if (options.deviceId) query = query.where("originDeviceId", "==", options.deviceId);
+    return this.page(query, after, limit, options.order);
+  }
+  async listDevices(uid: string): Promise<{ records: Device[] }> {
+    const [registered, contexts] = await Promise.all([
+      this.db.collection(`users/${uid}/devices`).get(),
+      this.db.collection(`users/${uid}/contexts`).where("deleting", "==", false).orderBy("createdAt", "desc").orderBy(FieldPath.documentId(), "desc").get(),
+    ]);
+    const devices = new Map<string, Device>();
+    const resolved = new Set<string>();
+    for (const doc of registered.docs) {
+      const device = DeviceSchema.safeParse({ id: doc.id, name: doc.data().name });
+      if (device.success) { devices.set(doc.id, device.data); resolved.add(doc.id); }
+    }
+    for (const context of contexts.docs) {
+      const origin = IdSchema.safeParse(context.data().originDeviceId);
+      // A surviving item cannot establish the origin of a pre-origin context.
+      if (!origin.success || resolved.has(origin.data)) continue;
+      const originId = origin.data;
+      let snapshot: Device | undefined;
+      const metadata = (data: FirebaseFirestore.DocumentData | undefined): Device | undefined => {
+        const device = data?.deleting === false ? DeviceSchema.safeParse(data.device) : undefined;
+        return device?.success && device.data.id === originId ? device.data : undefined;
+      };
+      const firstId = IdSchema.safeParse(context.data().firstItemId);
+      if (firstId.success) snapshot = metadata((await context.ref.collection("items").doc(firstId.data).get()).data());
+      if (!snapshot) {
+        // firstItemId can be promoted after deletion; never copy another sender's name.
+        const surviving = await context.ref.collection("items").where("deleting", "==", false).where("device.id", "==", originId)
+          .orderBy("createdAt").orderBy(FieldPath.documentId()).limit(1).get();
+        snapshot = metadata(surviving.docs[0]?.data());
+      }
+      devices.set(originId, snapshot ?? { id: originId, name: originId });
+      if (snapshot) resolved.add(originId);
+    }
+    return { records: [...devices.values()].sort((a, b) => a.id.localeCompare(b.id)) };
   }
   async listItems(uid: string, id: string, after?: string, limit?: number) {
     await this.getContext(uid, id);

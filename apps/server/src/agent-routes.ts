@@ -1,12 +1,12 @@
 import { WindowLimit } from "./limits.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { AgentContextInputSchema, AgentItemInputSchema, AgentKeyNameSchema, IdSchema, RenameContextSchema } from "@mdc/contracts";
-import { type AgentStore, BadInputError } from "./agent-store.js";
+import { type AgentStore, type AgentContextListOptions, BadInputError } from "./agent-store.js";
 import type { AuthVerifier } from "./auth.js";
 import type { Backend } from "./server.js";
 import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
 
-export type AgentPort = Pick<AgentStore, "createKey" | "listKeys" | "revokeKey" | "authenticate" | "getContext" | "listContexts" | "listItems" | "writeItem" | "rename" | "download" | "upload">;
+export type AgentPort = Pick<AgentStore, "createKey" | "listKeys" | "revokeKey" | "authenticate" | "getContext" | "listContexts" | "listDevices" | "listItems" | "writeItem" | "rename" | "download" | "upload">;
 function bearer(request: FastifyRequest): string {
   return /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1] ?? "";
 }
@@ -25,6 +25,12 @@ function paging(request: FastifyRequest): [string | undefined, number] {
   const limit = query.limit === undefined ? 50 : Number(query.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (query.after !== undefined && typeof query.after !== "string")) throw new BadInputError();
   return [query.after as string | undefined, limit];
+}
+function contextOptions(request: FastifyRequest): AgentContextListOptions {
+  const query = request.query as Record<string, unknown>;
+  const order = query.order ?? "asc";
+  if (order !== "asc" && order !== "desc") throw new BadInputError();
+  return { order, ...(query.deviceId === undefined ? {} : { deviceId: id(query.deviceId) }) };
 }
 export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, verifier: AuthVerifier, backend: Backend, allowOwner: (request: FastifyRequest, uid: string) => void = () => {}) {
   const keyCreation = new WindowLimit(5);
@@ -59,7 +65,8 @@ export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, veri
     });
     const owner = (r: FastifyRequest) => (r as FastifyRequest & { ownerUid: string }).ownerUid;
     const base = "/api/agent/v1/contexts";
-    api.get(base, r => store.listContexts(owner(r), ...paging(r)));
+    api.get("/api/agent/v1/devices", r => store.listDevices(owner(r)));
+    api.get(base, r => store.listContexts(owner(r), ...paging(r), contextOptions(r)));
     api.post(base, async (r, reply) => {
       const value = parse(AgentContextInputSchema, r.body);
       return reply.code(201).send(await store.writeItem(owner(r), value.id, value.item, true));

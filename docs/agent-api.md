@@ -19,6 +19,10 @@ Windows, macOS and Linux. The CLI supports:
 
 ```sh
 node scripts/mdc.mjs list
+node scripts/mdc.mjs devices
+node scripts/mdc.mjs list --device 'Łódź MacBook'
+node scripts/mdc.mjs latest --device 'Łódź MacBook'
+node scripts/mdc.mjs latest --device-id DEVICE_UUID
 node scripts/mdc.mjs get CONTEXT_UUID
 node scripts/mdc.mjs watch --once --after CURSOR
 node scripts/mdc.mjs create --file ./input.txt --id CONTEXT_UUID --item-id ITEM_UUID
@@ -28,6 +32,32 @@ node scripts/mdc.mjs download CONTEXT_UUID ITEM_UUID ./download.png
 node scripts/mdc.mjs rename CONTEXT_UUID --title 'Release checklist'
 node scripts/mdc.mjs delete CONTEXT_UUID
 ```
+
+Przykład: „Podejmij najnowszą rozmowę z MacBooka” → `devices`, a następnie
+`latest --device 'Łódź MacBook'`. `latest` wybiera najnowszy kontekst według
+czasu **utworzenia** i urządzenia źródłowego, po czym pobiera wszystkie strony
+wiadomości. Dopisanie wiadomości do starszej rozmowy nie przesuwa jej na początek.
+Bez filtra `latest` wybiera najnowszy kontekst na koncie. Brak wyników zwraca
+`{"context":null,"items":[],"message":"No contexts found"}`.
+
+Nazwy są porównywane dokładnie po usunięciu skrajnych spacji, bez rozróżniania
+wielkości liter; częściowe dopasowania nie wystarczą. Przy powtórzonej nazwie
+CLI wypisuje identyfikatory i wymaga `--device-id UUID`. Brak nazwy lub konflikt
+nie uruchamia wyszukiwania bez filtra. `--device` i `--device-id` wzajemnie się
+wykluczają. Nazwa jest edytowalną etykietą; UUID identyfikuje instalację i pozostaje
+stały po zmianie nazwy.
+
+Aby zainstalować lub odświeżyć skill na innym komputerze, skopiuj cały katalog
+`skills/multi-device-context` z aktualnego, zweryfikowanego źródła do katalogu
+skilli używanego przez tamtego agenta (np. `~/.agents/skills/multi-device-context`).
+Zastąp zarówno `SKILL.md`, jak i `scripts/mdc.mjs`; konfiguracja z kluczem zostaje
+w prywatnym katalogu. Uruchom `node scripts/mdc.mjs help` z nowej kopii i sprawdź,
+że zawiera `devices` oraz `latest`, a następnie ponownie odczytaj nowy `SKILL.md`.
+
+Wynik dopisz przez `append CONTEXT_UUID --file ./result.txt --item-id ITEM_UUID`.
+Zachowaj ten sam UUID wiadomości i identyczną treść przy ponowieniu po utracie
+odpowiedzi; nowe UUID utworzyłyby duplikaty. Odczytaj kontekst, aby potwierdzić
+obecność wiadomości. Dla `create` zachowaj także ten sam `--id CONTEXT_UUID`.
 
 `watch` without `--once` polls every five seconds. Each JSON line contains a page
 of new contexts and a cursor. Checkpoint the cursor **after** processing the page;
@@ -44,7 +74,8 @@ All identifiers are UUIDs. JSON objects reject unknown input fields.
 
 | Method and path | Request / response |
 | --- | --- |
-| `GET /contexts?after=CURSOR&limit=50` | `{records, cursor, hasMore}`; oldest creation first |
+| `GET /devices` | `{records: [{id, name}]}`; registered devices and discoverable legacy context origins |
+| `GET /contexts?after=CURSOR&limit=50&deviceId=UUID&order=asc` | `{records, cursor, hasMore}`; optional origin-device filter and `asc` (default) or `desc` creation ordering |
 | `POST /contexts` | `{id, item: {id, content, device?}}`; creates context and first item atomically |
 | `GET /contexts/:id` | Context metadata, including title, creation time, readiness |
 | `PATCH /contexts/:id` | `{title}`; explicit title always wins over AI |
@@ -62,6 +93,15 @@ Text is limited to 262144 UTF-8 bytes, files to 100 MiB. Create an attachment's
 metadata first, then upload its exact declared size. Completed originals cannot
 be overwritten. For a lost upload response, read the item: `ready: true` means
 it completed; do not overwrite it. Retry writes with the original UUIDs.
+
+Device discovery is scoped to the authenticated owner. Registered names override
+legacy names from the first item's device metadata; discovery does not rewrite
+historical items. Device names do not grant access. Context filtering uses the
+immutable `originDeviceId` before pagination, regardless of which device appended
+later items. Sort order uses creation timestamp and UUID as a deterministic
+tie-breaker in the same direction. To retrieve the latest conversation, request
+`GET /contexts?deviceId=UUID&order=desc&limit=1`, then its metadata and **all** item
+pages. The CLI's `latest` performs those reads and returns `{context, items}`.
 
 Pagination limits are 1–100. Cursors preserve Firestore's full timestamp precision
 plus UUID ordering; treat them as opaque. `hasMore` means another page should be

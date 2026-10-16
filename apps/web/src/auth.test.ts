@@ -85,3 +85,14 @@ it("enrolls a missing browser installation once but never reenrolls rejected pro
  expect((await exchangeSession("auth0",fetcher)).device).toEqual(device); expect(fetcher).toHaveBeenCalledTimes(3);
  const rejected=vi.fn(async()=>new Response("{}",{status:403})); await expect(exchangeSession("auth0",rejected)).rejects.toThrow(/installation/); expect(rejected).toHaveBeenCalledOnce();
 });
+it("sends the detected default only at enrollment and retains the server alias on refresh",async()=>{
+ vi.stubGlobal("navigator",{userAgent:"Mozilla/5.0 (Windows NT 10.0) Chrome/130.0 Safari/537.36"});
+ try {
+  const device={id:"11111111-1111-4111-8111-111111111111",name:"Saved personal alias",platform:"browser",mode:"own",version:1,createdAt:1,updatedAt:1};
+  const response=()=>new Response(JSON.stringify({uid:"uid",customToken:"custom",device}));
+  const enroll=vi.fn().mockResolvedValueOnce(new Response("{}",{status:428})).mockResolvedValueOnce(new Response("{}")).mockImplementation(response);
+  expect((await exchangeSession("auth0",enroll)).device.name).toBe(device.name);
+  expect(JSON.parse(enroll.mock.calls[1]![1].body)).toEqual({name:"Chrome on Windows",platform:"browser"});
+  const refresh=vi.fn().mockImplementation(response);expect((await exchangeSession("auth0",refresh)).device.name).toBe(device.name);expect(refresh).toHaveBeenCalledTimes(1);
+ } finally {vi.unstubAllGlobals();}
+});

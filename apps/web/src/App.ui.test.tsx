@@ -783,3 +783,13 @@ it("does not show an error while an ordinary delete request awaits confirmation"
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByText("Context permanently deleted")).toBeTruthy();
 });
+it.each([1280,360])("saves the current name in Settings at %spx and preserves the composer draft",async width=>{
+ Object.defineProperty(window,"innerWidth",{configurable:true,value:width});window.matchMedia=vi.fn().mockReturnValue({matches:width<840,addEventListener:vi.fn(),removeEventListener:vi.fn()});
+ const t=services();t.value.renameDevice=vi.fn(async name=>({id:t.value.device.id,name:`${name} saved`}));
+ render(<ContextWorkspace services={t.value} />);
+ const draft=screen.getByRole("textbox",{name:"Message to yourself"});await userEvent.type(draft,"Keep this unsent draft");
+ await userEvent.click(screen.getByRole("button",{name:"Open settings"}));await userEvent.click(screen.getByRole("button",{name:"Rename device"}));
+ const input=screen.getByRole("textbox",{name:"Device name"});await userEvent.clear(input);await userEvent.type(input," Work laptop ");await userEvent.click(screen.getByRole("button",{name:"Save device name"}));
+ expect(t.value.renameDevice).toHaveBeenCalledWith("Work laptop");expect(await screen.findByText("Work laptop saved")).toBeTruthy();
+ await userEvent.click(screen.getByRole("button",{name:"Close dialog"}));expect((screen.getByRole("textbox",{name:"Message to yourself"}) as HTMLTextAreaElement).value).toBe("Keep this unsent draft");expect(t.value.outbox.clear).not.toHaveBeenCalled();
+});

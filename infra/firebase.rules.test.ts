@@ -1,4 +1,5 @@
 import { liveDocumentQuery } from "../apps/web/src/queries.js";
+import { emulatorAddress } from "./emulator-address.js";
 import { readFile } from "node:fs/promises";
 
 import {
@@ -99,22 +100,16 @@ async function seed(
 }
 
 beforeAll(async () => {
-  if (process.env.FIRESTORE_EMULATOR_HOST !== "127.0.0.1:18080") {
-    throw new Error("Refusing to run without the dedicated Firestore emulator");
-  }
-  if (process.env.FIREBASE_STORAGE_EMULATOR_HOST !== "127.0.0.1:19199") {
-    throw new Error("Refusing to run without the dedicated Storage emulator");
-  }
+  const firestore = emulatorAddress(process.env.FIRESTORE_EMULATOR_HOST);
+  const storage = emulatorAddress(process.env.FIREBASE_STORAGE_EMULATOR_HOST);
   environment = await initializeTestEnvironment({
     projectId: PROJECT_ID,
     firestore: {
-      host: "127.0.0.1",
-      port: 18080,
+      ...firestore,
       rules: await readFile("infra/firestore.rules", "utf8"),
     },
     storage: {
-      host: "127.0.0.1",
-      port: 19199,
+      ...storage,
       rules: await readFile("infra/storage.rules", "utf8"),
     },
   });

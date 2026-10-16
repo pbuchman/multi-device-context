@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import fastifyStatic from "@fastify/static";
-import { DeviceCredentialSchema, DeviceEnrollmentSchema, IdSchema, type RuntimeConfig } from "@mdc/contracts";
+import { DeviceCredentialSchema, DeviceEnrollmentSchema, DeviceRenameSchema, IdSchema, type RuntimeConfig } from "@mdc/contracts";
 import { createHash } from "node:crypto";
 import { deviceIdentity, type DeviceAccessPort, type DeviceIdentity, type DevicePrincipal } from "./device-access.js";
 import type { AttachmentPort } from "./attachments.js";
@@ -297,6 +297,14 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     const identity = await authenticatedDevice(request);
     if (!identity) return reply.code(401).send({ error: "Unauthorized" });
     return identity.device;
+  });
+  app.patch("/api/device", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    const identity = await authenticatedDevice(request);
+    if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+    const parsed = DeviceRenameSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Bad Request" });
+    return options.devices!.rename(deviceIdentity(identity), parsed.data);
   });
 
   if (options.settings) {

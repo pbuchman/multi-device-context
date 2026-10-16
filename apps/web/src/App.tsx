@@ -1,3 +1,4 @@
+import { DeviceNameEditor } from "./device-name-editor.js";
 import { AccountDetails, defaultProfileState } from "./account-details.js";
 import { useWorkspaceCommands, type WorkspaceCommandRequest } from "./workspace-commands.js";
 import { SidebarResize } from "./sidebar-resize.js";
@@ -10,7 +11,7 @@ import { ContextOperations } from "./operations.js";
 import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import { browserCopyFile, clipboardImageFile } from "./clipboard-image.js";
-import type { ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
+import type { AccessDevice, ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
 import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type DragEvent, type SyntheticEvent } from "react";
 
@@ -83,6 +84,8 @@ export type WorkspaceServices = {
   viewer: Viewer;
   profile?: SessionProfile;
   device: Device;
+  renameDevice?(name: string): Promise<Device>;
+  subscribeDevice?(listener: (device: Device) => void): Unsubscribe;
   cloud: WorkspaceCloud;
   outbox: WorkspaceOutbox;
   drain(): Promise<void>;
@@ -228,6 +231,11 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [error, setError] = useState<string>();
   const [toast, setToast] = useState<string>();
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("mdc-theme") as Theme | null) ?? "system");
+  const [deviceName, setDeviceName] = useState(services.device.name);
+  useEffect(() => {
+    setDeviceName(services.device.name);
+    return services.subscribeDevice?.(current => setDeviceName(current.name));
+  }, [services]);
   const [launchAtLogin, setLaunchAtLoginState] = useState<boolean>();
   const [refreshing, setRefreshing] = useState(false);
   const refreshError = useRef<string | undefined>(undefined);
@@ -1189,6 +1197,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       </> : null}
       {panel.kind === "settings" ? <>
         <AccountDetails viewer={viewer} profile={services.profile} />
+        {services.renameDevice ? <DeviceNameEditor name={deviceName} onSave={async name => { const current = await services.renameDevice!(name); setDeviceName(current.name); return current.name; }} /> : null}
         <UpdateSettings updates={updateController} platformKind={services.platformKind ?? "browser"} hasNativeHost={services.platformKind === "desktop" || services.platformKind === "android"} />
         <label className="setting-row"><span>Theme<small>Choose how your chats look.</small></span><select value={theme} onChange={event => setTheme(event.target.value as Theme)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         {services.platformKind !== "android" ? <label className="setting-row"><span>Launch at login<small>{services.setLaunchAtLogin ? "Start with this computer." : "Available in the desktop app."}</small></span><input type="checkbox" disabled={!services.setLaunchAtLogin || launchAtLogin === undefined} checked={launchAtLogin ?? false} onChange={event => { const enabled = event.target.checked; setLaunchAtLoginState(enabled); void services.setLaunchAtLogin?.(enabled).catch(() => { if (isLive()) setError("Could not change the startup setting"); }); }} /></label> : null}
@@ -1223,7 +1232,15 @@ type WorkspaceBundle = { services: WorkspaceServices; invalidate(): void; settle
 export async function buildServices(session: ActiveSession, onAccessChange: () => void): Promise<WorkspaceBundle> {
   const native = session.platform.native;
   const nativeUpdates = session.platform.updates ?? createNativeUpdateClient(native ?? {});
-  const device = { id: session.device.id, name: session.device.name };
+  let device = { id: session.device.id, name: session.device.name };
+  const deviceListeners = new Set<(device: Device) => void>();
+  const updateDeviceName = (current: AccessDevice) => {
+    if (current.updatedAt < session.device.updatedAt) return;
+    session.device = { ...session.device, name: current.name, updatedAt: current.updatedAt };
+    if (device.name === current.name) return;
+    device = { id: current.id, name: current.name };
+    for (const listener of deviceListeners) listener(device);
+  };
   await prepareHistory(session.firebaseApp);
   const cloud = new FirebaseCloud(session.firebaseApp, session.uid, session.accessToken, session.device);
   const outbox = new DurableOutbox({ projectId: session.config.firebase.projectId, uid: session.uid });
@@ -1236,6 +1253,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
         if (current.id !== device.id || current.version !== session.device.version || current.mode !== session.device.mode) {
           invalidate(); onAccessChange(); throw new Error("Device access changed. Reloading your contexts.");
         }
+        updateDeviceName(current);
       });
       checkPending = operation;
       void operation.finally(() => { if (checkPending === operation) checkPending = undefined; }).catch(() => {});
@@ -1247,6 +1265,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   if (verifiedPolicy.id !== device.id || verifiedPolicy.version !== session.device.version || verifiedPolicy.mode !== session.device.mode) {
     cloud.invalidate(); outbox.close(); onAccessChange(); throw new Error("Device access changed. Reloading your contexts.");
   }
+  updateDeviceName(verifiedPolicy);
   const initialContexts = await cloud.refreshContexts();
   await applyLocalAccess(outbox.namespace, session.device, initialContexts.records.filter(context => context.originDeviceId === device.id).map(context => context.id));
   if (session.device.mode === "own") {
@@ -1331,7 +1350,8 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   });
   const stopPolicy = cloud.subscribeDevice(current => {
     if (!accessActive || accountSignOut.locked) return;
-    if (current.id !== device.id || current.version !== session.device.version || current.mode !== session.device.mode) { invalidate(); onAccessChange(); }
+    if (current.id !== device.id || current.version !== session.device.version || current.mode !== session.device.mode) { invalidate(); onAccessChange(); return; }
+    updateDeviceName(current);
   }, () => { if (accessActive && !accountSignOut.locked) { invalidate(); onAccessChange(); } });
   return {
     services: {
@@ -1364,7 +1384,13 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
       } : {}),
       viewer: session.viewer,
       ...(session.profile ? { profile: session.profile } : {}),
-      device,
+      get device() { return device; },
+      subscribeDevice: listener => { deviceListeners.add(listener); return () => deviceListeners.delete(listener); },
+      renameDevice: async name => {
+        const current = await cloud.renameDevice(name);
+        if (current.id !== device.id || current.version !== session.device.version || current.mode !== session.device.mode) { invalidate(); onAccessChange(); throw new Error("Device access changed. Refresh to continue."); }
+        updateDeviceName(current); return device;
+      },
       cloud,
       outbox,
       drain: () => accountSignOut.locked || !accessActive ? Promise.resolve() : runner.drain(),

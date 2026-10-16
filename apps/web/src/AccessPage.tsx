@@ -1,3 +1,4 @@
+import { DeviceNameEditor } from "./device-name-editor.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@auth0/auth0-spa-js";
 import type { AccessDevice } from "@mdc/contracts";
@@ -47,7 +48,16 @@ export function AccessPanel({ client, account, signOut }: { client: AccessClient
       {!registered ? <section className="access-card"><h2>Create your passkey</h2><p>This passkey confirms changes to device access and agent keys. In Chrome, choose Google Password Manager to make it available on your other devices.</p><button type="button" onClick={() => void run(async () => { await client.register(); await refresh(); setNotice("Passkey registered. You can now choose access for each device."); })}>Create passkey</button></section> : <>
         <section className="access-card"><div className="access-section-heading"><h2>Your devices</h2><button type="button" onClick={() => void run(refresh)}>Refresh</button></div><p>Every change requires your passkey. After changing access, return to the app to refresh it.</p>
           {devices.length === 0 ? <p>No installations yet. Sign in to the app on your phone first.</p> : <ul className="access-devices">{devices.map(device => <li key={device.id} className={device.id === target ? "access-device-target" : ""}>
-            <div><h3>{device.name}</h3><p>{device.platform} · {device.id.slice(0, 8)}{device.id === target ? " · Selected device" : ""}</p><strong>{device.mode === "all" ? "All contexts" : "Own contexts"}</strong></div>
+            <div className="access-device-details"><h3>{device.name}</h3><p>{device.platform} · {device.id.slice(0, 8)}{device.id === target ? " · Selected device" : ""}</p><strong>{device.mode === "all" ? "All contexts" : "Own contexts"}</strong><DeviceNameEditor name={device.name} renameLabel={`Rename device ${device.name}`} disabled={busy} onSave={async name => {
+              setBusy(true); setError(undefined); setNotice(undefined);
+              try {
+                const result = await client.perform({ action: "rename-device", targetId: device.id, name });
+                if (result.kind !== "device") throw new Error("Invalid device response");
+                setDevices(current => current.map(entry => entry.id === result.device.id ? result.device : entry));
+                setNotice(`Device name updated to ${result.device.name}.`);
+                return result.device.name;
+              } finally { setBusy(false); }
+            }} /></div>
             <button type="button" aria-label={`${device.mode === "all" ? "Limit to own contexts on" : "Allow all contexts on"} ${device.name}`} onClick={() => {
               if (device.mode === "all" && !window.confirm(`Limit “${device.name}” to its own contexts?\n\nWhen this device receives the change, unsent drafts, queued messages and files, and unfinished operations for contexts created on other devices will be removed from “${device.name}”. Already synced data remains available on your other devices.\n\nContinue to passkey confirmation?`)) return;
               void run(async () => {

@@ -10,6 +10,7 @@ afterEach(async () => { await Promise.all(servers.splice(0).map(server => server
 function fixture() {
   const device = { id, name: "Phone", platform: "android" as const, mode: "own" as "own" | "all", version: 1, createdAt: 1, updatedAt: 1 };
   const devices: DeviceAccessPort = {
+    rename: vi.fn(async (_identity, input) => ({ ...device, name: input.name, updatedAt: 2 })),
     enroll: vi.fn(async (_uid, input) => ({ device: { ...device, ...input }, credential: "a".repeat(43) })),
     exchange: vi.fn(async (_uid, deviceId, credential) => { if (deviceId !== id || credential !== "a".repeat(43)) throw new Error(); return device; }),
     authenticate: vi.fn(async token => { if (token !== "firebase") throw new Error(); return { uid: "owner", device }; }),
@@ -22,6 +23,21 @@ function fixture() {
 }
 const google = { authorization: "Bearer google" };
 describe("device session boundaries", () => {
+  it("allows only Firebase-bound devices to rename themselves with strict metadata", async () => {
+    const { app, devices } = fixture();
+    const headers = { authorization: "Bearer firebase" };
+    for (const authorization of [undefined, "Bearer google", "Bearer wrong"]) {
+      expect((await app.inject({ method: "PATCH", url: "/api/device", headers: authorization ? { authorization } : {}, payload: { name: "Radio" } })).statusCode).toBe(401);
+    }
+    for (const payload of [{ name: " " }, { name: "x".repeat(81) }, { name: "Radio", id }, { name: "Radio", mode: "all" }, { name: "Radio", version: 4 }, { name: 12 }, {}]) {
+      expect((await app.inject({ method: "PATCH", url: "/api/device", headers, payload })).statusCode).toBe(400);
+    }
+    expect(devices.rename).not.toHaveBeenCalled();
+    const response = await app.inject({ method: "PATCH", url: "/api/device", headers, payload: { name: "  Radio  " } });
+    expect(response.statusCode).toBe(200); expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toMatchObject({ id, name: "Radio", mode: "own", version: 1 });
+    expect(devices.rename).toHaveBeenCalledWith({ uid: "owner", deviceId: id }, { name: "Radio" });
+  });
   it("will not mint a user-only token; new installs cannot request full access or another ID", async () => {
     const { app, backend, devices } = fixture();
     expect((await app.inject({ method: "POST", url: "/api/session", headers: google })).statusCode).toBe(428);
