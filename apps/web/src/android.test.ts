@@ -189,3 +189,17 @@ it("routes Back through overlays, history and root minimization and ignores disp
     for (const handle of f.handles) expect(handle.remove).toHaveBeenCalledTimes(1);
   } finally { vi.unstubAllGlobals(); }
 });
+
+it("subscribes native revocation before exposing the dictation bridge and requires explicit admission", async () => {
+  const authorize = vi.fn(async () => ({ allowed: true }));
+  const f = fixture({ readDictation: async () => ({ id, phase: "complete" }), reportDictation: async () => {}, authorizeDictation: authorize });
+  const adapter = await createAndroidAdapter(f.dependencies);
+  expect(f.callbacks.has("dictationRevoked")).toBe(true);
+  const revoked = vi.fn(); const stop = adapter.dictation!.subscribeRevoked(revoked);
+  f.callbacks.get("dictationRevoked")!({ id: "not-a-uuid" }); expect(revoked).not.toHaveBeenCalled();
+  f.callbacks.get("dictationRevoked")!({ id }); expect(revoked).toHaveBeenCalledWith(id);
+  await adapter.dictation!.authorize({ id, contextId: id, revision: 3, itemId: id });
+  authorize.mockResolvedValueOnce({ allowed: false });
+  await expect(adapter.dictation!.authorize({ id, contextId: id, revision: 3, itemId: id })).rejects.toThrow("revoked");
+  stop(); adapter.dispose(); for (const handle of f.handles) expect(handle.remove).toHaveBeenCalledOnce();
+});

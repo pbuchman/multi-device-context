@@ -2,6 +2,7 @@ import type { DesktopBridge, NativeFile } from "@mdc/contracts";
 import { mobileBuild } from "./api.js";
 import { inspectDesktopBridge } from "./desktop.js";
 import { createNativeUpdateClient, type NativeUpdateClient } from "./updates.js";
+import type { DictationBridge } from "./dictation.js";
 
 /** Desktop v1 remains unchanged; shared callers use only supported capabilities. */
 export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLaunchAtLogin" | "setLaunchAtLogin" | "signOut"> &
@@ -10,6 +11,7 @@ export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLa
     signOut(reviewedNativeIds?: readonly string[]): Promise<void>;
   };
 export type PlatformAdapter = {
+  dictation?: DictationBridge;
   kind: "browser" | "desktop" | "android";
   native?: NativePlatform;
   updates?: NativeUpdateClient;
