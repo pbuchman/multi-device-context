@@ -236,7 +236,10 @@ class DictationWebViewTest {
   if(android.os.Build.VERSION.SDK_INT>=34)actions.add("replace" to {it.replaceText(0,2,"after",1,null)})
   for((name,action) in actions) {
    val input=readyInput(web);prepared()
-   instrumentation.runOnMainSync {action(input)}
+   // Match Android's InputConnection dispatch, including Chromium's dedicated IME looper.
+   val handler=input.handler ?: android.os.Handler(android.os.Looper.getMainLooper())
+   val dispatch=java.util.concurrent.FutureTask {action(input)}
+   assertTrue("input handler accepts $name",handler.post(dispatch));dispatch.get(3,TimeUnit.SECONDS)
    assertEquals("revoked by $name","cancelled",DictationRuntime.snapshot().optString("phase"))
   }
  }
