@@ -1,13 +1,15 @@
 import { useEffect, useRef } from "react";
 import type { Id } from "@mdc/contracts";
-import { DictationSession, messageAcknowledged, type DictationBridge, type DictationAuthority, type EditorSnapshot } from "./dictation.js";
+import { DictationSession, messageAcknowledged, insertedAtSelection, type DictationBridge, type DictationAuthority, type EditorSnapshot, type DictationCancelReason } from "./dictation.js";
 import type { CloudSnapshot } from "./cloud.js";
 import type { ItemRecord } from "./model.js";
+import { PlatformCommitEvents, platformCommitKey } from "./platform-commit-events.js";
 
 type Options = {
   bridge?: DictationBridge;
   read(): EditorSnapshot | undefined;
   eligible(): boolean;
+  owns?(before: EditorSnapshot): boolean;
   send(id: Id, snapshot: EditorSnapshot, authority: DictationAuthority): Promise<{ contextId: Id; itemId: Id }>;
   watch(chat: Id, emit: (value: CloudSnapshot<ItemRecord>) => void, fail: () => void): () => void;
 };
@@ -21,21 +23,42 @@ export function useDictation(options: Options) {
     let live = true, running = false, session: DictationSession | undefined;
     let queued = false, unwatch: (() => void) | undefined;
     let authority = new AbortController();
-    const cancel = () => {
-      authority.abort();
-      session?.interfere(); unwatch?.(); unwatch = undefined;
-      if (session) void bridge.report({ id: session.id, phase: "cancelled" }).catch(() => {});
+    let platformCommit: PlatformCommitEvents | undefined;
+    const cancel = (reason: DictationCancelReason = "RENDERER_CANCELLED") => {
+      authority.abort(); platformCommit?.dispose(); platformCommit = undefined;
+      session?.interfere(reason); unwatch?.(); unwatch = undefined;
+      if (session) void bridge.report({ id: session.id, phase: "cancelled", reason: session.reason }).catch(() => {});
     };
     // Install before reading/preparing any session. This aborts IDB while send
     // is awaiting; native-only cancellation never waits for the next poll.
-    const stopRevoked = bridge.subscribeRevoked(id => { if (session?.id === id) cancel(); });
+    const stopRevoked = bridge.subscribeRevoked(id => { if (session?.id === id) cancel("RENDERER_REVOKED"); });
     const interference = (event: Event) => {
-      // System dictation input has no key/paste/pointer action in this document.
-      // Any human interaction during ownership is ambiguous and revokes sending
-      // and late music resumption, including after the outbox commit.
-      if (session) cancel();
+      if (!session) return;
+      if (platformCommit && ["keydown", "keyup", "beforeinput", "input"].includes(event.type)) { platformCommit.observe(event); return; }
+      if (event.type === "keydown" && platformCommitKey(event) && !queued && !session.invalid && ["recording", "processing"].includes(session.phase)) {
+        const owner = session, before = owner.before, editor = latest.current.read();
+        const target = event.target;
+        if (!(target instanceof HTMLTextAreaElement) || document.activeElement !== target || !editor?.focused || !latest.current.eligible()
+          || editor.chatId !== before.chatId || editor.revision !== before.revision || editor.text !== before.text || editor.start !== before.start || editor.end !== before.end || editor.code !== before.code || !bridge.confirmProvisional) { cancel("RENDERER_KEY"); return; }
+        // A renderer poll may still say recording. Only fresh native accepted processing input can validate the buffered chain.
+        platformCommit = new PlatformCommitEvents(target, () => bridge.confirmProvisional!({ id: owner.id, contextId: before.chatId, revision: before.revision }),
+          phase => {
+            const current = latest.current, editor = current.read();
+            const sameOwner = current.owns?.(before) ?? (editor?.chatId === before.chatId && editor.code === before.code && editor.focused);
+            if (!live || session !== owner || owner.invalid || queued || !current.eligible() || document.activeElement !== target || !sameOwner) return false;
+            // At document capture, DOM input precedes React onChange. Only this exact step may use stable ownership instead of a settled editor read.
+            if (phase === "input-capture") return true;
+            return editor !== undefined && editor.chatId === before.chatId && editor.code === before.code && editor.focused
+              && (phase !== "proof" || insertedAtSelection(before, editor));
+          },
+          () => cancel("RENDERER_KEY"));
+        platformCommit.observe(event); return;
+      }
+      if (["keyup", "beforeinput", "input"].includes(event.type)) return;
+      cancel(event.type === "keydown" ? "RENDERER_KEY" : event.type === "pointerdown" ? "RENDERER_POINTER" : event.type === "paste" ? "RENDERER_PASTE" : event.type === "drop" ? "RENDERER_DROP" : "RENDERER_COMPOSITION");
     };
-    for (const event of ["keydown", "pointerdown", "paste", "drop", "compositionstart"]) document.addEventListener(event, interference, true);
+    const events = ["keydown", "keyup", "beforeinput", "input", "pointerdown", "paste", "drop", "compositionstart"];
+    for (const event of events) document.addEventListener(event, interference, true);
     const poll = async () => {
       if (!live || running) return;
       running = true;
@@ -47,19 +70,20 @@ export function useDictation(options: Options) {
           queued = false;
           authority = new AbortController();
           const editor = latest.current.read();
-          if (!editor || !latest.current.eligible()) { await bridge.report({ id: state.id, phase: "cancelled" }); return; }
+          if (!editor || !latest.current.eligible()) { await bridge.report({ id: state.id, phase: "cancelled", reason: !editor ? "RENDERER_READ" : "RENDERER_ELIGIBILITY" }); return; }
           session = new DictationSession(state.id, editor);
           await bridge.report({ id: state.id, phase: "prepared", contextId: editor.chatId, revision: editor.revision });
         }
         if (!session || state.id !== session.id || session.invalid) return;
         if (state.phase === "cancelled") { cancel(); return; }
-        if (!latest.current.eligible()) { cancel(); return; }
+        if (!latest.current.eligible()) { cancel("RENDERER_ELIGIBILITY"); return; }
         const editor = latest.current.read();
-        if (!editor || editor.chatId !== session.before.chatId) { cancel(); return; }
+        if (!editor || editor.chatId !== session.before.chatId) { cancel(!editor ? "RENDERER_READ" : "RENDERER_CHAT"); return; }
         if (queued) return;
         if (["recording", "processing", "complete"].includes(state.phase)) session.recording();
         if (["processing", "complete"].includes(state.phase) && session.phase === "recording") session.finishing(Date.now());
-        if (!session.observe(editor, Date.now())) { cancel(); return; }
+        if (platformCommit?.pending) return;
+        if (!session.observe(editor, Date.now())) { cancel(session.reason); return; }
         if (state.phase === "complete" && session.ready(editor, Date.now())) {
           // Claim before awaiting IndexedDB; an event/poll cannot enqueue twice.
           queued = true;
@@ -80,15 +104,15 @@ export function useDictation(options: Options) {
             if (acknowledged || !live || owner.invalid || session !== owner || !messageAcknowledged(snapshot, result.contextId, result.itemId)) return;
             acknowledged = true;
             unwatch?.(); unwatch = undefined;
-            void bridge.report({ id: owner.id, phase: "synced", ...result }).catch(cancel);
-          }, cancel);
+            void bridge.report({ id: owner.id, phase: "synced", ...result }).catch(() => cancel("RENDERER_FAILURE"));
+          }, () => cancel("RENDERER_FAILURE"));
           if (acknowledged || owner.invalid || !live) stop(); else unwatch = stop;
         }
-      } catch { cancel(); }
+      } catch { cancel("RENDERER_FAILURE"); }
       finally { running = false; }
     };
     const timer = window.setInterval(() => void poll(), 150);
     void poll();
-    return () => { live = false; stopRevoked(); window.clearInterval(timer); cancel(); for (const event of ["keydown", "pointerdown", "paste", "drop", "compositionstart"]) document.removeEventListener(event, interference, true); };
+    return () => { live = false; stopRevoked(); window.clearInterval(timer); cancel("RENDERER_DISPOSED"); for (const event of events) document.removeEventListener(event, interference, true); };
   }, [bridge]);
 }

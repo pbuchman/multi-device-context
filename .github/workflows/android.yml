@@ -97,10 +97,35 @@ jobs:
           adb shell settings put global window_animation_scale 0
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
-      - name: Verify Android updater on the emulator
+          timeout 10 adb -s emulator-5554 shell input keyevent KEYCODE_WAKEUP
+          timeout 10 adb -s emulator-5554 shell wm dismiss-keyguard
+      - name: Compile production dictation hook for instrumentation only
+        run: pnpm --filter @mdc/mobile android:dictation-fixture
+      - name: Verify Android updater and dictation on the emulator
         run: |
+          umask 077
+          timeout 10 adb -s emulator-5554 shell dumpsys window policy > "$RUNNER_TEMP/mdc-window-before-tests.txt" 2>&1 || true
+          timeout 10 adb -s emulator-5554 shell dumpsys power > "$RUNNER_TEMP/mdc-power-before-tests.txt" 2>&1 || true
           apps/mobile/android/gradlew -p apps/mobile/android connectedDebugAndroidTest \
-            -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest
+            -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest,com.multidevicecontext.mobile.DictationWebViewTest
+      - name: Capture failed synthetic Android test diagnostics
+        if: failure()
+        run: |
+          umask 077
+          timeout 10 adb -s emulator-5554 shell dumpsys window policy > "$RUNNER_TEMP/mdc-window-after-tests.txt" 2>&1 || true
+          timeout 10 adb -s emulator-5554 shell dumpsys power > "$RUNNER_TEMP/mdc-power-after-tests.txt" 2>&1 || true
+          timeout 10 adb -s emulator-5554 logcat -d -v threadtime 'TestRunner:I' 'Capacitor/Console:E' 'chromium:W' 'AndroidRuntime:E' '*:S' > "$RUNNER_TEMP/mdc-test-logcat-raw.txt" 2>&1 || true
+          python3 - "$RUNNER_TEMP/mdc-test-logcat-raw.txt" "$RUNNER_TEMP/mdc-test-logcat.txt" <<'PY'
+          import pathlib, re, sys
+          raw, output = map(pathlib.Path, sys.argv[1:])
+          lines = raw.read_text(errors="replace").splitlines()
+          pids = {line.split()[2] for line in lines if "TestRunner:" in line and "com.multidevicecontext.mobile" in line and len(line.split()) >= 6}
+          text = "\n".join(line for line in lines if len(line.split()) >= 6 and line.split()[2] in pids) if pids else "NO_APP_TEST_PID_IN_RETAINED_BUFFER"
+          text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*", r"\1[REDACTED]", text)
+          text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "[REDACTED-JWT]", text)
+          text = re.sub(r'(?i)((?:access|refresh|id)[_-]?token["\s:=]+)[^\s,"}]+', r"\1[REDACTED]", text)
+          output.write_text(text + "\n"); raw.unlink()
+          PY
       - name: Exercise Android manager A to B update
         env:
           ANDROID_SERIAL: emulator-5554
@@ -114,6 +139,13 @@ jobs:
           path: |
             ${{ runner.temp }}/mdc-update-emulator.log
             ${{ runner.temp }}/android-update-acceptance.json
+            ${{ runner.temp }}/mdc-window-before-tests.txt
+            ${{ runner.temp }}/mdc-power-before-tests.txt
+            ${{ runner.temp }}/mdc-window-after-tests.txt
+            ${{ runner.temp }}/mdc-power-after-tests.txt
+            ${{ runner.temp }}/mdc-test-logcat.txt
+            apps/mobile/android/app/build/reports/androidTests/connected/debug/**
+            apps/mobile/android/app/build/outputs/androidTest-results/connected/**/*.xml
           if-no-files-found: ignore
           retention-days: 7
       # Configuration tests assert that fixture mode rejects release generation;

@@ -43,8 +43,8 @@ android {
         applicationId "com.multidevicecontext.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode Integer.parseInt(System.getenv("MDC_ANDROID_VERSION_CODE") ?: "18")
-        versionName "0.6.1"
+        versionCode Integer.parseInt(System.getenv("MDC_ANDROID_VERSION_CODE") ?: "19")
+        versionName "0.6.2"
         manifestPlaceholders = [auth0Domain: "${authDomain()}", auth0Scheme: "com.multidevicecontext.mobile"]
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
@@ -136,4 +136,13 @@ try {
     }
 } catch(Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
+
+// The compiled real hook is packaged only in the synthetic instrumentation APK.
+tasks.register('generateDictationHookFixture', Exec) {
+    workingDir rootProject.projectDir.parentFile.parentFile.parentFile
+    commandLine 'node', 'apps/mobile/scripts/build-dictation-fixture.mjs'
+}
+tasks.matching { it.name == 'mergeDebugAndroidTestAssets' }.configureEach {
+    dependsOn tasks.named('generateDictationHookFixture')
 }

@@ -8,15 +8,15 @@ const alpha="00000000-0000-4000-8000-000000000001",session="00000000-0000-4000-8
 afterEach(()=>{cleanup();localStorage.clear();history.replaceState({},"","/");});
 it.each([false,true])("connects native completion to the real workspace and durable outbox, existing chat=%s",async existing=>{
  if(existing)history.replaceState({},"",`/contexts/${alpha}`);
- let state:DictationStatus={phase:"none"};
- const bridge:DictationBridge={authorize:async()=>{},subscribeRevoked:()=>()=>{},read:async()=>state,report:vi.fn(async value=>{state={id:value.id,phase:value.phase};})};
+ let state:DictationStatus={phase:"none"};let field:HTMLTextAreaElement;let expected="";let queueReports=0;
+ const bridge:DictationBridge={authorize:async()=>{},subscribeRevoked:()=>()=>{},read:async()=>state,report:vi.fn(async value=>{if(value.phase==="queued" && queueReports++===0){expect(await outbox.count()).toBe(1);expect(field.value).toBe(expected);}state={id:value.id,phase:value.phase};})};
  const outbox=new DurableOutbox({projectId:"workspace-dictation",uid:crypto.randomUUID()});
  const record=existing?[{id:alpha,title:"Existing",createdAt:1,updatedAt:1,syncState:"synced" as const}]:[];
  const services:WorkspaceServices={platformKind:"android",dictation:bridge,viewer:{uid:"fixture",name:"Synthetic"},device:{id:alpha,name:"Synthetic Android"},
   cloud:{subscribeContexts:emit=>{emit({records:record,fromCache:false,hasPendingWrites:false});return()=>{};},subscribeItems:()=>()=>{},renameContext:async()=>{},deleteContext:async()=>{},deleteItem:async()=>{},attachmentBytes:async()=>new Uint8Array()},
   outbox,drain:async()=>{},copyText:async()=>{},copyFile:async()=>{},saveFile:async()=>true,signOut:async()=>{}};
  render(<ContextWorkspace services={services}/>);
- const field=await screen.findByRole("textbox",{name:"Message to yourself"}) as HTMLTextAreaElement;
+ field=await screen.findByRole("textbox",{name:"Message to yourself"}) as HTMLTextAreaElement;
  await act(async()=>{field.focus();});
  const prior=existing?"alpha beta":"";if(existing)fireEvent.change(field,{target:{value:prior}});
  await waitFor(()=>expect(field.value).toBe(prior));
@@ -27,10 +27,10 @@ it.each([false,true])("connects native completion to the real workspace and dura
  await waitFor(()=>expect(bridge.report).toHaveBeenCalledWith(expect.objectContaining({phase:"prepared"})),{timeout:2000});
  state={id:session,phase:"recording"};await new Promise(resolve=>setTimeout(resolve,200));
  state={id:session,phase:"processing"};await new Promise(resolve=>setTimeout(resolve,200));
- const expected=existing?"alpha words":"words";
+ expected=existing?"alpha words":"words";
  fireEvent.change(field,{target:{value:expected}});act(()=>field.setSelectionRange(expected.length,expected.length));state={id:session,phase:"complete"};
  await waitFor(()=>expect(bridge.report).toHaveBeenCalledWith(expect.objectContaining({phase:"queued"})),{timeout:3000});
  const queued=await outbox.list();expect(queued).toHaveLength(1);expect(queued[0]!.content).toEqual({kind:"text",text:expected});
- if(existing)expect(queued[0]!.contextId).toBe(alpha);expect(field.value).toBe("");
+ if(existing)expect(queued[0]!.contextId).toBe(alpha);await waitFor(()=>expect(field.value).toBe(""));expect(queueReports).toBeGreaterThanOrEqual(1);
  state={id:session,phase:"complete"};await new Promise(resolve=>setTimeout(resolve,300));expect(await outbox.count()).toBe(1);outbox.close();
 });

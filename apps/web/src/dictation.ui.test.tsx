@@ -37,7 +37,7 @@ it.each([["",0,0], ["prior draft",11,11], ["abcdef",2,2], ["abcdef",2,4]] as con
 });
 it("Done alone expires without replacing draft or sending", async () => {
  const t=harness("prior"); await tick();t.phase("recording");await tick();t.phase("processing");await tick();t.phase("complete");await tick(60_150);
- expect(t.send).not.toHaveBeenCalled(); expect(t.editor.text).toBe("prior");expect(t.bridge.report).toHaveBeenCalledWith({id,phase:"cancelled"});
+ expect(t.send).not.toHaveBeenCalled(); expect(t.editor.text).toBe("prior");expect(t.bridge.report).toHaveBeenCalledWith({id,phase:"cancelled",reason:"RENDERER_TIMEOUT"});
 });
 it("human keyboard/paste/composition cancels before insertion can authorize a send", async () => {
  const t=harness("prior");await tick();t.phase("recording");await tick();t.phase("processing");await tick();
@@ -46,7 +46,7 @@ it("human keyboard/paste/composition cancels before insertion can authorize a se
 });
 it("navigation after offline queue cancels late acknowledgement authority", async () => {
  const t=harness();await complete(t);expect(t.send).toHaveBeenCalledOnce();t.edit({chatId:id});await tick();act(()=>t.ack());
- expect(t.bridge.report).not.toHaveBeenCalledWith(expect.objectContaining({phase:"synced"}));expect(t.bridge.report).toHaveBeenCalledWith({id,phase:"cancelled"});
+ expect(t.bridge.report).not.toHaveBeenCalledWith(expect.objectContaining({phase:"synced"}));expect(t.bridge.report).toHaveBeenCalledWith({id,phase:"cancelled",reason:"RENDERER_CHAT"});
 });
 it("offline queue can acknowledge late while the original session remains valid", async () => {
  const t=harness();await complete(t);act(()=>t.ack(true,true));await tick(120_000);expect(t.send).toHaveBeenCalledOnce();
@@ -71,4 +71,24 @@ it("native-only revocation aborts send immediately while polling is awaiting it"
  act(()=>t.revokeNative());expect(signal?.aborted).toBe(true);
  await act(async()=>{release();await Promise.resolve();});
  expect(t.bridge.report).not.toHaveBeenCalledWith(expect.objectContaining({phase:"queued"}));
+});
+
+it("API33-style input events remain provisional until the native complete command and settled editor", async () => {
+ const t=harness("alpha beta",6,10);await tick();t.phase("recording");await tick();t.phase("processing");await tick();
+ fireEvent(document,new Event("beforeinput",{bubbles:true}));
+ t.edit({text:"alpha words",start:11,end:11,revision:2});fireEvent.input(document);
+ await tick(900);expect(t.send).not.toHaveBeenCalled();
+ t.phase("complete");await tick();expect(t.send).toHaveBeenCalledOnce();expect(t.send.mock.calls[0]?.[1].text).toBe("alpha words");
+ t.phase("complete");await tick(900);expect(t.send).toHaveBeenCalledOnce();
+});
+
+it.each([
+ ["keydown","RENDERER_KEY"], ["pointerdown","RENDERER_POINTER"], ["paste","RENDERER_PASTE"],
+ ["drop","RENDERER_DROP"], ["compositionstart","RENDERER_COMPOSITION"],
+] as const)("%s during provisional input revokes sending and preserves the first reason", async (event,reason) => {
+ const t=harness("prior");await tick();t.phase("recording");await tick();t.phase("processing");await tick();
+ fireEvent(document,new Event(event,{bubbles:true,cancelable:true}));
+ t.edit({text:"prior words",start:11,end:11,revision:2});fireEvent.input(document);t.phase("complete");await tick(1200);
+ expect(t.send).not.toHaveBeenCalled();expect(t.editor.text).toBe("prior words");
+ expect(t.bridge.report).toHaveBeenCalledWith({id,phase:"cancelled",reason});
 });

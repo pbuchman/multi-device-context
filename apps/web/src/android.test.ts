@@ -203,3 +203,13 @@ it("subscribes native revocation before exposing the dictation bridge and requir
   await expect(adapter.dictation!.authorize({ id, contextId: id, revision: 3, itemId: id })).rejects.toThrow("revoked");
   stop(); adapter.dispose(); for (const handle of f.handles) expect(handle.remove).toHaveBeenCalledOnce();
 });
+
+it("requires affirmative fresh native provisional confirmation and invalidates late responses", async()=>{
+ let resolve!: (value:{allowed:boolean})=>void;
+ const confirm=vi.fn(async()=>({allowed:true}));
+ const f=fixture({readDictation:async()=>({id,phase:"processing"}),reportDictation:async()=>{},authorizeDictation:async()=>({allowed:true}),confirmProvisionalDictation:confirm});
+ const adapter=await createAndroidAdapter(f.dependencies);const claim={id,contextId:id,revision:3};
+ await adapter.dictation!.confirmProvisional!(claim);expect(confirm).toHaveBeenCalledWith(claim);
+ confirm.mockResolvedValueOnce({allowed:false});await expect(adapter.dictation!.confirmProvisional!(claim)).rejects.toThrow("no longer valid");
+ confirm.mockImplementationOnce(()=>new Promise(done=>{resolve=done;}));const pending=adapter.dictation!.confirmProvisional!(claim);const rejected=expect(pending).rejects.toThrow();adapter.dispose();resolve({allowed:true});await rejected;
+});
