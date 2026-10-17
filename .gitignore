@@ -40,3 +40,6 @@ apps/desktop/bundle/
 
 # Local Kotlin compiler session/cache state
 apps/mobile/android/.kotlin/
+
+# Generated production-hook bundle for the synthetic Android test APK only.
+apps/mobile/android/app/src/androidTest/assets/dictation-hook-fixture.js

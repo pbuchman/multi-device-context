@@ -73,11 +73,12 @@ update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
 increase it for each update. It is not automatically incremented. Keep the
-application ID and signing key unchanged. Version 0.6.0 uses code 17, above the
-previous official code 15 and private code 16; do not reuse either code.
+application ID and signing key unchanged. Version0.6.2 uses code19, above official
+0.6.1/code18 and0.6.0/code17. Earlier compatible codes15/16 also remain eligible
+for an in-place upgrade with the same key; do not reuse a published code.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=17
+export MDC_ANDROID_VERSION_CODE=19
 pnpm --filter @mdc/mobile android:release
 ```
 
@@ -363,6 +364,8 @@ and emulator checks are not a substitute for that physical acceptance.
 
 ## Owned local dictation integration
 
-MDC 0.6.1 adds the optional [local dictation bridge](android-dictation.md). The
-existing launch/focus/IME contract remains available. The private steering adapter
-requires its own installation and user-granted Accessibility/media access.
+MDC0.6.2 updates the optional [local dictation bridge](android-dictation.md) introduced
+in0.6.1. It supports correlated provisional input and retains the existing
+launch/focus/IME contract. The separate private steering adapter/code17 requires
+its own installation and user-granted Accessibility/media access. Source tests
+and API36 emulator results remain separate from Android13/API33 radio acceptance.

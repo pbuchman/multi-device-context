@@ -1,4 +1,4 @@
-# Owned local dictation bridge (0.6.1)
+# Owned local dictation bridge (0.6.2)
 
 This optional Android integration is local to the installed MDC and approved
 steering adapter. Ordinary typing, local drafts and the 0.6.0 focus/IME contract
@@ -30,14 +30,41 @@ neither message text nor a target chat. MDC's existing signer remains unchanged.
    range, return to the exact idle control, and at least 600 ms of unchanged text
    **and caret**. Stale listening observations are tolerated only during the
    bounded eight-second stop-settle interval before processing is observed.
-4. MDC independently observes the native Chromium virtual accessibility provider's
-   accepted `ACTION_SET_TEXT`/`ACTION_PASTE` insertion during this processing
-   session. IME text/composition/selection, keyboard, touch, paste, chat navigation,
-   unexpected revisions or a second replacement revoke authority. If Wispr uses
-   another insertion path, the integration rejects it until explicitly supported
-   and tested. Accessibility actions carry system mediation rather than an
-   app-level Wispr caller identity: another user-enabled Accessibility service
-   acting in the same narrow window cannot be attributed independently.
+4. MDC independently observes an accepted Chromium virtual Accessibility
+   `ACTION_SET_TEXT`/`ACTION_PASTE` insertion. Wispr's Android33 Accessibility input
+   method can instead use three-argument `commitText(text,1,null)`. Version0.6.2
+   retains this known shape only as a **provisional input**, during the live
+   approved processing lease, with the attached WebView/window focused and the
+   current native WindowInsets positively showing the IME hidden. Unknown state
+   fails closed. The raw commit overload and null attributes do **not** identify
+   Wispr; ordinary IMEs can call that overload too. Authority comes from the full
+   correlated completion chain, not a claimed commit caller UID.
+   The candidate alone cannot complete or enqueue. Only the approved adapter's
+   later owned processing→exact idle, preserved-range replacement and600ms settle
+   confirmation can complete it, with the same native session/context/revision.
+   Native field/IME conditions are checked again at completion and both outbox
+   admission checks, on the view thread with a bounded500ms wait. Ordinary
+   two-argument commits, visible-IME or unknown-field commits, composition,
+   selection, keyboard, touch, context-menu paste, navigation, cancellation,
+   unexpected revisions and any second input revoke authority while preserving
+   the edit. The renderer independently rejects pointer/paste/composition/drop
+   and ordinary key events and any changed chat, code mode, range or repeated replacement.
+   Chromium emits a trusted noncomposing `Unidentified`/empty-code/keyCode229 keydown,
+   `beforeinput(insertText)`, `input(insertText)`, then matching keyup for this native
+   commit. Exactly one sequence on the focused captured textarea may wait for fresh
+   native confirmation of accepted provisional input, same owner/context/revision,
+   current connection generation/field/hidden IME, live lease and original deadline.
+   The full sequence plus confirmation has one fixed1000ms monotonic bound. While
+   pending it cannot send; partial/repeated/different events or late/denied proof
+   cancel. During the exact input-capture step, DOM changes precede React onChange;
+   only stable current chat/code/editor focus identifies ownership during that
+   transient mismatch. Keyup and fresh proof again require a settled editor read,
+   and proof requires the exact preserved-range insertion. The event shape and
+   `isTrusted` alone grant no authority.
+   Android does not expose an app-side per-commit Accessibility-versus-IME caller
+   identity. An input from another enabled service with exactly the same otherwise
+   unbroken observations cannot be independently attributed. Accessibility node
+   actions already share that enabled-service attribution limitation.
 5. The renderer requires its own matching draft/caret and settled insertion. It
    sends the **whole current editor**, including prior text, via `DurableOutbox`.
    An IndexedDB transaction creates both the action and a persistent session→chat/
@@ -61,6 +88,19 @@ send nothing and preserve the editor. No text, caret, tokens or headings enter
 adapter diagnostics. The native runtime and renderer session authority are
 volatile: process death/reload never replays auto-send or music. A committed
 ordinary outbox action retains its existing offline/retry behavior.
+
+Local draft headings include a prefix of the draft and can change on legitimate
+insertion. The adapter retains its window/composer/focus/navigation guards, but
+allows this heading change only after the trusted processing lease reports a
+native input in progress or accepted input for the pinned context/revision.
+Headings do not grant identity or send authority. No adapter-supplied text/chat
+enters MDC; its native renderer remains the final editor validator.
+
+Native snapshots retain the first cancellation reason enum, prior phase and time;
+renderer cancellation adds only a fixed reason enum. Adapter diagnostics export
+those enums and match/candidate booleans, never context IDs, revision values,
+transcripts, headings, tokens or hashes. First failure is not replaced by later
+cleanup. These diagnostics do not restore authority after restart.
 
 ## Spotify belongs to the private adapter
 
@@ -90,3 +130,23 @@ separately. Physical DUDU7/Wispr processing/insertion timing, Bluetooth audio,
 notification-listener grant, local Spotify session controls, offline reconnect and
 late-ack behavior require explicit hardware acceptance. No radio, phone, playback
 or notification-access settings are changed by building this integration.
+
+The provisional input witness is bound to the current native InputConnection generation. A replaced or closed connection cannot arm an old wrapper; replacement also revokes an existing candidate before completion or durable admission. This native check identifies the current connection, not a DOM field. Renderer editor identity, context, revision and stable range checks remain necessary. Composing regions, completion/correction/replacement, content, editor/private commands and handwriting operations revoke automation while delegating the normal editor operation. Fresh native UI reads happen outside the dictation state monitor; the same guard, generation, phase and lease are rechecked under the monitor afterward.
+
+After IndexedDB has durably committed the exact claimed session/item, the renderer reports `queued` before clearing its own editor. Native connection replacement after this boundary does not revoke insertion authority because it has already retired. It cannot authorize another message, and only the exact queued item can become synced. Real key/touch/composition/navigation interference still cancels late acknowledgement and music-resume authority.
+
+Physical evidence before0.6.2 observed hidden IME/focused composer before and after a real insertion, with a984ms snapshot gap in TestE. It did not measure native WindowInsets at exact commit entry. API36 emulator validation covers the synthetic compiled production hook; the Android13/API33 radio guard and full real-Wispr send/Spotify-resume outcome remain unverified while that radio is disconnected. The instrumentation hook bundle and test-only JS facade are generated into `src/androidTest/assets` only and must not appear in an official release APK.
+
+The checked-in `apps/mobile/tests/android-dictation-hook.tsx` imports the real
+production `useDictation` and platform-event gate. Reproduce its test-only bundle
+with Node22 and pinned workspace dependencies:
+
+```sh
+pnpm --filter @mdc/mobile android:dictation-fixture
+```
+
+`mergeDebugAndroidTestAssets` also invokes the checked-in builder automatically.
+The generated `src/androidTest/assets/dictation-hook-fixture.js` is ignored by Git
+and packaged only in the test APK. Android CI executes `DictationWebViewTest`
+alongside `UpdateSecurityTest`; production release review must reject the test
+JS facade, hook fixture asset and debug lease probe from the final APK.

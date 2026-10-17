@@ -97,10 +97,12 @@ jobs:
           adb shell settings put global window_animation_scale 0
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
-      - name: Verify Android updater on the emulator
+      - name: Compile production dictation hook for instrumentation only
+        run: pnpm --filter @mdc/mobile android:dictation-fixture
+      - name: Verify Android updater and dictation on the emulator
         run: |
           apps/mobile/android/gradlew -p apps/mobile/android connectedDebugAndroidTest \
-            -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest
+            -Pandroid.testInstrumentationRunnerArguments.class=com.multidevicecontext.mobile.UpdateSecurityTest,com.multidevicecontext.mobile.DictationWebViewTest
       - name: Exercise Android manager A to B update
         env:
           ANDROID_SERIAL: emulator-5554

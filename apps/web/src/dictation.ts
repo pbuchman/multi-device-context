@@ -4,12 +4,14 @@ import type { CloudSnapshot } from "./cloud.js";
 
 export type DictationStatus = { id?: string; phase: string };
 export type DictationClaim = { contextId: Id; itemId: Id };
+export type DictationCancelReason = "RENDERER_CANCELLED" | "RENDERER_REVOKED" | "RENDERER_KEY" | "RENDERER_POINTER" | "RENDERER_PASTE" | "RENDERER_DROP" | "RENDERER_COMPOSITION" | "RENDERER_ELIGIBILITY" | "RENDERER_READ" | "RENDERER_CHAT" | "RENDERER_FOCUS" | "RENDERER_CODE" | "RENDERER_TIMEOUT" | "RENDERER_CHANGE_PHASE" | "RENDERER_SECOND_CHANGE" | "RENDERER_INSERTION" | "RENDERER_SELECTION" | "RENDERER_FAILURE" | "RENDERER_DISPOSED";
 export type DictationAuthority = { current(): boolean; signal: AbortSignal; validate(claim: DictationClaim): Promise<void> };
 export type DictationBridge = {
+  confirmProvisional?(value: { id: string; contextId: Id; revision: number }): Promise<void>;
   authorize(value: { id: string; contextId: Id; revision: number; itemId: Id }): Promise<void>;
   subscribeRevoked(listener: (id: string) => void): () => void;
   read(): Promise<DictationStatus>;
-  report(value: { id: string; phase: string; contextId?: string; revision?: number; itemId?: string }): Promise<void>;
+  report(value: { id: string; phase: string; contextId?: string; revision?: number; itemId?: string; reason?: DictationCancelReason }): Promise<void>;
 };
 export type EditorSnapshot = { chatId: Id; revision: number; text: string; start: number; end: number; code: boolean; focused: boolean };
 
@@ -49,6 +51,7 @@ export class DictationSession {
   readonly before: EditorSnapshot;
   phase = "prepared";
   invalid = false;
+  reason: DictationCancelReason = "RENDERER_CANCELLED";
   changed = false;
   deadline = Infinity;
   stableSince = 0;
@@ -58,16 +61,23 @@ export class DictationSession {
     if (!before.focused || before.start < 0 || before.end < before.start || before.end > before.text.length) throw new Error("Editor not ready");
     this.before = { ...before }; this.lastText = before.text; this.lastRevision = before.revision;
   }
-  interfere() { this.invalid = true; }
+  interfere(reason: DictationCancelReason = "RENDERER_CANCELLED") { if (!this.invalid) this.reason = reason; this.invalid = true; }
+  private reject(reason: DictationCancelReason): false { this.interfere(reason); return false; }
   observe(next: EditorSnapshot, now: number): boolean {
-    if (this.invalid || next.chatId !== this.before.chatId || next.code !== this.before.code || !next.focused || now >= this.deadline) return !(this.invalid = true);
+    if (this.invalid) return false;
+    if (next.chatId !== this.before.chatId) return this.reject("RENDERER_CHAT");
+    if (next.code !== this.before.code) return this.reject("RENDERER_CODE");
+    if (!next.focused) return this.reject("RENDERER_FOCUS");
+    if (now >= this.deadline) return this.reject("RENDERER_TIMEOUT");
     if (next.text !== this.lastText || next.revision !== this.lastRevision) {
       // No editor changes are authorized before our accepted Done. One insertion
       // only; streamed/revised/manual/ambiguous changes are left for the user.
-      if (this.phase !== "processing" || this.changed || !insertedAtSelection(this.before, next)) return !(this.invalid = true);
+      if (this.phase !== "processing") return this.reject("RENDERER_CHANGE_PHASE");
+      if (this.changed) return this.reject("RENDERER_SECOND_CHANGE");
+      if (!insertedAtSelection(this.before, next)) return this.reject("RENDERER_INSERTION");
       this.changed = true; this.lastText = next.text; this.lastRevision = next.revision; this.stableSince = now;
-    } else if (!this.changed && (next.start !== this.before.start || next.end !== this.before.end)) return !(this.invalid = true);
-    if (this.changed && !insertedAtSelection(this.before, next)) return !(this.invalid = true);
+    } else if (!this.changed && (next.start !== this.before.start || next.end !== this.before.end)) return this.reject("RENDERER_SELECTION");
+    if (this.changed && !insertedAtSelection(this.before, next)) return this.reject("RENDERER_SELECTION");
     return true;
   }
   recording() { if (this.phase === "prepared") this.phase = "recording"; }
