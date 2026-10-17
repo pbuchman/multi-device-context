@@ -1,5 +1,7 @@
 package com.multidevicecontext.mobile
 
+import android.app.KeyguardManager
+import android.os.PowerManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -23,6 +25,7 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Real Chromium virtual accessibility provider and real InputConnection on emulator. */
 @RunWith(AndroidJUnit4::class)
@@ -35,15 +38,42 @@ class DictationWebViewTest {
   DictationRuntime.command(id,"recording",101,now);DictationRuntime.command(id,"finishing",101,now)
   return id
  }
+ /** Fixed enums/counters only: CI must distinguish navigation, JS callback and display failures. */
+ private class LoadProgress {
+  val started=AtomicInteger();val finished=AtomicInteger();val evalRequested=AtomicInteger();val evalReturned=AtomicInteger();val errors=AtomicInteger()
+  var jsResult="NOT_RETURNED";var errorCode=0;var rendererGone=false
+  fun snapshot(activity:MainActivity,web:DictationWebView):String {
+   val power=activity.getSystemService(PowerManager::class.java);val keyguard=activity.getSystemService(KeyguardManager::class.java)
+   return "started=${started.get()},finished=${finished.get()},evalRequested=${evalRequested.get()},evalReturned=${evalReturned.get()},jsResult=$jsResult,mainErrors=${errors.get()},errorCode=$errorCode,rendererGone=$rendererGone,interactive=${power.isInteractive},keyguardLocked=${keyguard.isKeyguardLocked},attached=${web.isAttachedToWindow},shown=${web.isShown},windowVisible=${web.windowVisibility==android.view.View.VISIBLE},windowFocus=${web.hasWindowFocus()},viewFocus=${web.hasFocus()},activityFocus=${activity.currentFocus===web},javascript=${web.settings.javaScriptEnabled},progress=${web.progress}"
+  }
+ }
  private fun fixture(block:(MainActivity,DictationWebView)->Unit) {
+  val target=instrumentation.targetContext
+  assertTrue("fixture requires interactive display",target.getSystemService(PowerManager::class.java).isInteractive)
+  assertFalse("fixture requires unlocked display",target.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
   ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-   val loaded=CountDownLatch(1);val activity=AtomicReference<MainActivity>();val view=AtomicReference<DictationWebView>()
+   val loaded=CountDownLatch(1);val activity=AtomicReference<MainActivity>();val view=AtomicReference<DictationWebView>();val progress=LoadProgress()
    scenario.onActivity { current ->
     activity.set(current);val web=current.bridge.webView as DictationWebView;view.set(web)
-    web.webViewClient=object:WebViewClient() {override fun onPageFinished(v:WebView,url:String) {v.evaluateJavascript("document.getElementById('draft').focus();document.getElementById('draft').setSelectionRange(5,5)") {loaded.countDown()}}}
+    web.webViewClient=object:WebViewClient() {
+     override fun onPageStarted(v:WebView,url:String,icon:android.graphics.Bitmap?) {progress.started.incrementAndGet()}
+     override fun onPageFinished(v:WebView,url:String) {
+      progress.finished.incrementAndGet();progress.evalRequested.incrementAndGet()
+      v.evaluateJavascript("(()=>{const d=document.getElementById('draft');d.focus();d.setSelectionRange(5,5);return document.activeElement===d?'DRAFT_FOCUSED':'DRAFT_UNFOCUSED'})()") {value->
+       progress.evalReturned.incrementAndGet();progress.jsResult=when(value) {"\"DRAFT_FOCUSED\""->"DRAFT_FOCUSED";"\"DRAFT_UNFOCUSED\""->"DRAFT_UNFOCUSED";else->"OTHER"};loaded.countDown()
+      }
+     }
+     override fun onReceivedError(v:WebView,request:android.webkit.WebResourceRequest,error:android.webkit.WebResourceError) {if(request.isForMainFrame){progress.errors.incrementAndGet();progress.errorCode=error.errorCode};super.onReceivedError(v,request,error)}
+     override fun onRenderProcessGone(v:WebView,detail:android.webkit.RenderProcessGoneDetail):Boolean {progress.rendererGone=true;return false}
+    }
     web.loadDataWithBaseURL("https://localhost", "<html><body><textarea id='draft' aria-label='Native dictation fixture'>prior</textarea></body></html>","text/html","UTF-8",null)
    }
-   assertTrue("fixture loaded",loaded.await(10,TimeUnit.SECONDS));instrumentation.waitForIdleSync()
+   val didLoad=loaded.await(10,TimeUnit.SECONDS);val state=AtomicReference("MAIN_SNAPSHOT_NOT_RETURNED");val captured=CountDownLatch(1)
+   android.os.Handler(android.os.Looper.getMainLooper()).post {
+    try {state.set(progress.snapshot(activity.get(),view.get()))} catch (_:Exception) {state.set("MAIN_SNAPSHOT_FAILED")} finally {captured.countDown()}
+   }
+   captured.await(500,TimeUnit.MILLISECONDS)
+   assertTrue("fixture loaded: "+state.get(),didLoad);instrumentation.waitForIdleSync()
    block(activity.get(),view.get())
   }
  }
