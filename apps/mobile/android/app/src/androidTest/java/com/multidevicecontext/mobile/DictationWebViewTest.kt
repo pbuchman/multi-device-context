@@ -124,23 +124,45 @@ class DictationWebViewTest {
    block(activity.get(),view.get())
   }
  }
- private fun editor():AccessibilityNodeInfo {
-  fun search(node:AccessibilityNodeInfo?):AccessibilityNodeInfo? {
-   if(node==null)return null
-   if(node.isEditable)return AccessibilityNodeInfo.obtain(node)
-   for(i in 0 until node.childCount) {val child=node.getChild(i);try {val found=search(child);if(found!=null)return found} finally {child?.recycle()}}
-   return null
-  }
-  val until=SystemClock.elapsedRealtime()+5000
+ private fun editor(web:DictationWebView):AccessibilityNodeInfo {
+  val automation=instrumentation.uiAutomation;val expectedPackage=instrumentation.targetContext.packageName
+  val retrieveWindows=automation.serviceInfo.flags and android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS!=0
+  val until=SystemClock.elapsedRealtime()+5000;var diagnostic="NO_AX_SAMPLE"
   while(SystemClock.elapsedRealtime()<until) {
-   val root=instrumentation.uiAutomation.rootInActiveWindow
-   try {val found=search(root);if(found!=null)return found} finally {root?.recycle()}
+   val roots=mutableListOf<AccessibilityNodeInfo>();val windows=automation.windows
+   try {
+    val windowStates=windows.map {window->
+     val root=window.root;if(root!=null)roots.add(root)
+     "id=${window.id},type=${window.type},active=${window.isActive},focused=${window.isFocused},packageMatches=${root?.packageName==expectedPackage}"
+    }
+    val activeRoot=automation.rootInActiveWindow;activeRoot?.let {roots.add(it)}
+    val candidates=mutableListOf<AccessibilityNodeInfo>();var visited=0;var focused=0;var editable=0;var focusedEditable=0;var textMatches=0
+    fun search(node:AccessibilityNodeInfo) {
+     if(SystemClock.elapsedRealtime()>=until)return
+     visited++;if(node.isFocused)focused++
+     if(node.isEditable && node.packageName==expectedPackage) {
+      editable++
+      if(node.isFocused)focusedEditable++
+      if(node.isFocused&&node.text?.toString()=="prior") {textMatches++;candidates.add(AccessibilityNodeInfo.obtain(node))}
+     }
+     for(i in 0 until node.childCount) {val child=node.getChild(i);try {if(child!=null)search(child)} finally {child?.recycle()}}
+    }
+    val focusedWindows=windows.filter {it.isFocused&&it.type==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION}.map {it.id}.toSet()
+    val current=activeRoot?.takeIf {it.packageName==expectedPackage} ?: roots.firstOrNull {it.windowId in focusedWindows&&it.packageName==expectedPackage}
+    val fresh=current?.refresh()==true;if(fresh)search(requireNotNull(current))
+    diagnostic="currentWindow=${current?.windowId},retrieveWindows=$retrieveWindows,windows=$windowStates,activeWindow=${activeRoot?.windowId},activePackageMatches=${activeRoot?.packageName==expectedPackage},currentRoot=${current!=null},fresh=$fresh,visited=$visited,focused=$focused,editable=$editable,focusedEditable=$focusedEditable,textMatches=$textMatches"
+    if(candidates.size==1&&focusedEditable==1)return candidates.single()
+    candidates.forEach {it.recycle()}
+   } finally {roots.forEach {it.recycle()};windows.forEach {it.recycle()}}
    SystemClock.sleep(100)
   }
-  throw AssertionError("Chromium editable virtual node missing")
+  val dom=AtomicReference("DOM_NOT_RETURNED");val read=CountDownLatch(1)
+  web.post {val native="attached=${web.isAttachedToWindow},shown=${web.isShown},windowFocus=${web.hasWindowFocus()},viewFocus=${web.hasFocus()},nativeEditor=${web.onCheckIsTextEditor()}";web.evaluateJavascript("(()=>{const d=document.getElementById('draft');return JSON.stringify({marked:!!document.documentElement.dataset.mdcFixture,editable:!!d&&!d.disabled&&!d.readOnly,focused:document.activeElement===d,valueLength:d?.value.length??-1,selectionStart:d?.selectionStart??-1,selectionEnd:d?.selectionEnd??-1})})()") {dom.set("$native,dom=$it");read.countDown()}}
+  read.await(500,TimeUnit.MILLISECONDS)
+  throw AssertionError("Chromium editable virtual node missing: $diagnostic,dom=${dom.get()}")
  }
- @Test fun actualVirtualNodeAccessibilityReplacementConfirmsInsertion()=fixture { _,_ ->
-  val node=editor();val id=prepared()
+ @Test fun actualVirtualNodeAccessibilityReplacementConfirmsInsertion()=fixture { _,web ->
+  val node=editor(web);val id=prepared()
   try {
    val args=Bundle().apply {putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,"prior transcript")}
    assertTrue(node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args));instrumentation.waitForIdleSync()
@@ -149,16 +171,11 @@ class DictationWebViewTest {
   } finally {node.recycle();DictationRuntime.cancel()}
  }
  @Test fun imeCommitAndSelectionRevokeSessionWithoutSuppressingUserEdit()=fixture { _,web ->
-  instrumentation.runOnMainSync {web.requestFocus()}
-  val field=editor();try {assertTrue(field.performAction(AccessibilityNodeInfo.ACTION_CLICK))} finally {field.recycle()}
-  instrumentation.waitForIdleSync();SystemClock.sleep(300)
-  prepared()
-  instrumentation.runOnMainSync {
-   val input=web.onCreateInputConnection(EditorInfo());assertNotNull(input);input!!.commitText(" manual",1)
-  }
+  val input=readyInput(web);prepared()
+  instrumentation.runOnMainSync {input.commitText(" manual",1)}
   assertEquals("cancelled",DictationRuntime.snapshot().optString("phase"))
   prepared()
-  instrumentation.runOnMainSync {web.onCreateInputConnection(EditorInfo())!!.setSelection(1,1)}
+  instrumentation.runOnMainSync {input.setSelection(1,1)}
   assertEquals("cancelled",DictationRuntime.snapshot().optString("phase"))
  }
  @Test fun actualThreeArgumentCommitIsProvisionalAndDoesNotSelfDispatchIntoRejectingOverload()=fixture(captureCommit=true) { activity,web ->
@@ -221,18 +238,23 @@ class DictationWebViewTest {
  }
 
  private fun readyInput(web:DictationWebView):android.view.inputmethod.InputConnection {
-  instrumentation.runOnMainSync {assertTrue("attached WebView",web.isAttachedToWindow);web.requestFocus()}
+  instrumentation.runOnMainSync {web.requestFocus()}
   val selected=CountDownLatch(1);val focused=AtomicReference<String>()
-  instrumentation.runOnMainSync {web.evaluateJavascript("(()=>{const d=document.getElementById('draft');d.focus();d.setSelectionRange(d.value.length,d.value.length);return document.activeElement===d&&!d.disabled&&!d.readOnly})()") {focused.set(it);selected.countDown()}}
-  assertTrue("actual DOM selection settled",selected.await(3,TimeUnit.SECONDS));assertEquals("actual editable owns DOM focus","true",focused.get())
-  val field=editor();try {assertTrue("activate actual Chromium editable",field.performAction(AccessibilityNodeInfo.ACTION_CLICK))} finally {field.recycle()}
-  instrumentation.waitForIdleSync()
+  instrumentation.runOnMainSync {web.evaluateJavascript("(()=>{const d=document.getElementById('draft');if(!document.documentElement.dataset.mdcFixture||!d||d.disabled||d.readOnly)return false;d.focus();d.setSelectionRange(d.value.length,d.value.length);return document.activeElement===d&&d.selectionStart===d.value.length&&d.selectionEnd===d.value.length})()") {focused.set(it);selected.countDown()}}
+  assertTrue("actual DOM selection settled",selected.await(3,TimeUnit.SECONDS));assertEquals("actual marked editable owns DOM focus and endcaret","true",focused.get())
+  val state=AtomicReference("NATIVE_READINESS_NOT_OBSERVED")
   val input=AtomicReference<android.view.inputmethod.InputConnection?>();val until=SystemClock.elapsedRealtime()+3000
   while(input.get()==null && SystemClock.elapsedRealtime()<until) {
-   instrumentation.runOnMainSync {if(web.hasFocus() && web.hasWindowFocus())input.set(web.onCreateInputConnection(EditorInfo()))}
+   instrumentation.runOnMainSync {
+    val attached=web.isAttachedToWindow;val shown=web.isShown;val viewFocus=web.hasFocus();val windowFocus=web.hasWindowFocus();val editor=web.onCheckIsTextEditor()
+    if(attached&&shown&&viewFocus&&windowFocus&&SystemClock.elapsedRealtime()<until) {
+     input.set(web.onCreateInputConnection(EditorInfo()))
+    }
+    state.set("attached=$attached,shown=$shown,viewFocus=$viewFocus,windowFocus=$windowFocus,textEditor=$editor,inputPresent=${input.get()!=null}")
+   }
    if(input.get()==null)SystemClock.sleep(50)
   }
-  assertNotNull("activated editable must expose its real InputConnection before hiding IME",input.get())
+  assertNotNull("actual Chromium InputConnection required within original3s: ${state.get()}",input.get())
   return requireNotNull(input.get())
  }
  private fun hiddenField(activity:MainActivity,web:DictationWebView) {
@@ -285,21 +307,33 @@ class DictationWebViewTest {
 
  /** Test-only JS facade delegates every proof/admission to the actual native runtime. */
  private class HookBridge {
+  private val reports=java.util.ArrayDeque<String>();private var dropped=0
+  @Synchronized private fun remember(value:org.json.JSONObject) {
+   val phase=value.optString("phase").let {if(it in setOf("prepared","recording","processing","complete","queued","synced","cancelled"))it else "OTHER"}
+   val reason=value.optString("reason").let {if(it.isEmpty())"NONE" else if(DictationCancelReason.values().any {reason->reason.name==it})it else "OTHER"}
+   if(reports.size<32)reports.add("phase=$phase,reason=$reason") else dropped++
+  }
+  @Synchronized fun summary()="reports=${reports.toList()},dropped=$dropped"
   @android.webkit.JavascriptInterface fun read()=DictationRuntime.snapshot().toString()
   @android.webkit.JavascriptInterface fun confirm(id:String,chat:String,revision:Int)=DictationRuntime.confirmProvisional(id,chat,revision,SystemClock.elapsedRealtime())
   @android.webkit.JavascriptInterface fun authorize(id:String,chat:String,revision:Int,item:String)=DictationRuntime.authorize(id,chat,revision,item,SystemClock.elapsedRealtime())
-  @android.webkit.JavascriptInterface fun report(value:String) {val v=org.json.JSONObject(value);DictationRuntime.report(v.getString("id"),v.getString("phase"),v.optString("contextId").takeIf {it.isNotEmpty()},if(v.has("revision"))v.getInt("revision") else null,v.optString("itemId").takeIf {it.isNotEmpty()},v.optString("reason"),SystemClock.elapsedRealtime())}
+  @android.webkit.JavascriptInterface fun report(value:String) {val v=org.json.JSONObject(value);remember(v);DictationRuntime.report(v.getString("id"),v.getString("phase"),v.optString("contextId").takeIf {it.isNotEmpty()},if(v.has("revision"))v.getInt("revision") else null,v.optString("itemId").takeIf {it.isNotEmpty()},v.optString("reason"),SystemClock.elapsedRealtime())}
  }
- private fun phase(expected:String) {
+ private fun phase(expected:String,bridge:HookBridge) {
   val until=SystemClock.elapsedRealtime()+4000
   while(DictationRuntime.snapshot().optString("phase")!=expected && SystemClock.elapsedRealtime()<until)SystemClock.sleep(50)
-  assertEquals("native phase",expected,DictationRuntime.snapshot().optString("phase"))
+  val snapshot=DictationRuntime.snapshot();val allowedPhases=setOf("none","begin","busy","prepared","recording","processing","complete","queued","synced","cancelled")
+  val diagnostic=org.json.JSONObject()
+  for(key in listOf("phase","cancelPhase"))diagnostic.put(key,snapshot.optString(key).let {if(it.isEmpty())"NONE" else if(it in allowedPhases)it else "OTHER"})
+  diagnostic.put("cancelReason",snapshot.optString("cancelReason").let {if(it.isEmpty())"NONE" else if(DictationCancelReason.values().any {reason->reason.name==it})it else "OTHER"})
+  diagnostic.put("cancelledAtElapsedMs",snapshot.optLong("cancelledAtElapsedMs",-1)).put("inserted",snapshot.optBoolean("inserted")).put("provisionalInput",snapshot.optBoolean("provisionalInput"))
+  assertEquals("native phase: $diagnostic,${bridge.summary()}",expected,snapshot.optString("phase"))
  }
  @Test fun actualCommitRunsCompiledProductionHookAndFreshNativeProofBeforeSingleSendAndExactAck()=fixture { activity,web ->
   if(android.os.Build.VERSION.SDK_INT<33)return@fixture
-  val bundle=instrumentation.context.assets.open("dictation-hook-fixture.js").bufferedReader().use {it.readText()};val document=AtomicReference<DocumentLoad>()
+  val bundle=instrumentation.context.assets.open("dictation-hook-fixture.js").bufferedReader().use {it.readText()};val document=AtomicReference<DocumentLoad>();val bridge=HookBridge()
   instrumentation.runOnMainSync {
-   web.addJavascriptInterface(HookBridge(),"MdcDictationFixture")
+   web.addJavascriptInterface(bridge,"MdcDictationFixture")
    document.set(loadDocument(web,"<div id='root'></div><script>window.fixtureErrors=[];addEventListener('error',e=>window.fixtureErrors.push(e.message));</script><script>"+bundle+"</script>",false))
   }
   val hookLoad=document.get();val didLoad=hookLoad.await()
@@ -315,16 +349,16 @@ class DictationWebViewTest {
   val input=readyInput(web);hiddenField(activity,web)
   val id=UUID.randomUUID().toString();val now=SystemClock.elapsedRealtime();DictationRuntime.cancel()
   DictationRuntime.command(id,"begin",101,now,object:DictationLease{override fun alive()=true;override fun watch(death:()->Unit){};override fun release(){}})
-  phase("prepared");DictationRuntime.command(id,"recording",101,SystemClock.elapsedRealtime());SystemClock.sleep(200)
+  phase("prepared",bridge);DictationRuntime.command(id,"recording",101,SystemClock.elapsedRealtime());SystemClock.sleep(200)
   // Deliberately no renderer poll wait after native finishing: cover the recording/processing poll race.
   DictationRuntime.command(id,"finishing",101,SystemClock.elapsedRealtime())
   instrumentation.runOnMainSync {assertTrue(input.commitText(" transcript",1,null))};instrumentation.waitForIdleSync()
   assertEquals("processing",DictationRuntime.snapshot().optString("phase"));assertTrue(DictationRuntime.snapshot().optBoolean("provisionalInput"))
-  SystemClock.sleep(650);assertEquals("complete",DictationRuntime.command(id,"completed",101,SystemClock.elapsedRealtime()).optString("phase"));phase("queued")
+  SystemClock.sleep(650);assertEquals("complete",DictationRuntime.command(id,"completed",101,SystemClock.elapsedRealtime()).optString("phase"));phase("queued",bridge)
   val read=CountDownLatch(1);val result=AtomicReference<String>()
   instrumentation.runOnMainSync {web.evaluateJavascript("JSON.stringify(window.fixtureSends)"){result.set(it);read.countDown()}}
   assertTrue(read.await(3,TimeUnit.SECONDS));assertEquals("one whole-editor send","[\"prior transcript\"]",org.json.JSONTokener(result.get()).nextValue().toString())
-  instrumentation.runOnMainSync {web.evaluateJavascript("window.fixtureAck()",null)};phase("synced")
+  instrumentation.runOnMainSync {web.evaluateJavascript("window.fixtureAck()",null)};phase("synced",bridge)
  }
  @Test fun exportedEndpointRejectsActualUnapprovedBinderUid()=fixture { activity,_ ->
   val connected=CountDownLatch(1);val endpoint=AtomicReference<IBinder>()
