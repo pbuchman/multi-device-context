@@ -53,6 +53,19 @@ class DictationWebViewTest {
  private class DocumentReady(private val signal:(String)->Unit) {
   @android.webkit.JavascriptInterface fun ready(marker:String)=signal(marker)
  }
+ /** Receive the real DOM keyup boundary; parse and assert the raw snapshot on the test thread. */
+ private class CommitTrace {
+  val finished=CountDownLatch(1);val result=AtomicReference<String>();private val active=AtomicBoolean()
+  @Volatile private var marker="";@Volatile private var deadline=0L
+  fun document(value:String) {marker=value}
+  fun arm() {check(deadline==0L);deadline=SystemClock.elapsedRealtime()+3000;active.set(true)}
+  @android.webkit.JavascriptInterface fun observed(document:String,phase:String,value:String) {
+   if(document==marker && phase=="owned-commit" && SystemClock.elapsedRealtime()<deadline && active.compareAndSet(true,false)) {result.set(value);finished.countDown()}
+  }
+  fun await()=finished.await((deadline-SystemClock.elapsedRealtime()).coerceAtLeast(0),TimeUnit.MILLISECONDS)
+  fun close() {active.set(false)}
+ }
+ private val commitTrace=CommitTrace()
  private class DocumentLoad(private val web:DictationWebView,val bridgeName:String) {
   val progress=LoadProgress();val loaded=CountDownLatch(1);val active=AtomicBoolean(true);val deadline=SystemClock.elapsedRealtime()+10000
   fun await():Boolean {
@@ -61,9 +74,10 @@ class DictationWebViewTest {
   }
  }
  /** Cancel Capacitor's initial navigation once; do not depend on onPageFinished delivery. */
- private fun loadDocument(web:DictationWebView,body:String,focusDraft:Boolean):DocumentLoad {
+ private fun loadDocument(web:DictationWebView,body:String,focusDraft:Boolean,capture:CommitTrace?=null):DocumentLoad {
   val marker=UUID.randomUUID().toString();val load=DocumentLoad(web,"MdcFixtureDocument_"+marker.replace("-",""));val progress=load.progress;val claimed=AtomicBoolean()
   web.stopLoading()
+  if(capture!=null) {capture.document(marker);web.addJavascriptInterface(capture,"MdcFixtureCommit")}
   web.webViewClient=object:WebViewClient() {
    override fun onPageStarted(v:WebView,url:String,icon:android.graphics.Bitmap?) {progress.started.incrementAndGet()}
    override fun onPageFinished(v:WebView,url:String) {progress.finished.incrementAndGet()}
@@ -91,7 +105,7 @@ class DictationWebViewTest {
   web.loadDataWithBaseURL("https://localhost","<html data-mdc-fixture='$marker'><body>"+body+signal+"</body></html>","text/html","UTF-8",null)
   return load
  }
- private fun fixture(block:(MainActivity,DictationWebView)->Unit) {
+ private fun fixture(captureCommit:Boolean=false,block:(MainActivity,DictationWebView)->Unit) {
   val target=instrumentation.targetContext
   assertTrue("fixture requires interactive display",target.getSystemService(PowerManager::class.java).isInteractive)
   assertFalse("fixture requires unlocked display",target.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
@@ -99,7 +113,7 @@ class DictationWebViewTest {
    val activity=AtomicReference<MainActivity>();val view=AtomicReference<DictationWebView>();val document=AtomicReference<DocumentLoad>()
    scenario.onActivity { current ->
     activity.set(current);val web=current.bridge.webView as DictationWebView;view.set(web)
-    document.set(loadDocument(web,"<textarea id='draft' aria-label='Native dictation fixture'>prior</textarea>",true))
+    document.set(loadDocument(web,"<textarea id='draft' aria-label='Native dictation fixture'>prior</textarea>",true,if(captureCommit)commitTrace else null))
    }
    val load=document.get();val didLoad=load.await();val state=AtomicReference("MAIN_SNAPSHOT_NOT_RETURNED");val captured=CountDownLatch(1)
    android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -147,7 +161,7 @@ class DictationWebViewTest {
   instrumentation.runOnMainSync {web.onCreateInputConnection(EditorInfo())!!.setSelection(1,1)}
   assertEquals("cancelled",DictationRuntime.snapshot().optString("phase"))
  }
- @Test fun actualThreeArgumentCommitIsProvisionalAndDoesNotSelfDispatchIntoRejectingOverload()=fixture { activity,web ->
+ @Test fun actualThreeArgumentCommitIsProvisionalAndDoesNotSelfDispatchIntoRejectingOverload()=fixture(captureCommit=true) { activity,web ->
   if(android.os.Build.VERSION.SDK_INT<33)return@fixture
   val input=readyInput(web)
   instrumentation.runOnMainSync {
@@ -156,23 +170,48 @@ class DictationWebViewTest {
   val until=SystemClock.elapsedRealtime()+3000
   while(!DictationFieldGuard(web).valid() && SystemClock.elapsedRealtime()<until)SystemClock.sleep(50)
   assertTrue("current focused field and hidden IME",DictationFieldGuard(web).valid())
-  val capturing=CountDownLatch(1)
-  instrumentation.runOnMainSync {web.evaluateJavascript("window.events=[];window.fixturePhase='owned-commit';for(const kind of ['input','beforeinput','compositionstart','compositionupdate','compositionend','paste','keydown','keyup','pointerdown'])document.addEventListener(kind,e=>window.events.push({type:e.type,key:e.key??null,code:e.code??null,keyCode:e.keyCode??null,isTrusted:e.isTrusted,isComposing:e.isComposing??null,inputType:e.inputType??null,phase:window.fixturePhase}),true)") {capturing.countDown()}}
-  assertTrue("capture armed after real connection and hidden IME settle",capturing.await(3,TimeUnit.SECONDS))
-  val id=prepared()
-  instrumentation.runOnMainSync {assertTrue(input.commitText(" transcript",1,null))}
-  instrumentation.waitForIdleSync()
-  assertEquals("processing",DictationRuntime.snapshot().optString("phase"))
-  assertTrue(DictationRuntime.snapshot().optBoolean("provisionalInput"));assertFalse(DictationRuntime.snapshot().optBoolean("inserted"))
-  val read=CountDownLatch(1);val events=AtomicReference<String>()
-  instrumentation.runOnMainSync {web.evaluateJavascript("JSON.stringify({value:document.getElementById('draft').value,events:window.events})") {events.set(org.json.JSONTokener(it).nextValue().toString());read.countDown()}}
-  assertTrue(read.await(3,TimeUnit.SECONDS))
-  assertTrue(events.get().contains("prior transcript"));assertTrue(events.get().contains("input"))
-  val trace=org.json.JSONObject(events.get()).getJSONArray("events")
-  assertEquals(listOf("keydown","beforeinput","input","keyup"),(0 until trace.length()).map {trace.getJSONObject(it).getString("type")})
-  for(index in listOf(0,3)) {val key=trace.getJSONObject(index);assertEquals("Unidentified",key.getString("key"));assertEquals("",key.getString("code"));assertEquals(229,key.getInt("keyCode"));assertTrue(key.getBoolean("isTrusted"));assertFalse(key.getBoolean("isComposing"))}
-  for(index in listOf(1,2))assertEquals("insertText",trace.getJSONObject(index).getString("inputType"))
-  assertEquals("complete",DictationRuntime.command(id,"completed",101,SystemClock.elapsedRealtime()).optString("phase"))
+  try {
+   val capturing=CountDownLatch(1);val armed=AtomicReference<String>()
+   val script="""
+    (()=>{
+     const d=document.getElementById('draft'),marker=document.documentElement.dataset.mdcFixture;
+     if(document.activeElement!==d||d.value!=='prior'||d.selectionStart!==5||d.selectionEnd!==5)return 'FIELD_NOT_READY';
+     window.events=[];window.fixturePhase='owned-commit';let sent=false;
+     for(const kind of ['input','beforeinput','compositionstart','compositionupdate','compositionend','paste','keydown','keyup','pointerdown'])document.addEventListener(kind,e=>{
+      window.events.push({type:e.type,key:e.key??null,code:e.code??null,keyCode:e.keyCode??null,isTrusted:e.isTrusted,isComposing:e.isComposing??null,inputType:e.inputType??null,phase:window.fixturePhase});
+      if(e.type==='keyup'&&!sent&&window.fixturePhase==='owned-commit'&&document.documentElement.dataset.mdcFixture===marker){
+       sent=true;let snapshot;try{snapshot=JSON.stringify({value:d.value,events:window.events})}catch(error){snapshot=JSON.stringify({observationError:String(error)})}
+       MdcFixtureCommit.observed(marker,window.fixturePhase,snapshot);
+      }
+     },true);
+     return 'CAPTURE_ARMED';
+    })()
+   """.trimIndent()
+   instrumentation.runOnMainSync {web.evaluateJavascript(script) {armed.set(it);capturing.countDown()}}
+   assertTrue("capture armed after real connection and hidden IME settle",capturing.await(3,TimeUnit.SECONDS))
+   assertEquals("actual prior field/focus/caret before commit","\"CAPTURE_ARMED\"",armed.get())
+   val id=prepared();commitTrace.arm()
+   instrumentation.runOnMainSync {assertTrue(input.commitText(" transcript",1,null))}
+   instrumentation.waitForIdleSync()
+   assertEquals("processing",DictationRuntime.snapshot().optString("phase"))
+   assertTrue(DictationRuntime.snapshot().optBoolean("provisionalInput"));assertFalse(DictationRuntime.snapshot().optBoolean("inserted"))
+   val observed=commitTrace.await();val diagnostic=AtomicReference("KEYUP_NOT_OBSERVED")
+   if(!observed) {
+    val read=CountDownLatch(1)
+    web.post {web.evaluateJavascript("(()=>{const d=document.getElementById('draft');return JSON.stringify({readyState:document.readyState,valueLength:d?.value.length??-1,expectedText:d?.value==='prior transcript',activeDraft:document.activeElement===d,selectionStart:d?.selectionStart??-1,selectionEnd:d?.selectionEnd??-1,ownedPhase:window.fixturePhase==='owned-commit',eventTypes:(window.events??[]).map(e=>e.type)})})()") {value->diagnostic.set(value);read.countDown()}}
+    read.await(500,TimeUnit.MILLISECONDS)
+   }
+   assertTrue("real DOM keyup snapshot within the original observation budget: "+diagnostic.get(),observed)
+   val events=commitTrace.result.get();val snapshot=org.json.JSONObject(events)
+   assertFalse("DOM observation error: "+snapshot.optString("observationError"),snapshot.has("observationError"))
+   assertEquals("exact DOM value after the complete event chain","prior transcript",snapshot.getString("value"))
+   assertTrue("expected insertion after keyup; actual length="+snapshot.getString("value").length,events.contains("prior transcript"));assertTrue(events.contains("input"))
+   val trace=snapshot.getJSONArray("events")
+   assertEquals(listOf("keydown","beforeinput","input","keyup"),(0 until trace.length()).map {trace.getJSONObject(it).getString("type")})
+   for(index in listOf(0,3)) {val key=trace.getJSONObject(index);assertEquals("Unidentified",key.getString("key"));assertEquals("",key.getString("code"));assertEquals(229,key.getInt("keyCode"));assertTrue(key.getBoolean("isTrusted"));assertFalse(key.getBoolean("isComposing"))}
+   for(index in listOf(1,2))assertEquals("insertText",trace.getJSONObject(index).getString("inputType"))
+   assertEquals("complete",DictationRuntime.command(id,"completed",101,SystemClock.elapsedRealtime()).optString("phase"))
+  } finally {commitTrace.close();web.post {web.removeJavascriptInterface("MdcFixtureCommit")}}
  }
  @Test fun actualThreeArgumentCommitWithLostFocusPreservesEditButRevokesAutomation()=fixture { _,web ->
   if(android.os.Build.VERSION.SDK_INT<33)return@fixture
