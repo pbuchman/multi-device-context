@@ -26,6 +26,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Real Chromium virtual accessibility provider and real InputConnection on emulator. */
 @RunWith(AndroidJUnit4::class)
@@ -40,37 +41,69 @@ class DictationWebViewTest {
  }
  /** Fixed enums/counters only: CI must distinguish navigation, JS callback and display failures. */
  private class LoadProgress {
-  val started=AtomicInteger();val finished=AtomicInteger();val evalRequested=AtomicInteger();val evalReturned=AtomicInteger();val errors=AtomicInteger()
-  var jsResult="NOT_RETURNED";var errorCode=0;var rendererGone=false
+  val started=AtomicInteger();val finished=AtomicInteger();val domReady=AtomicInteger();val evalRequested=AtomicInteger();val evalReturned=AtomicInteger();val errors=AtomicInteger()
+  @Volatile var jsResult="NOT_RETURNED";@Volatile var errorCode=0;@Volatile var rendererGone=false
+  fun counters()="started=${started.get()},finished=${finished.get()},domReady=${domReady.get()},evalRequested=${evalRequested.get()},evalReturned=${evalReturned.get()},jsResult=$jsResult,mainErrors=${errors.get()},errorCode=$errorCode,rendererGone=$rendererGone"
   fun snapshot(activity:MainActivity,web:DictationWebView):String {
    val power=activity.getSystemService(PowerManager::class.java);val keyguard=activity.getSystemService(KeyguardManager::class.java)
-   return "started=${started.get()},finished=${finished.get()},evalRequested=${evalRequested.get()},evalReturned=${evalReturned.get()},jsResult=$jsResult,mainErrors=${errors.get()},errorCode=$errorCode,rendererGone=$rendererGone,interactive=${power.isInteractive},keyguardLocked=${keyguard.isKeyguardLocked},attached=${web.isAttachedToWindow},shown=${web.isShown},windowVisible=${web.windowVisibility==android.view.View.VISIBLE},windowFocus=${web.hasWindowFocus()},viewFocus=${web.hasFocus()},activityFocus=${activity.currentFocus===web},javascript=${web.settings.javaScriptEnabled},progress=${web.progress}"
+   return counters()+",interactive=${power.isInteractive},keyguardLocked=${keyguard.isKeyguardLocked},attached=${web.isAttachedToWindow},shown=${web.isShown},windowVisible=${web.windowVisibility==android.view.View.VISIBLE},windowFocus=${web.hasWindowFocus()},viewFocus=${web.hasFocus()},activityFocus=${activity.currentFocus===web},javascript=${web.settings.javaScriptEnabled},progress=${web.progress}"
   }
+ }
+ /** androidTest-only signal; readiness still requires a separate read of the marked real DOM. */
+ private class DocumentReady(private val signal:(String)->Unit) {
+  @android.webkit.JavascriptInterface fun ready(marker:String)=signal(marker)
+ }
+ private class DocumentLoad(private val web:DictationWebView,val bridgeName:String) {
+  val progress=LoadProgress();val loaded=CountDownLatch(1);val active=AtomicBoolean(true);val deadline=SystemClock.elapsedRealtime()+10000
+  fun await():Boolean {
+   try {return loaded.await((deadline-SystemClock.elapsedRealtime()).coerceAtLeast(0),TimeUnit.MILLISECONDS)}
+   finally {active.set(false);web.post {web.removeJavascriptInterface(bridgeName)}}
+  }
+ }
+ /** Cancel Capacitor's initial navigation once; do not depend on onPageFinished delivery. */
+ private fun loadDocument(web:DictationWebView,body:String,focusDraft:Boolean):DocumentLoad {
+  val marker=UUID.randomUUID().toString();val load=DocumentLoad(web,"MdcFixtureDocument_"+marker.replace("-",""));val progress=load.progress;val claimed=AtomicBoolean()
+  web.stopLoading()
+  web.webViewClient=object:WebViewClient() {
+   override fun onPageStarted(v:WebView,url:String,icon:android.graphics.Bitmap?) {progress.started.incrementAndGet()}
+   override fun onPageFinished(v:WebView,url:String) {progress.finished.incrementAndGet()}
+   override fun onReceivedError(v:WebView,request:android.webkit.WebResourceRequest,error:android.webkit.WebResourceError) {if(request.isForMainFrame){progress.errors.incrementAndGet();progress.errorCode=error.errorCode};super.onReceivedError(v,request,error)}
+   override fun onRenderProcessGone(v:WebView,detail:android.webkit.RenderProcessGoneDetail):Boolean {progress.rendererGone=true;return false}
+  }
+  web.addJavascriptInterface(DocumentReady {received->
+   if(received==marker && load.active.get() && SystemClock.elapsedRealtime()<load.deadline && claimed.compareAndSet(false,true)) {
+    progress.domReady.incrementAndGet()
+    web.post {
+     if(load.active.get() && SystemClock.elapsedRealtime()<load.deadline) {
+      progress.evalRequested.incrementAndGet()
+      val probe=if(focusDraft) "const d=document.getElementById('draft');if(!(d instanceof HTMLTextAreaElement)||d.disabled||d.readOnly||d.value!=='prior')return 'DRAFT_MISSING';d.focus();d.setSelectionRange(5,5);return document.activeElement===d&&d.selectionStart===5&&d.selectionEnd===5?'DRAFT_FOCUSED':'DRAFT_UNFOCUSED'" else "return document.getElementById('root')?'DOCUMENT_READY':'ROOT_MISSING'"
+      web.evaluateJavascript("(()=>{if(document.documentElement.dataset.mdcFixture!=='$marker'||!['interactive','complete'].includes(document.readyState))return 'WRONG_DOCUMENT';$probe})()") {value->
+       if(load.active.get() && SystemClock.elapsedRealtime()<load.deadline) {
+        progress.evalReturned.incrementAndGet();progress.jsResult=when(value) {"\"DRAFT_FOCUSED\""->"DRAFT_FOCUSED";"\"DRAFT_UNFOCUSED\""->"DRAFT_UNFOCUSED";"\"DRAFT_MISSING\""->"DRAFT_MISSING";"\"DOCUMENT_READY\""->"DOCUMENT_READY";"\"ROOT_MISSING\""->"ROOT_MISSING";"\"WRONG_DOCUMENT\""->"WRONG_DOCUMENT";else->"OTHER"}
+        if(progress.jsResult==if(focusDraft) "DRAFT_FOCUSED" else "DOCUMENT_READY")load.loaded.countDown()
+       }
+      }
+     }
+    }
+   }
+  },load.bridgeName)
+  val signal="<script>document.addEventListener('DOMContentLoaded',()=>window['${load.bridgeName}'].ready('$marker'),{once:true})</script>"
+  web.loadDataWithBaseURL("https://localhost","<html data-mdc-fixture='$marker'><body>"+body+signal+"</body></html>","text/html","UTF-8",null)
+  return load
  }
  private fun fixture(block:(MainActivity,DictationWebView)->Unit) {
   val target=instrumentation.targetContext
   assertTrue("fixture requires interactive display",target.getSystemService(PowerManager::class.java).isInteractive)
   assertFalse("fixture requires unlocked display",target.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
   ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-   val loaded=CountDownLatch(1);val activity=AtomicReference<MainActivity>();val view=AtomicReference<DictationWebView>();val progress=LoadProgress()
+   val activity=AtomicReference<MainActivity>();val view=AtomicReference<DictationWebView>();val document=AtomicReference<DocumentLoad>()
    scenario.onActivity { current ->
     activity.set(current);val web=current.bridge.webView as DictationWebView;view.set(web)
-    web.webViewClient=object:WebViewClient() {
-     override fun onPageStarted(v:WebView,url:String,icon:android.graphics.Bitmap?) {progress.started.incrementAndGet()}
-     override fun onPageFinished(v:WebView,url:String) {
-      progress.finished.incrementAndGet();progress.evalRequested.incrementAndGet()
-      v.evaluateJavascript("(()=>{const d=document.getElementById('draft');d.focus();d.setSelectionRange(5,5);return document.activeElement===d?'DRAFT_FOCUSED':'DRAFT_UNFOCUSED'})()") {value->
-       progress.evalReturned.incrementAndGet();progress.jsResult=when(value) {"\"DRAFT_FOCUSED\""->"DRAFT_FOCUSED";"\"DRAFT_UNFOCUSED\""->"DRAFT_UNFOCUSED";else->"OTHER"};loaded.countDown()
-      }
-     }
-     override fun onReceivedError(v:WebView,request:android.webkit.WebResourceRequest,error:android.webkit.WebResourceError) {if(request.isForMainFrame){progress.errors.incrementAndGet();progress.errorCode=error.errorCode};super.onReceivedError(v,request,error)}
-     override fun onRenderProcessGone(v:WebView,detail:android.webkit.RenderProcessGoneDetail):Boolean {progress.rendererGone=true;return false}
-    }
-    web.loadDataWithBaseURL("https://localhost", "<html><body><textarea id='draft' aria-label='Native dictation fixture'>prior</textarea></body></html>","text/html","UTF-8",null)
+    document.set(loadDocument(web,"<textarea id='draft' aria-label='Native dictation fixture'>prior</textarea>",true))
    }
-   val didLoad=loaded.await(10,TimeUnit.SECONDS);val state=AtomicReference("MAIN_SNAPSHOT_NOT_RETURNED");val captured=CountDownLatch(1)
+   val load=document.get();val didLoad=load.await();val state=AtomicReference("MAIN_SNAPSHOT_NOT_RETURNED");val captured=CountDownLatch(1)
    android.os.Handler(android.os.Looper.getMainLooper()).post {
-    try {state.set(progress.snapshot(activity.get(),view.get()))} catch (_:Exception) {state.set("MAIN_SNAPSHOT_FAILED")} finally {captured.countDown()}
+    try {state.set(load.progress.snapshot(activity.get(),view.get()))} catch (_:Exception) {state.set("MAIN_SNAPSHOT_FAILED")} finally {captured.countDown()}
    }
    captured.await(500,TimeUnit.MILLISECONDS)
    assertTrue("fixture loaded: "+state.get(),didLoad);instrumentation.waitForIdleSync()
@@ -222,13 +255,13 @@ class DictationWebViewTest {
  }
  @Test fun actualCommitRunsCompiledProductionHookAndFreshNativeProofBeforeSingleSendAndExactAck()=fixture { activity,web ->
   if(android.os.Build.VERSION.SDK_INT<33)return@fixture
-  val bundle=instrumentation.context.assets.open("dictation-hook-fixture.js").bufferedReader().use {it.readText()};val loaded=CountDownLatch(1)
+  val bundle=instrumentation.context.assets.open("dictation-hook-fixture.js").bufferedReader().use {it.readText()};val document=AtomicReference<DocumentLoad>()
   instrumentation.runOnMainSync {
    web.addJavascriptInterface(HookBridge(),"MdcDictationFixture")
-   web.webViewClient=object:WebViewClient(){override fun onPageFinished(v:WebView,url:String){loaded.countDown()}}
-   web.loadDataWithBaseURL("https://localhost","<html><body><div id='root'></div><script>window.fixtureErrors=[];addEventListener('error',e=>window.fixtureErrors.push(e.message));</script><script>"+bundle+"</script></body></html>","text/html","UTF-8",null)
+   document.set(loadDocument(web,"<div id='root'></div><script>window.fixtureErrors=[];addEventListener('error',e=>window.fixtureErrors.push(e.message));</script><script>"+bundle+"</script>",false))
   }
-  assertTrue("compiled hook fixture loaded",loaded.await(10,TimeUnit.SECONDS));instrumentation.waitForIdleSync()
+  val hookLoad=document.get();val didLoad=hookLoad.await()
+  assertTrue("compiled hook fixture loaded: "+hookLoad.progress.counters(),didLoad);instrumentation.waitForIdleSync()
   var dom=org.json.JSONObject();val readyUntil=SystemClock.elapsedRealtime()+4000
   while(!dom.optBoolean("ready") && SystemClock.elapsedRealtime()<readyUntil) {
    val read=CountDownLatch(1);val value=AtomicReference<String>()
