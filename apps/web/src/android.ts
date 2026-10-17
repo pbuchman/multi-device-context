@@ -1,6 +1,6 @@
 import { App } from "@capacitor/app";
 import { Capacitor, registerPlugin } from "@capacitor/core";
-import { ContentSchema, DeviceSchema, IdSchema, MAX_ATTACHMENT_BYTES, MAX_TEXT_BYTES, UpdateStateSchema, type ClipboardSnapshot, type NativeFile, type PendingClipboardShare, type UpdateState } from "@mdc/contracts";
+import { ContentSchema, DeviceSchema, IdSchema, MAX_ATTACHMENT_BYTES, MAX_TEXT_BYTES, UpdateStateSchema, type Id, type ClipboardSnapshot, type NativeFile, type PendingClipboardShare, type UpdateState } from "@mdc/contracts";
 import type { PlatformAdapter } from "./platform.js";
 import type { DictationBridge, DictationStatus } from "./dictation.js";
 
@@ -10,6 +10,7 @@ export type NativeFileRef = { id: string; name: string; contentType: string; siz
 type NativeSnapshot = { text?: string; files: NativeFileRef[] };
 type NativeRequest = NativeSnapshot & { id: string; capturedAt: number };
 export interface MdcNativePlugin {
+  confirmProvisionalDictation?(value: { id: string; contextId: Id; revision: number }): Promise<{ allowed: boolean }>;
   readDictation?(): Promise<DictationStatus>;
   reportDictation?(value: Parameters<DictationBridge["report"]>[0]): Promise<void>;
   authorizeDictation?(value: Parameters<DictationBridge["authorize"]>[0]): Promise<{ allowed: boolean }>;
@@ -197,6 +198,7 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
       subscribeRevoked: (listener: (id: string) => void) => subscribe(dictationRevoked, listener),
       authorize: async (value: Parameters<DictationBridge["authorize"]>[0]) => { ensureCurrent(); if (!(await plugin.authorizeDictation!(value)).allowed) throw new Error("Native dictation ownership revoked"); },
       read: async () => { ensureCurrent(); return plugin.readDictation!(); },
+      ...(plugin.confirmProvisionalDictation ? { confirmProvisional: async (value: { id: string; contextId: Id; revision: number }) => { ensureCurrent(); const result = await plugin.confirmProvisionalDictation!(value); ensureCurrent(); if (!result.allowed) throw new Error("Provisional input is no longer valid"); } } : {}),
       report: async (value: Parameters<DictationBridge["report"]>[0]) => { ensureCurrent(); await plugin.reportDictation!(value); },
     } } : {}),
     exchangeSession: async accessToken => { const expected = generation; ensureCurrent(expected); const value = await plugin.exchangeInstallationSession({ accessToken }); ensureCurrent(expected); return value; },

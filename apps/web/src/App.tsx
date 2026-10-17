@@ -810,6 +810,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   useDictation({
     ...(services.dictation ? { bridge: services.dictation } : {}),
     eligible: () => isLive() && !accountBlocked && !lifecycleLocked.current && !panelRef.current && !navigation.issue,
+    owns: editor => {
+      const node = textareaRef.current, current = navigation.selectedRef.current;
+      return node !== null && document.activeElement === node && current.id === editor.chatId && current.drafts[current.id]?.code === editor.code;
+    },
     read: () => {
       const node = textareaRef.current, current = navigation.selectedRef.current;
       const draft = current.drafts[current.id];
@@ -829,6 +833,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         validate: authority.validate,
         current: () => authority.current() && navigation.selectedRef.current.id === editor.chatId && navigation.revisionRef.current === editor.revision && !deleted.current.has(editor.chatId),
       });
+      // Enqueue has committed durably. Retire insertion authority before our own
+      // editor reset can replace Chromium's native InputConnection.
+      await services.dictation?.report({ id: sessionId, phase: "queued", contextId: result.contextId, itemId: result.itemId });
       if (!result.created || !authority.current() || !live.current.mounted || live.current.services !== services || deleted.current.has(editor.chatId)) return result;
       navigation.commit(editor.chatId, editor.text);
       if (createsContext) {

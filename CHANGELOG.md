@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### 0.6.2 — Correlated Android dictation input
+
+- Android retains the API33 commit shape used by Wispr as a provisional input
+  during an approved owned completion, with current focus and hidden-IME checks.
+  It can enqueue only after the adapter's full completion confirmation and the
+  renderer's independent stable chat/draft/range checks. Ordinary input and
+  interference still revoke automatic sending.
+- Mutable local-draft titles no longer need to act as identity after a trusted
+  native input witness; window, focus, navigation and native context ownership
+  remain required by the companion adapter.
+- Chromium's commit-sentinel key/input sequence requires one bounded chain and fresh
+  native provisional proof; ordinary typing and composition still cancel. Connection
+  replacement revokes stale input authority, and durable queueing precedes MDC's
+  own editor reset so only the exact queued message can acknowledge completion.
+- Native and renderer cancellation diagnostics retain their first fixed reason.
+  Android code19 preserves the existing signer, application ID, drafts and outbox.
+  Raw commit calls are not described as authenticated Wispr-origin events; see
+  `docs/android-dictation.md` for the correlated-proof and acceptance boundaries.
+
 ### 0.6.1 — Local owned dictation bridge
 
 - Android offers a local Binder integration for the approved steering adapter. Each
