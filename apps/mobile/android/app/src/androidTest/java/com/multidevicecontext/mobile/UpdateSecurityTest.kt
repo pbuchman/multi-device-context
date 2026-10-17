@@ -81,12 +81,29 @@ class UpdateSecurityTest {
   val installer=target.packageManager.packageInstaller
   val sessionId=installer.createSession(PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {setAppPackageName(target.packageName)})
   val prefs=target.getSharedPreferences("mdc-updates",android.content.Context.MODE_PRIVATE)
-  prefs.edit().putInt("installerSession",sessionId).putString("installerToken","crash-token").putString("installerVersion","0.5.6").commit()
-  val constructor=AndroidUpdateManager::class.java.getDeclaredConstructor(android.content.Context::class.java,Boolean::class.javaPrimitiveType).apply {isAccessible=true}
-  val recovered=constructor.newInstance(target,true)
-  assertEquals("idle",recovered.getState().getString("status"))
-  assertNull(installer.getSessionInfo(sessionId))
-  assertFalse(prefs.contains("installerSession"));assertFalse(prefs.contains("installerToken"))
+  val finished=java.util.concurrent.CountDownLatch(1);val success=java.util.concurrent.atomic.AtomicReference<Boolean>()
+  val callback=object:PackageInstaller.SessionCallback() {
+   override fun onCreated(id:Int) {}
+   override fun onBadgingChanged(id:Int) {}
+   override fun onActiveChanged(id:Int,active:Boolean) {}
+   override fun onProgressChanged(id:Int,progress:Float) {}
+   override fun onFinished(id:Int,succeeded:Boolean) {if(id==sessionId){success.set(succeeded);finished.countDown()}}
+  }
+  try {
+   installer.registerSessionCallback(callback,android.os.Handler(android.os.Looper.getMainLooper()))
+   prefs.edit().putInt("installerSession",sessionId).putString("installerToken","crash-token").putString("installerVersion","0.5.6").commit()
+   val constructor=AndroidUpdateManager::class.java.getDeclaredConstructor(android.content.Context::class.java,Boolean::class.javaPrimitiveType).apply {isAccessible=true}
+   val recovered=constructor.newInstance(target,true)
+   assertEquals("idle",recovered.getState().getString("status"))
+   assertTrue("target installer abandonment finished",finished.await(3,java.util.concurrent.TimeUnit.SECONDS))
+   assertEquals("abandoned session did not install",false,success.get())
+   assertNull(installer.getSessionInfo(sessionId))
+   assertFalse(prefs.contains("installerSession"));assertFalse(prefs.contains("installerToken"))
+  } finally {
+   installer.unregisterSessionCallback(callback)
+   try {installer.abandonSession(sessionId)} catch(_:Exception) {}
+   prefs.edit().clear().commit()
+  }
  }
 
  @Test fun recoveryKeepsACommittedInstallerSessionWithoutANewMarker() {
