@@ -10,8 +10,9 @@ afterEach(() => cleanup());
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 const idle = (): UpdateState => ({ status: "idle", platform: "darwin", currentVersion: "1.0.0" });
@@ -100,6 +101,119 @@ it("retries a failed download without treating its existing error as a new failu
   expect(native.value.startUpdate).toHaveBeenCalledOnce();
   expect(native.value.installUpdate).toHaveBeenCalledOnce();
   expect(view.result.current.error).toBeUndefined();
+});
+
+it("allows retry after an Android download fails while the app is in the background", async () => {
+  const download = deferred<UpdateState>();
+  const native = nativeClient({ startUpdate: vi.fn().mockImplementationOnce(() => download.promise).mockResolvedValue(ready("android")) });
+  let active = true;
+  const view = renderHook(() => useUpdateController({ ...options(native.value), platformKind: "android", current: () => active }));
+  let operation!: Promise<void>;
+  act(() => { operation = view.result.current.updateNative(); });
+  expect(view.result.current.updating).toBe(true);
+  active = false;
+  await act(async () => {
+    native.emit({ ...ready("android"), status: "error", message: "Download interrupted" });
+    download.reject(new Error("Download interrupted"));
+    await operation;
+  });
+  active = true;
+  expect(view.result.current.nativeState).toMatchObject({ status: "error", message: "Download interrupted" });
+  expect(view.result.current.updating).toBe(false);
+  expect(native.value.installUpdate).not.toHaveBeenCalled();
+  await act(async () => view.result.current.updateNative());
+  expect(native.value.startUpdate).toHaveBeenCalledTimes(2);
+  expect(native.value.installUpdate).toHaveBeenCalledOnce();
+});
+
+it("enables the visible Retry update button after an Android background failure", async () => {
+  const download = deferred<UpdateState>();
+  const native = nativeClient({ startUpdate: vi.fn().mockImplementationOnce(() => download.promise).mockResolvedValue(ready("android")) });
+  let active = true;
+  const opts = { ...options(native.value), platformKind: "android" as const, current: () => active };
+  function Updates() {
+    return <UpdateSettings updates={useUpdateController(opts)} platformKind="android" hasNativeHost />;
+  }
+  render(<Updates />);
+  await act(async () => {});
+  act(() => native.emit({ ...ready("android"), status: "available" }));
+  act(() => screen.getByRole("button", { name: "Download and install" }).click());
+  active = false;
+  await act(async () => {
+    native.emit({ ...ready("android"), status: "error", message: "Download interrupted" });
+    download.reject(new Error("Download interrupted"));
+  });
+  active = true;
+  const retry = screen.getByRole("button", { name: "Retry update" }) as HTMLButtonElement;
+  expect(retry.disabled).toBe(false);
+  expect(screen.getByRole("alert").textContent).toContain("Download interrupted");
+  expect(native.value.installUpdate).not.toHaveBeenCalled();
+  await act(async () => retry.click());
+  expect(native.value.startUpdate).toHaveBeenCalledTimes(2);
+  expect(native.value.installUpdate).toHaveBeenCalledOnce();
+});
+
+it.each(["success", "error"] as const)("releases Android update checks that finish in the background: %s", async outcome => {
+  const check = deferred<UpdateState>();
+  const native = nativeClient({ checkForUpdates: () => check.promise });
+  let active = true;
+  const view = renderHook(() => useUpdateController({ ...options(native.value), platformKind: "android", current: () => active }));
+  let operation!: Promise<void>;
+  act(() => { operation = view.result.current.check(); });
+  expect(view.result.current.checking).toBe(true);
+  active = false;
+  await act(async () => {
+    const state: UpdateState = outcome === "error"
+      ? { ...idle(), platform: "android", status: "error", message: "Check failed" }
+      : { ...ready("android"), status: "available" };
+    native.emit(state);
+    if (outcome === "error") check.reject(new Error("Check failed"));
+    else check.resolve(state);
+    await operation;
+  });
+  active = true;
+  expect(view.result.current.nativeState?.status).toBe(outcome === "error" ? "error" : "available");
+  expect(view.result.current.checking).toBe(false);
+});
+
+it("requires a new foreground action to install an Android download completed in the background", async () => {
+  const download = deferred<UpdateState>();
+  const native = nativeClient({ startUpdate: vi.fn().mockImplementationOnce(() => download.promise).mockResolvedValue(ready("android")) });
+  let active = true;
+  const opts = { ...options(native.value), platformKind: "android" as const, current: () => active };
+  const view = renderHook(() => useUpdateController(opts));
+  let operation!: Promise<void>;
+  act(() => { operation = view.result.current.updateNative(); });
+  active = false;
+  await act(async () => {
+    native.emit(ready("android"));
+    download.resolve(ready("android"));
+    await operation;
+  });
+  active = true;
+  expect(view.result.current.updating).toBe(false);
+  expect(native.value.installUpdate).not.toHaveBeenCalled();
+  expect(opts.freeze).not.toHaveBeenCalled();
+  await act(async () => view.result.current.updateNative());
+  expect(native.value.installUpdate).toHaveBeenCalledOnce();
+});
+
+it("does not let an old session completion unlock a new session's pending update", async () => {
+  const first = deferred<UpdateState>();
+  const second = deferred<UpdateState>();
+  const native = nativeClient({ startUpdate: vi.fn().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise) });
+  const view = renderHook(({ scope }) => useUpdateController(options(native.value, scope)), { initialProps: { scope: {} } });
+  let oldOperation!: Promise<void>;
+  act(() => { oldOperation = view.result.current.updateNative(); });
+  view.rerender({ scope: {} });
+  let newOperation!: Promise<void>;
+  act(() => { newOperation = view.result.current.updateNative(); });
+  await act(async () => { first.resolve(ready()); await oldOperation; });
+  expect(view.result.current.updating).toBe(true);
+  expect(native.value.installUpdate).not.toHaveBeenCalled();
+  await act(async () => { second.resolve(ready()); await newOperation; });
+  expect(view.result.current.updating).toBe(false);
+  expect(native.value.installUpdate).toHaveBeenCalledOnce();
 });
 
 it("retries catalog discovery instead of installing when no version was discovered", () => {

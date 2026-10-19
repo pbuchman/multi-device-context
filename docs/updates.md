@@ -12,6 +12,12 @@ check immediately. Checking does not download an installer. An available update
 shows its version and size; downloading starts when you choose it. Progress and
 retry errors belong to the update panel, independently of chat synchronization.
 
+On Android, an update check or download that finishes in the background releases
+its busy controls. A download completed while the app is inactive waits for a
+new update action in the foreground before installation. Replacing the account
+session cancels the old operation's authority to install or release the new
+session's busy controls.
+
 | Platform | What happens after downloading and verification |
 | --- | --- |
 | macOS Apple Silicon | The verified DMG opens. Quit the application, replace it in Applications, and reopen it. The app remains ad-hoc signed and not notarized; normal Gatekeeper restrictions still apply. |
@@ -90,9 +96,9 @@ registration requires one. Verify public `uiBuild` and served asset hashes
 against the exact candidate, readiness, and older client compatibility. Then
 publish the complete release as a **prerelease**.
 
-For 0.6.2, use Android version code 19 with the existing package ID and release
-key. It must update official0.6.1/code18 in place, preserving existing data; earlier
-compatible signed0.6.0/code17 and codes15/16 remain eligible for an in-place update. Record
+For 0.6.3, use Android version code 20 with the existing package ID and release
+key. It must update official 0.6.2/code 19 in place, preserving existing data; earlier
+compatible signed codes 15–18 remain eligible for an in-place update. Record
 the APK's certificate digest and exact bytes before publication; a new version
 label alone does not prove signing continuity or a successful upgrade. Target
 radio acceptance uses **Settings → Check for updates → Download and install**

@@ -178,6 +178,47 @@ class DictationWebViewTest {
   instrumentation.runOnMainSync {input.setSelection(1,1)}
   assertEquals("cancelled",DictationRuntime.snapshot().optString("phase"))
  }
+ @Test fun actualAccessibilityCommitBatchPreservesCandidateThroughPlatformCompositionCleanup()=fixture { activity,web ->
+  if(android.os.Build.VERSION.SDK_INT<33)return@fixture
+  val input=readyInput(web);hiddenField(activity,web);val id=prepared()
+  val handler=input.handler ?: android.os.Handler(android.os.Looper.getMainLooper())
+  val dispatch=java.util.concurrent.FutureTask {
+   // RemoteInputConnectionImpl's accessibility commit, including its mandatory cleanup.
+   input.beginBatchEdit()
+   try {
+    input.finishComposingText()
+    assertEquals("cleanup alone retains processing","processing",DictationRuntime.snapshot().optString("phase"))
+    assertFalse(DictationRuntime.snapshot().optBoolean("provisionalPending"))
+    assertFalse(DictationRuntime.snapshot().optBoolean("provisionalInput"))
+    assertTrue(input.commitText(" transcript",1,null))
+   }
+   finally {input.endBatchEdit()}
+  }
+  assertTrue(handler.post(dispatch));dispatch.get(3,TimeUnit.SECONDS);instrumentation.waitForIdleSync()
+  val snapshot=DictationRuntime.snapshot()
+  assertEquals("platform commit cancellation: "+snapshot.optString("cancelReason"),"processing",snapshot.optString("phase"))
+  assertTrue(snapshot.optBoolean("provisionalInput"));assertFalse(snapshot.optBoolean("inserted"))
+  assertEquals("complete",DictationRuntime.command(id,"completed",101,SystemClock.elapsedRealtime()).optString("phase"))
+ }
+ @Test fun actualIncompleteRepeatedNestedOrOrdinaryEditBatchesStillRevoke()=fixture { activity,web ->
+  if(android.os.Build.VERSION.SDK_INT<33)return@fixture
+  val actions=listOf<Pair<String,(android.view.inputmethod.InputConnection)->Unit>>(
+   "cleanup without commit" to {it.beginBatchEdit();it.finishComposingText();it.endBatchEdit()},
+   "repeated cleanup" to {it.beginBatchEdit();it.finishComposingText();it.finishComposingText();it.endBatchEdit()},
+   "nested cleanup" to {it.beginBatchEdit();it.beginBatchEdit();it.finishComposingText();it.endBatchEdit();it.endBatchEdit()},
+   "ordinary commit" to {it.beginBatchEdit();it.finishComposingText();it.commitText(" manual",1);it.endBatchEdit()},
+   "ordinary composition" to {it.beginBatchEdit();it.finishComposingText();it.setComposingText(" manual",1);it.endBatchEdit()},
+   "selection" to {it.beginBatchEdit();it.finishComposingText();it.setSelection(0,0);it.endBatchEdit()}
+  )
+  for((name,action) in actions) {
+   val input=readyInput(web);hiddenField(activity,web);val id=prepared()
+   val handler=input.handler ?: android.os.Handler(android.os.Looper.getMainLooper())
+   val dispatch=java.util.concurrent.FutureTask {action(input)}
+   assertTrue(handler.post(dispatch));dispatch.get(3,TimeUnit.SECONDS);instrumentation.waitForIdleSync()
+   assertEquals("revoked by $name","cancelled",DictationRuntime.snapshot().optString("phase"))
+   assertFalse("no admission after $name",DictationRuntime.authorize(id,DictationRuntime.snapshot().getString("contextId"),1,UUID.randomUUID().toString(),SystemClock.elapsedRealtime()))
+  }
+ }
  @Test fun actualThreeArgumentCommitIsProvisionalAndDoesNotSelfDispatchIntoRejectingOverload()=fixture(captureCommit=true) { activity,web ->
   if(android.os.Build.VERSION.SDK_INT<33)return@fixture
   val input=readyInput(web)
@@ -352,7 +393,19 @@ class DictationWebViewTest {
   phase("prepared",bridge);DictationRuntime.command(id,"recording",101,SystemClock.elapsedRealtime());SystemClock.sleep(200)
   // Deliberately no renderer poll wait after native finishing: cover the recording/processing poll race.
   DictationRuntime.command(id,"finishing",101,SystemClock.elapsedRealtime())
-  instrumentation.runOnMainSync {assertTrue(input.commitText(" transcript",1,null))};instrumentation.waitForIdleSync()
+  val handler=input.handler ?: android.os.Handler(android.os.Looper.getMainLooper())
+  val dispatch=java.util.concurrent.FutureTask {
+   input.beginBatchEdit()
+   try {
+    input.finishComposingText()
+    assertEquals("production hook cleanup retains processing","processing",DictationRuntime.snapshot().optString("phase"))
+    assertFalse(DictationRuntime.snapshot().optBoolean("provisionalPending"))
+    assertFalse(DictationRuntime.snapshot().optBoolean("provisionalInput"))
+    assertTrue(input.commitText(" transcript",1,null))
+   }
+   finally {input.endBatchEdit()}
+  }
+  assertTrue(handler.post(dispatch));dispatch.get(3,TimeUnit.SECONDS);instrumentation.waitForIdleSync()
   assertEquals("processing",DictationRuntime.snapshot().optString("phase"));assertTrue(DictationRuntime.snapshot().optBoolean("provisionalInput"))
   SystemClock.sleep(650);assertEquals("complete",DictationRuntime.command(id,"completed",101,SystemClock.elapsedRealtime()).optString("phase"));phase("queued",bridge)
   val read=CountDownLatch(1);val result=AtomicReference<String>()
