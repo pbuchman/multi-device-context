@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### 0.6.4 — OEM Android APK signing metadata compatibility
+
+- Some OEM frameworks parse an update APK but omit its modern `SigningInfo`.
+  The updater now requeries that same canonical file through `GET_SIGNATURES`
+  only in this case. It requires unchanged package metadata and exact equality
+  with the installed application's modern current signer set; missing, empty
+  or different certificates still reject the update.
+- Missing APK/signing metadata reports a verification error rather than a
+  misleading connection error. Hash, size, package, version, private-cache and
+  pre-install verification remain enforced.
+- Android code 21 retains the package, signing key and local data. Existing
+  affected installers need an in-place system-installer bootstrap; a real OEM
+  update from the corrected version remains a separate acceptance check.
+
 ### 0.6.3 — Android dictation completion and update retries
 
 - Android's Accessibility input batch can clear composition before the correlated

@@ -50,6 +50,19 @@ Checksums detect mismatched or corrupted files; they are not an independent
 publisher signature. Keep repository administration and publication permissions
 restricted. Android additionally checks its existing signing certificate.
 
+Some OEM frameworks parse an APK but omit its modern `SigningInfo`. Version
+0.6.4 requeries the same canonical archive with `GET_SIGNATURES` only in that
+case, requires identical package metadata, and compares the complete nonempty
+certificate set with the installed application's modern current signers. Missing
+or different certificates reject the update; signing history does not substitute
+for current signers. Missing signing metadata reports a verification error.
+
+An older affected installation still uses its old updater. Download the official
+APK and open it in Android's system installer to update in place, preserving app
+data. This bootstrap does not establish a successful update through the corrected
+updater. Verify that path from 0.6.4 to a later approved release separately on the
+affected physical device.
+
 ## Preparing a release
 
 Use one reviewed commit on `main`, with successful **Quality**, **Native
@@ -96,14 +109,15 @@ registration requires one. Verify public `uiBuild` and served asset hashes
 against the exact candidate, readiness, and older client compatibility. Then
 publish the complete release as a **prerelease**.
 
-For 0.6.3, use Android version code 20 with the existing package ID and release
-key. It must update official 0.6.2/code 19 in place, preserving existing data; earlier
-compatible signed codes 15–18 remain eligible for an in-place update. Record
+For 0.6.4, use Android version code 21 with the existing package ID and release
+key. It must update official 0.6.3/code 20 in place, preserving existing data; earlier
+compatible signed codes 15–19 remain eligible for an in-place update. Record
 the APK's certificate digest and exact bytes before publication; a new version
-label alone does not prove signing continuity or a successful upgrade. Target
-radio acceptance uses **Settings → Check for updates → Download and install**
-and Android's confirmation, with existing data retained. Keep that result
-separate from any phone, emulator or CI checks.
+label alone does not prove signing continuity or a successful upgrade. Affected
+0.6.3 installations bootstrap through Android's system installer. Acceptance of
+the corrected updater starts from 0.6.4 and uses **Settings → Check for updates →
+Download and install** for a later approved release, with existing data retained.
+Keep that pending physical result separate from phone, emulator and CI checks.
 
 MDC0.6.2 updates the [owned local dictation contract](android-dictation.md) introduced
 in0.6.1. Its private companion adapter/code17 is a separate installation and is not a public installer
