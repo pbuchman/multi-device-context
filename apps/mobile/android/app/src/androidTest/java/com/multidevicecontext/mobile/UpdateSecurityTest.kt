@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageInfo
+import android.content.pm.Signature
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -19,6 +21,42 @@ import org.junit.runner.RunWith
 class UpdateSecurityTest {
  private val target by lazy {ApplicationProvider.getApplicationContext<android.content.Context>()}
 
+ @Test fun oemNullModernArchiveSigningInfoUsesTheSameCanonicalApkAndInstalledModernSigners() {
+  val androidSource=AndroidApkPackageSource(target)
+  val apk=cacheCopy(File(target.applicationInfo.sourceDir))
+  val queries=mutableListOf<Pair<File,Boolean>>()
+  val source=object:ApkPackageSource {
+   override val usesModernSigning=true
+   override fun installed()=androidSource.installed()
+   override fun archive(file:File,legacySignatures:Boolean):ApkPackageSnapshot? {
+    queries.add(file to legacySignatures)
+    val parsed=androidSource.archive(file,legacySignatures)
+    return if(legacySignatures)parsed else parsed?.copy(signerDigests=null)
+   }
+  }
+  val reader=ApkIdentityReader(source)
+  val fallback=reader.inspectArchive(apk)
+  assertEquals(reader.installed().signerDigests,fallback.signerDigests)
+  assertEquals(listOf(apk.canonicalFile to false,apk.canonicalFile to true),queries)
+  val offer=AndroidUpdateOffer(fallback.versionName,fallback.versionCode,"https://github.com/pbuchman/multi-device-context/releases/download/v${fallback.versionName}/fixture.apk","fixture.apk",apk.length(),"0".repeat(64),"A".repeat(86)+"==",26)
+  assertThrows(IllegalArgumentException::class.java) {ApkIdentityPolicy.validate(fallback,reader.installed(),offer,android.os.Build.VERSION.SDK_INT)}
+ }
+
+ @Test fun archiveAdapterRejectsUnparseableApkAndMissingOrEmptyLegacySignatures() {
+  val source=AndroidApkPackageSource(target)
+  val malformed=File(target.cacheDir,"not-an-apk").apply {writeText("synthetic invalid APK")}
+  try {assertThrows(ApkMetadataException::class.java) {ApkIdentityReader(source).inspectArchive(malformed)}} finally {malformed.delete()}
+  val apk=File(target.applicationInfo.sourceDir)
+  @Suppress("DEPRECATION") val parsed=target.packageManager.getPackageArchiveInfo(apk.absolutePath,android.content.pm.PackageManager.GET_SIGNATURES)!!
+  @Suppress("DEPRECATION") fun withSignatures(signatures:Array<Signature>?) {
+   val copy=copyPackageInfo(parsed);copy.signatures=signatures
+   assertThrows(ApkSigningMetadataException::class.java) {source.snapshot(copy,false)}
+  }
+  withSignatures(null);withSignatures(emptyArray());withSignatures(arrayOf(Signature(byteArrayOf())))
+  val missingApplication=copyPackageInfo(parsed).apply {applicationInfo=null}
+  assertThrows(ApkMetadataException::class.java) {source.snapshot(missingApplication,false)}
+ }
+
  @Test fun readsInstalledApkIdentityAndRejectsDowngrade() {
   val inspector=ApkInspector(target)
   val source=File(target.applicationInfo.sourceDir)
@@ -31,6 +69,8 @@ class UpdateSecurityTest {
   val offer=AndroidUpdateOffer(identity.versionName,identity.versionCode,"https://github.com/pbuchman/multi-device-context/releases/download/v${identity.versionName}/fixture.apk","fixture.apk",cached.length(),"0".repeat(64),"A".repeat(86)+"==",26)
   val failure=assertThrows(IllegalArgumentException::class.java) {inspector.validate(cached,offer)}
   assertTrue(failure.message!!.contains("increase"))
+  val outsideCache=assertThrows(IllegalArgumentException::class.java) {inspector.validate(source,offer)}
+  assertTrue(outsideCache.message!!.contains("private cache"))
  }
 
  @Test fun rejectsAnApkForTheInstrumentationPackageEvenWithTheSameDebugSigner() {
@@ -125,6 +165,16 @@ class UpdateSecurityTest {
  }
 
  @Test fun tamperedCachedApkDoesNotRemainReadyForAnInstallRetryLoop() {
+  assertTamperedCachedApkIsRejected {it.appendBytes(byteArrayOf(0))}
+ }
+
+ @Test fun sameSizeTamperingStillFailsDigestRevalidationBeforeInstallerHandoff() {
+  assertTamperedCachedApkIsRejected {file ->
+   val bytes=file.readBytes();bytes[bytes.lastIndex]=(bytes.last().toInt() xor 1).toByte();file.writeBytes(bytes)
+  }
+ }
+
+ private fun assertTamperedCachedApkIsRejected(tamper:(File)->Unit) {
   val constructor=AndroidUpdateManager::class.java.getDeclaredConstructor(android.content.Context::class.java,Boolean::class.javaPrimitiveType).apply {isAccessible=true}
   val manager=constructor.newInstance(target,false)
   val source=File(target.applicationInfo.sourceDir);val cached=cacheCopy(source)
@@ -137,7 +187,7 @@ class UpdateSecurityTest {
   val verifiedType=Class.forName("${AndroidUpdateManager::class.java.name}\$VerifiedUpdate")
   val verified=verifiedType.getDeclaredConstructor(AndroidUpdateOffer::class.java,File::class.java).apply {isAccessible=true}.newInstance(offer,cached)
   val verifiedField=AndroidUpdateManager::class.java.getDeclaredField("verified").apply {isAccessible=true};verifiedField.set(manager,verified)
-  cached.appendBytes(byteArrayOf(0))
+  tamper(cached)
   assertThrows(IllegalArgumentException::class.java) {manager.install()}
   assertEquals("error",manager.getState().getString("status"))
   assertFalse(cached.exists());assertNull(verifiedField.get(manager))
@@ -145,6 +195,10 @@ class UpdateSecurityTest {
 
  private fun cacheCopy(source:File):File {
   val dir=File(target.cacheDir,"updates").apply {mkdirs()};return File(dir,"update.apk").also {source.copyTo(it,true)}
+ }
+ private fun copyPackageInfo(source:PackageInfo):PackageInfo {
+  val parcel=android.os.Parcel.obtain()
+  return try {source.writeToParcel(parcel,0);parcel.setDataPosition(0);PackageInfo.CREATOR.createFromParcel(parcel)} finally {parcel.recycle()}
  }
  private fun waitForCommittedSession(installer:PackageInstaller,id:Int) {
   repeat(40) {

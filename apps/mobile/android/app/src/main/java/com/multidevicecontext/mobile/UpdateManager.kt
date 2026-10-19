@@ -41,6 +41,7 @@ data class AndroidUpdateState(
 data class ApkIdentity(val packageName:String,val versionName:String,val versionCode:Long,val minimumSdk:Int,val signerDigests:Set<String>)
 
 class ApkInspector(private val context:Context) {
+ private val identities=ApkIdentityReader(AndroidApkPackageSource(context))
  fun validate(file:File,offer:AndroidUpdateOffer):ApkIdentity {
   require(file.canonicalFile.parentFile==File(context.cacheDir,"updates").canonicalFile) {"Update is outside private cache"}
   val identity=inspectArchive(file)
@@ -48,31 +49,47 @@ class ApkInspector(private val context:Context) {
   return identity
  }
 
- fun inspectArchive(file:File):ApkIdentity {
-  @Suppress("DEPRECATION") val flags=if(Build.VERSION.SDK_INT>=28)PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
-  val info=if(Build.VERSION.SDK_INT>=33) context.packageManager.getPackageArchiveInfo(file.absolutePath,PackageManager.PackageInfoFlags.of(flags.toLong()))
-   else @Suppress("DEPRECATION") context.packageManager.getPackageArchiveInfo(file.absolutePath,flags)
-  requireNotNull(info) {"Downloaded file is not an APK"}
-  info.applicationInfo?.let {it.sourceDir=file.absolutePath;it.publicSourceDir=file.absolutePath}
-  return identity(info)
- }
-
- fun installed():ApkIdentity {
-  @Suppress("DEPRECATION") val flags=if(Build.VERSION.SDK_INT>=28)PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
-  val info=if(Build.VERSION.SDK_INT>=33) context.packageManager.getPackageInfo(context.packageName,PackageManager.PackageInfoFlags.of(flags.toLong()))
-   else @Suppress("DEPRECATION") context.packageManager.getPackageInfo(context.packageName,flags)
-  return identity(info)
- }
-
- private fun identity(info:PackageInfo):ApkIdentity {
-  val signatures=if(Build.VERSION.SDK_INT>=28) requireNotNull(info.signingInfo).apkContentsSigners.toList()
-   else @Suppress("DEPRECATION") info.signatures?.toList().orEmpty()
-  val digests=signatures.map {signature -> MessageDigest.getInstance("SHA-256").digest(signature.toByteArray()).joinToString("") {"%02x".format(it)}}.toSet()
-  val code=if(Build.VERSION.SDK_INT>=28)info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
-  return ApkIdentity(info.packageName,info.versionName ?: "",code,info.applicationInfo?.minSdkVersion ?: 0,digests)
- }
+ fun inspectArchive(file:File):ApkIdentity=identities.inspectArchive(file)
+ fun installed():ApkIdentity=identities.installed()
 
  companion object {const val PACKAGE_NAME="com.multidevicecontext.mobile"}
+}
+
+internal class AndroidApkPackageSource(private val context:Context):ApkPackageSource {
+ override val usesModernSigning=Build.VERSION.SDK_INT>=28
+
+ override fun archive(file:File,legacySignatures:Boolean):ApkPackageSnapshot? {
+  @Suppress("DEPRECATION") val flags=if(usesModernSigning && !legacySignatures)PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+  // The integer GET_SIGNATURES overload is intentional for the OEM fallback.
+  val info=if(Build.VERSION.SDK_INT>=33 && !legacySignatures) context.packageManager.getPackageArchiveInfo(file.absolutePath,PackageManager.PackageInfoFlags.of(flags.toLong()))
+   else @Suppress("DEPRECATION") context.packageManager.getPackageArchiveInfo(file.absolutePath,flags)
+  return info?.let {snapshot(it,usesModernSigning && !legacySignatures)}
+ }
+
+ override fun installed():ApkPackageSnapshot {
+  @Suppress("DEPRECATION") val flags=if(usesModernSigning)PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+  val info=if(Build.VERSION.SDK_INT>=33) context.packageManager.getPackageInfo(context.packageName,PackageManager.PackageInfoFlags.of(flags.toLong()))
+   else @Suppress("DEPRECATION") context.packageManager.getPackageInfo(context.packageName,flags)
+  return snapshot(info,usesModernSigning)
+ }
+
+ internal fun snapshot(info:PackageInfo,modernSignatures:Boolean):ApkPackageSnapshot {
+  val application=info.applicationInfo ?: throw ApkMetadataException()
+  val code=if(Build.VERSION.SDK_INT>=28)info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
+  val metadata=ApkPackageMetadata(info.packageName ?: "",info.versionName ?: "",code,application.minSdkVersion,application.targetSdkVersion)
+  metadata.validate()
+  val digests=if(modernSignatures && Build.VERSION.SDK_INT>=28 && info.signingInfo==null)null else {
+   val signatures=if(modernSignatures && Build.VERSION.SDK_INT>=28)info.signingInfo!!.apkContentsSigners
+    else @Suppress("DEPRECATION") info.signatures
+   if(signatures.isNullOrEmpty())throw ApkSigningMetadataException()
+   signatures.map {signature ->
+    val bytes=signature?.toByteArray()
+    if(bytes==null || bytes.isEmpty())throw ApkSigningMetadataException()
+    MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {"%02x".format(it)}
+   }.toSet()
+  }
+  return ApkPackageSnapshot(metadata,digests)
+ }
 }
 
 @SuppressLint("ApplySharedPref", "StaticFieldLeak")
@@ -169,14 +186,7 @@ class AndroidUpdateManager private constructor(private val context:Context,recov
   state=next;val json=next.json();val listeners=synchronized(emitters) {emitters.values.toList()}
   listeners.forEach {listener->try {listener(JSONObject(json.toString()))} catch(_:Exception) {}}
  }
- private fun failure(prefix:String,cause:Exception,selected:AndroidUpdateOffer?=offer)=AndroidUpdateState("error",availableVersion=selected?.version,message="$prefix. ${safeReason(cause)}")
- private fun safeReason(cause:Exception)=when {
-  cause.message?.contains("certificate",true)==true -> "The signing certificate did not match."
-  cause.message?.contains("version",true)==true -> "The package version was invalid."
-  cause.message?.contains("size",true)==true || cause.message?.contains("incomplete",true)==true -> "The downloaded size did not match."
-  cause.message?.contains("SHA-",true)==true -> "The downloaded digest did not match."
-  else -> "Check your connection and try again."
- }
+ private fun failure(prefix:String,cause:Exception,selected:AndroidUpdateOffer?=offer)=AndroidUpdateState("error",availableVersion=selected?.version,message="$prefix. ${UpdateFailureReason.safe(cause)}")
 
  private fun download(selected:AndroidUpdateOffer) {
   var current=selected.url;var redirects=0;val deadline=UpdateDeadline.afterMillis(UpdatePolicy.DOWNLOAD_DEADLINE_MS)
