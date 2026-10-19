@@ -4,11 +4,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import fastifyStatic from "@fastify/static";
-import { DeviceCredentialSchema, DeviceEnrollmentSchema, DeviceRenameSchema, IdSchema, type RuntimeConfig } from "@mdc/contracts";
+import { ContextOriginsRequestSchema, DeviceCredentialSchema, DeviceEnrollmentSchema, DeviceRenameSchema, IdSchema, type RuntimeConfig } from "@mdc/contracts";
 import { createHash } from "node:crypto";
 import { deviceIdentity, type DeviceAccessPort, type DeviceIdentity, type DevicePrincipal } from "./device-access.js";
 import type { AttachmentPort } from "./attachments.js";
 import type { AccessAdministrationPort } from "./access.js";
+import type { ContextOriginsPort } from "./context-origins.js";
 import { registerAccessRoutes } from "./access-routes.js";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 
@@ -39,6 +40,7 @@ export type BuildServerOptions = {
   devices?: DeviceAccessPort;
   attachments?: AttachmentPort;
   access?: AccessAdministrationPort;
+  contextOrigins?: ContextOriginsPort;
 };
 
 type BuildMetadata = { uiBuild: string };
@@ -93,7 +95,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   app.addHook("onRequest", async (request, reply) => {
     if (!request.url.startsWith("/api/")) return;
     reply.header("vary", "Origin");
-    if (request.url.split("?", 1)[0] === "/api/profile") reply.header("cache-control", "no-store");
+    if (["/api/profile", "/api/context-origins"].includes(request.url.split("?", 1)[0]!)) reply.header("cache-control", "no-store");
     const origin = request.headers.origin;
     if (request.method !== "OPTIONS" && (origin === "https://localhost" || origin === publicConfig.appOrigin)) {
       reply.header("access-control-allow-origin", origin);
@@ -305,6 +307,14 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     const parsed = DeviceRenameSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Bad Request" });
     return options.devices!.rename(deviceIdentity(identity), parsed.data);
+  });
+  app.post("/api/context-origins", { bodyLimit: 8_192 }, async (request, reply) => {
+    const identity = await authenticatedDevice(request);
+    if (!identity) return reply.code(401).send({ error: "Unauthorized" });
+    const parsed = ContextOriginsRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Bad Request" });
+    if (!options.contextOrigins) return reply.code(503).send({ error: "Unavailable" });
+    return options.contextOrigins.get(deviceIdentity(identity), parsed.data.contextIds);
   });
 
   if (options.settings) {

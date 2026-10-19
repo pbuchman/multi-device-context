@@ -1,4 +1,7 @@
-import { useLayoutEffect, useRef, type ClipboardEvent, type KeyboardEvent, type RefObject } from "react";
+import { useId, useLayoutEffect, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
+import type { ContextOrigin } from "@mdc/contracts";
+import { CONTEXT_ORIGIN_PALETTE, EMPTY_ORIGINS, contextOrigin, contextSourceLabel } from "./context-origins.js";
 import type { ContextRecord, ItemRecord } from "./model.js";
 import type { WorkspaceCloud } from "./App.js";
 import { AttachmentPreview } from "./media.js";
@@ -23,8 +26,49 @@ export function WorkspaceIcon({ name }: { name: IconName }) {
 export function displayTitle(title?: string) { return !title || title === "New context" ? "New chat" : title; }
 export function formatFileSize(size: number) { return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`; }
 
-export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, search, onSearch, onSelect, onNew, onClose, onOptions, onContextMenu, onSettings, onRefresh, refreshing, blocked, name, email, avatarUrl }: {
-  elementRef: RefObject<HTMLElement | null>; compact: boolean; open: boolean; contexts: ContextRecord[]; selectedId: string; search: string; onSearch(value: string): void;
+function ContextOptionsButton({ context, sourceLabel, blocked, onOptions }: {
+  context: ContextRecord; sourceLabel: string; blocked: boolean; onOptions(context: ContextRecord, opener: HTMLElement): void;
+}) {
+  const id = useId();
+  const button = useRef<HTMLButtonElement>(null);
+  const tooltip = useRef<HTMLDivElement>(null);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const [position, setPosition] = useState({ left: 8, top: 8 });
+  const visible = !blocked && !dismissed && (hovered || focused);
+  useLayoutEffect(() => {
+    if (!visible) return;
+    const place = () => {
+      const rect = button.current!.getBoundingClientRect();
+      const bounds = tooltip.current!.getBoundingClientRect();
+      setPosition({ left: Math.max(8, Math.min(rect.right - bounds.width, window.innerWidth - bounds.width - 8)),
+        top: rect.bottom + bounds.height + 8 < window.innerHeight ? rect.bottom + 5 : Math.max(8, rect.top - bounds.height - 5) });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
+  }, [visible, sourceLabel]);
+  return <>
+    <button ref={button} type="button" className="icon-button" aria-label={`Options for ${displayTitle(context.title)}`} aria-describedby={visible ? id : undefined}
+      onMouseEnter={() => { setHovered(true); setDismissed(false); }} onMouseLeave={() => setHovered(false)}
+      onFocus={() => { setFocused(true); setDismissed(false); }} onBlur={() => setFocused(false)}
+      onKeyDown={event => { if (event.key === "Escape") { setDismissed(true); event.stopPropagation(); } }}
+      onClick={event => { setHovered(false); setDismissed(true); onOptions(context, event.currentTarget); }} disabled={blocked}><WorkspaceIcon name="more" /></button>
+    {visible ? createPortal(<div ref={tooltip} id={id} role="tooltip" className="context-source-tooltip" style={position}>{sourceLabel}</div>, document.body) : null}
+  </>;
+}
+
+function originStyle(origin: ContextOrigin | undefined): CSSProperties | undefined {
+  if (!origin) return undefined;
+  const palette = CONTEXT_ORIGIN_PALETTE[origin.colorIndex];
+  if (!palette) return undefined;
+  return { "--origin-light": palette[0], "--origin-light-active": palette[1], "--origin-dark": palette[2], "--origin-dark-active": palette[3] } as CSSProperties;
+}
+
+export function ChatSidebar({ elementRef, compact, open, contexts, origins = EMPTY_ORIGINS, selectedId, search, onSearch, onSelect, onNew, onClose, onOptions, onContextMenu, onSettings, onRefresh, refreshing, blocked, name, email, avatarUrl }: {
+  elementRef: RefObject<HTMLElement | null>; compact: boolean; open: boolean; contexts: ContextRecord[]; origins?: ReadonlyMap<string, ContextOrigin>; selectedId: string; search: string; onSearch(value: string): void;
   onSelect(id: string): void; onNew(): void; onClose(): void; onOptions(context: ContextRecord, opener: HTMLElement): void; onContextMenu(context: ContextRecord, anchor: { x: number; y: number }, opener: HTMLElement): void; onSettings(): void; onRefresh(): void; refreshing: boolean; blocked: boolean; name: string; email?: string | undefined; avatarUrl?: string | undefined;
 }) {
   return <aside ref={elementRef} className="sidebar" aria-label="Chats sidebar" role={compact && open ? "dialog" : undefined} aria-modal={compact && open ? true : undefined}>
@@ -32,11 +76,11 @@ export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, s
     <button type="button" className="new-context" aria-label="New chat" onClick={onNew} disabled={blocked}><WorkspaceIcon name="edit" />New chat</button>
     <div className="search"><WorkspaceIcon name="search" /><input type="text" role="searchbox" aria-label="Search chat titles" placeholder="Search chats" value={search} onChange={event => onSearch(event.target.value)} />{search ? <button type="button" className="icon-button" aria-label="Clear search" onClick={() => onSearch("")}><WorkspaceIcon name="close" /></button> : null}</div>
     <div className="context-list-wrap"><div className="sidebar-label"><span>{refreshing ? "Refreshing…" : "Your chats"}</span><button className="icon-button refresh" type="button" aria-label="Refresh chats and messages" disabled={refreshing || blocked} aria-busy={refreshing} onClick={onRefresh}><WorkspaceIcon name="refresh" /></button></div>
-      <nav className="context-list" aria-label="Your chats">{contexts.length ? contexts.map(context => <div className={`context-row ${context.id === selectedId ? "selected" : ""}`} key={context.id}
+      <nav className="context-list" aria-label="Your chats">{contexts.length ? contexts.map(context => <div className={`context-row ${context.id === selectedId ? "selected" : ""}`} key={context.id} data-origin-color={contextOrigin(context, origins)?.colorIndex} style={originStyle(contextOrigin(context, origins))}
         onContextMenu={event => { if (blocked) return; event.preventDefault(); event.stopPropagation(); const opener = (event.target as HTMLElement).closest("button") ?? event.currentTarget.querySelector("button")!; onContextMenu(context, { x: event.clientX, y: event.clientY }, opener); }}
         onKeyDown={event => { if (blocked || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return; event.preventDefault(); event.stopPropagation(); const opener = (event.target as HTMLElement).closest("button") ?? event.currentTarget.querySelector("button")!; const rect = opener.getBoundingClientRect(); onContextMenu(context, { x: rect.left, y: rect.bottom }, opener); }}>
         <button type="button" className="context-select" title={displayTitle(context.title)} aria-label={context.title === "New context" ? "Open new chat" : displayTitle(context.title)} aria-description={[context.pinnedAt != null ? "Pinned chat" : "", context.unread ? "Unread messages" : ""].filter(Boolean).join(". ") || undefined} aria-current={context.id === selectedId ? "page" : undefined} onClick={event => { if (event.ctrlKey) { event.preventDefault(); event.stopPropagation(); onContextMenu(context, { x: event.clientX, y: event.clientY }, event.currentTarget); } else onSelect(context.id); }} disabled={blocked}><span>{displayTitle(context.title)}</span>{context.pinnedAt != null ? <span className="chat-pin" aria-hidden="true"><WorkspaceIcon name="pin" /></span> : null}{context.unread ? <i aria-hidden="true" /> : null}</button>
-        <button type="button" className="icon-button" aria-label={`Options for ${displayTitle(context.title)}`} onClick={event => onOptions(context, event.currentTarget)} disabled={blocked}><WorkspaceIcon name="more" /></button>
+        <ContextOptionsButton context={context} sourceLabel={contextSourceLabel(context, origins)} blocked={blocked} onOptions={onOptions} />
       </div>) : <p className="no-results">No chats match this title. Clear your search to see all chats.</p>}</nav>
     </div>
     <div className="sidebar-footer"><button type="button" className="account" aria-label="Open settings" onClick={onSettings} disabled={blocked}><AccountAvatar name={name} avatarUrl={avatarUrl} /><span className="account-details"><span title={name}>{name}</span><small title={email}>{email ?? "Account details unavailable"}</small></span><WorkspaceIcon name="settings" /></button></div>

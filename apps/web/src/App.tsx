@@ -11,7 +11,7 @@ import { ContextOperations } from "./operations.js";
 import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import { browserCopyFile, clipboardImageFile } from "./clipboard-image.js";
-import type { AccessDevice, ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
+import type { AccessDevice, ContextOrigin, ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
 import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES, comparePinnedContexts } from "@mdc/contracts";
 import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type DragEvent, type SyntheticEvent } from "react";
 
@@ -24,6 +24,7 @@ import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
 import { DurableOutbox, type QueuedShare } from "./outbox.js";
 import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
 import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, displayTitle, formatFileSize } from "./workspace-view.js";
+import { contextSourceLabel, useContextOrigins } from "./context-origins.js";
 import { ChatContextMenu, type ChatMenuAnchor } from "./chat-context-menu.js";
 import { WorkspaceDialog, trapFocus } from "./workspace-overlay.js";
 import { useTimelineScroll } from "./use-timeline-scroll.js";
@@ -43,6 +44,7 @@ export type WorkspaceCloud = {
   subscribeDeletedContexts?(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeContexts(emit: (snapshot: CloudSnapshot<ContextRecord>) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeItems(contextId: Id, emit: (snapshot: CloudSnapshot<ItemRecord>) => void, fail: (error: Error) => void): Unsubscribe;
+  getContextOrigins?(contextIds: Id[]): Promise<ContextOrigin[]>;
   refreshContexts?(): Promise<CloudSnapshot<ContextRecord>>;
   refreshDeletedContexts?(): Promise<Id[]>;
   refreshDeletedItems?(): Promise<{ contextId: Id; itemId: Id }[]>;
@@ -309,6 +311,10 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   live.current.active = active;
   const isLive = useCallback(() => (services.accessActive?.() ?? true) && !signingOut.current && live.current.mounted && live.current.services === services
     && (services.platformKind !== "android" || live.current.active), [services]);
+  const loadOrigins = useCallback((ids: Id[]) => services.cloud.getContextOrigins?.(ids) ?? Promise.resolve([]), [services]);
+  const { origins, refresh: refreshOrigins } = useContextOrigins({ owner: services, contexts, confirmedIds: confirmedContextIds,
+    enabled: !accountBlocked, active, deviceName, accessMode: services.accessMode, accessActive: services.accessActive,
+    load: services.cloud.getContextOrigins ? loadOrigins : undefined });
   const restorePanelFocus = useCallback(() => {
     window.setTimeout(() => {
       const opener = panelOpener.current;
@@ -536,6 +542,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const scroll = useTimelineScroll(selectedId, visibleItems.map(item => item.id));
 
   const refresh = useCallback((manual = false): Promise<void> => {
+    if (manual && isLive()) refreshOrigins();
     if (!isLive() || !services.cloud.refreshContexts || !services.cloud.refreshDeletedContexts) return Promise.resolve();
     const selectedAtStart = navigation.selectedRef.current.id;
     const scope = services.viewer.uid;
@@ -620,7 +627,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (manual && !cause && complete) showToast("Refresh complete");
       suppressCatchupAutoSelect.current = backgroundInactive.current;
     });
-  }, [applyDeleted, applyDeletedItems, deletionCleanup, isLive, navigation.selectedRef, services, showToast]);
+  }, [applyDeleted, applyDeletedItems, deletionCleanup, isLive, navigation.selectedRef, services, showToast, refreshOrigins]);
 
   useEffect(() => {
     if ((!services.checkAccess && services.platformKind !== "android") || signingOut.current) return;
@@ -1211,7 +1218,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     <div style={{ display: "contents" }} inert={lifecycleSaving} onClickCapture={blockLifecycleInput} onPointerDownCapture={blockLifecycleInput} onKeyDownCapture={blockLifecycleInput} onChangeCapture={blockLifecycleInput} onInputCapture={blockLifecycleInput} onPasteCapture={blockLifecycleInput} onContextMenuCapture={blockLifecycleInput}>
     <div ref={backgroundRef} className={`app-shell ${compact && drawerOpen ? "drawer-open" : ""}`}>
       {compact && drawerOpen ? <button className="drawer-backdrop" type="button" tabIndex={-1} aria-label="Close chats menu backdrop" onClick={() => closeDrawer()} /> : null}
-      <ChatSidebar elementRef={sidebarRef} compact={compact} open={drawerOpen} contexts={visibleContexts} selectedId={selectedId} search={search} onSearch={setSearch}
+      <ChatSidebar elementRef={sidebarRef} compact={compact} open={drawerOpen} contexts={visibleContexts} origins={origins} selectedId={selectedId} search={search} onSearch={setSearch}
         onSelect={id => { if (!accountBlocked) { setSelectedId(id); closeDrawer(false); } }}
         onNew={newChat}
         onClose={() => closeDrawer()} onOptions={(context, opener) => {
@@ -1248,11 +1255,12 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <input ref={fileInput} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; trackLocalInput(sharePickedFiles(files)); }} />
       </main>
     </div>
-    {chatMenu && menuContext && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu context={menuContext} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onPin={canPin(menuContext) ? context => void changePin(context) : undefined} pinned={menuContext.pinnedAt != null} pinDisabled={!!pinDescription(menuContext)} pinDescription={pinDescription(menuContext)} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
+    {chatMenu && menuContext && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu sourceLabel={contextSourceLabel(menuContext, origins)} context={menuContext} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onPin={canPin(menuContext) ? context => void changePin(context) : undefined} pinned={menuContext.pinnedAt != null} pinDisabled={!!pinDescription(menuContext)} pinDescription={pinDescription(menuContext)} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
     {toast && !lifecycleSaving ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
     {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()} onConfirm={panel.kind === "clipboard" ? () => { void confirmClipboard(panel.snapshot); } : undefined}>
       {panel.kind === "context" ? <>
         <p className="dialog-description">{displayTitle(panel.context.title)}</p>
+        <p className="context-source-metadata">{contextSourceLabel(panel.context, origins)}</p>
         {option("edit", "Rename chat", () => renameChat(panel.context))}
         {panelContext && canPin(panelContext) ? option("pin", panelContext.pinnedAt != null ? "Unpin chat" : "Pin chat", () => void changePin(panelContext), !!pinDescription(panelContext), pinDescription(panelContext)) : null}
         {!navigation.selectedRef.current.drafts[panel.context.id]?.local ? option("link", "Copy link", () => { copyChatLink(panel.context); closePanel(); }, false, "The link does not give other accounts access.") : null}

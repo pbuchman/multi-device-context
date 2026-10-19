@@ -127,3 +127,20 @@ it("shares acknowledged pin state between server refreshes and listener restarts
   expect(await refresh(null, true)).toBeNull();
   expect(await refresh(timestamp(30), false)).toBe(30);
 });
+
+it("loads context origins through authenticated API with strict request and response contracts", async () => {
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ records: [{ id: device.id, name: "Current device name", colorIndex: 7 }] }), { status: 200 }));
+  vi.stubGlobal("fetch", fetch);
+  const instance = cloud();
+  await expect(instance.getContextOrigins([id])).resolves.toEqual([{ id: device.id, name: "Current device name", colorIndex: 7 }]);
+  expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/context-origins"), {
+    method: "POST", headers: { authorization: "Bearer unused", "content-type": "application/json" }, body: JSON.stringify({ contextIds: [id] }),
+  });
+  await expect(instance.getContextOrigins(Array.from({ length: 101 }, () => id))).rejects.toThrow();
+  expect(fetch).toHaveBeenCalledOnce();
+  fetch.mockResolvedValueOnce(new Response(JSON.stringify({ records: [{ id: device.id, name: "Invalid index", colorIndex: 8 }] })));
+  await expect(instance.getContextOrigins([id])).rejects.toThrow();
+  instance.invalidate();
+  await expect(instance.getContextOrigins([id])).rejects.toThrow(/access changed/);
+  vi.unstubAllGlobals();
+});

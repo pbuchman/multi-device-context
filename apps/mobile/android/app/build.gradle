@@ -43,8 +43,8 @@ android {
         applicationId "com.multidevicecontext.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode Integer.parseInt(System.getenv("MDC_ANDROID_VERSION_CODE") ?: "22")
-        versionName "0.7.0"
+        versionCode Integer.parseInt(System.getenv("MDC_ANDROID_VERSION_CODE") ?: "23")
+        versionName "0.7.1"
         manifestPlaceholders = [auth0Domain: "${authDomain()}", auth0Scheme: "com.multidevicecontext.mobile"]
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {

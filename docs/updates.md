@@ -35,10 +35,14 @@ On macOS, replacing an ad-hoc signed build may also require approving the app's
 Keychain access again. Follow the [macOS installation instructions](installation.md#macos)
 to reopen the existing encrypted local data.
 
-Version 0.7.0 adds account-wide pins for online saved chats, with a pinned-only
-filter and portable agent commands. A local Draft becomes pinnable after saving
-online. This interface change does not establish successful installation or
-updates on physical devices; record those results separately.
+Version 0.7.1 adds subtle pastel saved-chat row backgrounds based on the original
+source device. Colors are automatic, stable across the account and tailored to
+light and dark themes; unknown origins stay neutral. The origin name appears
+when hovering or focusing the row's options button and in the opened context
+options, including on touch devices. No extra labels are shown at rest and there
+are no manual color settings. Account-wide pins from 0.7.0 remain included.
+Source and CI checks do not establish successful installation or updates on
+physical devices; record those results separately.
 
 ## Trust and validation
 
@@ -114,14 +118,14 @@ registration requires one. Verify public `uiBuild` and served asset hashes
 against the exact candidate, readiness, and older client compatibility. Then
 publish the complete release as a **prerelease**.
 
-For 0.7.0, use Android version code 22 with the existing package ID and release
-key. It must update official 0.6.4/code 21 in place, preserving existing data; earlier
-compatible signed codes 15–20 remain eligible for an in-place update. Record
+For 0.7.1, use Android version code 23 with the existing package ID and release
+key. It must update official 0.7.0/code 22 in place, preserving existing data;
+earlier compatible signed codes 15–21 remain eligible for an in-place update. Record
 the APK's certificate digest and exact bytes before publication; a new version
 label alone does not prove signing continuity or a successful upgrade. Affected
 0.6.3 installations bootstrap through Android's system installer. Acceptance of
 the corrected updater starts from 0.6.4 and uses **Settings → Check for updates →
-Download and install** for 0.7.0/code 22, with existing data retained.
+Download and install** for 0.7.1/code 23, with existing data retained.
 Keep that pending physical result separate from phone, emulator and CI checks.
 
 MDC 0.6.2 updates the [owned local dictation contract](android-dictation.md) introduced

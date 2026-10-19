@@ -47,3 +47,14 @@
 .device-name-editor{margin:6px 0 12px;padding-bottom:12px;border-bottom:1px solid var(--line)}.device-name-editor form{padding:6px 10px}.device-name-editor label{display:block;font-size:13px;color:var(--muted);margin-bottom:8px}.device-name-editor .setting-row>button{min-height:44px;padding:8px 14px;border:1px solid var(--line);border-radius:11px;font-size:13px}.device-name-editor .dialog-buttons{margin-right:0}.device-name-editor .dialog-error{margin-left:0}
 
 .context-select .chat-pin{display:flex;flex:none;width:14px;height:14px;color:var(--muted)}.context-select .chat-pin svg{width:14px;height:14px;pointer-events:none}
+
+/* Origin colors change only row surfaces; neutral foregrounds and existing density remain shared. */
+.context-row[data-origin-color]{--origin-bg:var(--origin-light);--origin-active:var(--origin-light-active);background:var(--origin-bg)}
+.context-row[data-origin-color]:hover,.context-row[data-origin-color].selected{background:var(--origin-active)}
+.context-row[data-origin-color] .icon-button:hover{background:var(--origin-active)}
+:root[data-theme="dark"] .context-row[data-origin-color]{--origin-bg:var(--origin-dark);--origin-active:var(--origin-dark-active)}
+@media(prefers-color-scheme:dark){:root[data-theme="system"] .context-row[data-origin-color]{--origin-bg:var(--origin-dark);--origin-active:var(--origin-dark-active)}}
+.context-source-tooltip{position:fixed;z-index:60;max-width:min(280px,calc(100vw - 16px));padding:7px 10px;border-radius:8px;background:var(--ink);color:var(--surface);font-size:12px;line-height:1.4;overflow-wrap:anywhere;pointer-events:none;box-shadow:0 3px 12px var(--shadow)}
+.context-source-metadata{margin:5px 12px 7px;color:var(--muted);font-size:12px;line-height:1.4;overflow-wrap:anywhere}
+.workspace-dialog .context-source-metadata{margin-left:0;margin-right:0}
+@media(forced-colors:active){.context-row[data-origin-color],.context-row[data-origin-color]:hover{background:Canvas;color:CanvasText}.context-row[data-origin-color].selected{background:Highlight;color:HighlightText}.context-row[data-origin-color].selected .icon-button svg{color:HighlightText}.context-source-tooltip{background:Canvas;color:CanvasText;border:1px solid CanvasText}}

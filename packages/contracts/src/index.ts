@@ -24,6 +24,11 @@ export const DeviceSchema = z
   .strict();
 export type Device = z.infer<typeof DeviceSchema>;
 
+export const ContextOriginSchema = DeviceSchema.extend({ colorIndex: z.number().int().min(0).max(7) }).strict();
+export type ContextOrigin = z.infer<typeof ContextOriginSchema>;
+export const ContextOriginsRequestSchema = z.object({ contextIds: z.array(IdSchema).max(100) }).strict();
+export const ContextOriginsResponseSchema = z.object({ records: z.array(ContextOriginSchema).max(100) }).strict();
+
 export const DeviceAccessSchema = z.enum(["own", "all"]);
 export type DeviceAccess = z.infer<typeof DeviceAccessSchema>;
 export const DevicePlatformSchema = z.enum(["browser", "desktop", "android"]);

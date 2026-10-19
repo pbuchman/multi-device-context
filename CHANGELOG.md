@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### 0.7.1 — Context origin colors
+
+- Saved-chat rows use subtle pastel backgrounds based on the original source
+  device, with colors tailored to light and dark themes. Device colors are
+  automatic and stable across the account; unknown origins stay neutral.
+- The list keeps its compact appearance. The origin name appears when hovering
+  or focusing the row's options button and in the opened context options,
+  including on touch devices. There are no manual color settings.
+- Desktop and Android package versions are 0.7.1; Android uses code 23 with the
+  existing package and signing configuration. Account-wide pins and all prior
+  update and dictation corrections remain included. Source and CI checks are
+  separate from physical installation, update and radio acceptance.
+
 ### 0.7.0 — Pinned saved chats
 
 - Pin saved chats across the account, show the most recently pinned first, and
