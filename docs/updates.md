@@ -35,6 +35,11 @@ On macOS, replacing an ad-hoc signed build may also require approving the app's
 Keychain access again. Follow the [macOS installation instructions](installation.md#macos)
 to reopen the existing encrypted local data.
 
+Version 0.7.0 adds account-wide pins for online saved chats, with a pinned-only
+filter and portable agent commands. A local Draft becomes pinnable after saving
+online. This interface change does not establish successful installation or
+updates on physical devices; record those results separately.
+
 ## Trust and validation
 
 The native layer chooses the update source and installer. The renderer cannot
@@ -109,18 +114,18 @@ registration requires one. Verify public `uiBuild` and served asset hashes
 against the exact candidate, readiness, and older client compatibility. Then
 publish the complete release as a **prerelease**.
 
-For 0.6.4, use Android version code 21 with the existing package ID and release
-key. It must update official 0.6.3/code 20 in place, preserving existing data; earlier
-compatible signed codes 15–19 remain eligible for an in-place update. Record
+For 0.7.0, use Android version code 22 with the existing package ID and release
+key. It must update official 0.6.4/code 21 in place, preserving existing data; earlier
+compatible signed codes 15–20 remain eligible for an in-place update. Record
 the APK's certificate digest and exact bytes before publication; a new version
 label alone does not prove signing continuity or a successful upgrade. Affected
 0.6.3 installations bootstrap through Android's system installer. Acceptance of
 the corrected updater starts from 0.6.4 and uses **Settings → Check for updates →
-Download and install** for a later approved release, with existing data retained.
+Download and install** for 0.7.0/code 22, with existing data retained.
 Keep that pending physical result separate from phone, emulator and CI checks.
 
-MDC0.6.2 updates the [owned local dictation contract](android-dictation.md) introduced
-in0.6.1. Its private companion adapter/code17 is a separate installation and is not a public installer
+MDC 0.6.2 updates the [owned local dictation contract](android-dictation.md) introduced
+in 0.6.1. Its private companion adapter/code17 is a separate installation and is not a public installer
 asset. The Binder lease and per-item server acknowledgement require both sides.
 The debug-only `DictationLeaseProbeService` and synthetic configuration must be
 absent from the final release APK. Verify its production configuration, manifest

@@ -1,12 +1,12 @@
 import { WindowLimit } from "./limits.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { AgentContextInputSchema, AgentItemInputSchema, AgentKeyNameSchema, IdSchema, RenameContextSchema } from "@mdc/contracts";
+import { AgentContextInputSchema, AgentItemInputSchema, AgentKeyNameSchema, IdSchema, UpdateContextSchema } from "@mdc/contracts";
 import { type AgentStore, type AgentContextListOptions, BadInputError } from "./agent-store.js";
 import type { AuthVerifier } from "./auth.js";
 import type { Backend } from "./server.js";
 import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
 
-export type AgentPort = Pick<AgentStore, "createKey" | "listKeys" | "revokeKey" | "authenticate" | "getContext" | "listContexts" | "listDevices" | "listItems" | "writeItem" | "rename" | "download" | "upload">;
+export type AgentPort = Pick<AgentStore, "createKey" | "listKeys" | "revokeKey" | "authenticate" | "getContext" | "listContexts" | "listDevices" | "listItems" | "writeItem" | "updateContext" | "download" | "upload">;
 function bearer(request: FastifyRequest): string {
   return /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1] ?? "";
 }
@@ -30,7 +30,10 @@ function contextOptions(request: FastifyRequest): AgentContextListOptions {
   const query = request.query as Record<string, unknown>;
   const order = query.order ?? "asc";
   if (order !== "asc" && order !== "desc") throw new BadInputError();
-  return { order, ...(query.deviceId === undefined ? {} : { deviceId: id(query.deviceId) }) };
+  if (query.sort !== undefined && query.sort !== "created" && query.sort !== "pinned") throw new BadInputError();
+  if (query.pinned !== undefined && query.pinned !== "true") throw new BadInputError();
+  return { order, ...(query.deviceId === undefined ? {} : { deviceId: id(query.deviceId) }),
+    ...(query.sort === undefined ? {} : { sort: query.sort as "created" | "pinned" }), ...(query.pinned === undefined ? {} : { pinned: true }) };
 }
 export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, verifier: AuthVerifier, backend: Backend, allowOwner: (request: FastifyRequest, uid: string) => void = () => {}) {
   const keyCreation = new WindowLimit(5);
@@ -74,7 +77,7 @@ export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, veri
     type C = { Params: { contextId: string } };
     type I = { Params: { contextId: string; itemId: string } };
     api.get<C>(`${base}/:contextId`, r => store.getContext(owner(r), id(r.params.contextId)));
-    api.patch<C>(`${base}/:contextId`, r => store.rename(owner(r), id(r.params.contextId), parse(RenameContextSchema, r.body).title));
+    api.patch<C>(`${base}/:contextId`, r => store.updateContext(owner(r), id(r.params.contextId), parse(UpdateContextSchema, r.body)));
     api.delete<C>(`${base}/:contextId`, async (r, reply) => {
       await backend.deleteContext(owner(r), id(r.params.contextId)); return reply.code(204).send();
     });

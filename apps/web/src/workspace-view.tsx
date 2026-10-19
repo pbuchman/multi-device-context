@@ -5,6 +5,7 @@ import { AttachmentPreview } from "./media.js";
 import { AccountAvatar } from "./account-avatar.js";
 
 const paths = {
+  pin: "M9 3h6l-1 6 4 4v2h-5v7l-2-2v-5H6v-2l4-4-1-6Z",
   menu: "M4 7h16M4 16h11", close: "m6 6 12 12M18 6 6 18", plus: "M12 5v14M5 12h14",
   refresh: "M3 12a9 9 0 0 1 15.4-6.4L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.4 6.4L3 16M3 21v-5h5",
   copy: "M8 8h12v12H8zM15 8V4H4v11h4", send: "M12 19V5M6 11l6-6 6 6",
@@ -34,7 +35,7 @@ export function ChatSidebar({ elementRef, compact, open, contexts, selectedId, s
       <nav className="context-list" aria-label="Your chats">{contexts.length ? contexts.map(context => <div className={`context-row ${context.id === selectedId ? "selected" : ""}`} key={context.id}
         onContextMenu={event => { if (blocked) return; event.preventDefault(); event.stopPropagation(); const opener = (event.target as HTMLElement).closest("button") ?? event.currentTarget.querySelector("button")!; onContextMenu(context, { x: event.clientX, y: event.clientY }, opener); }}
         onKeyDown={event => { if (blocked || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return; event.preventDefault(); event.stopPropagation(); const opener = (event.target as HTMLElement).closest("button") ?? event.currentTarget.querySelector("button")!; const rect = opener.getBoundingClientRect(); onContextMenu(context, { x: rect.left, y: rect.bottom }, opener); }}>
-        <button type="button" className="context-select" title={displayTitle(context.title)} aria-label={context.title === "New context" ? "Open new chat" : displayTitle(context.title)} aria-description={context.unread ? "Unread messages" : undefined} aria-current={context.id === selectedId ? "page" : undefined} onClick={event => { if (event.ctrlKey) { event.preventDefault(); event.stopPropagation(); onContextMenu(context, { x: event.clientX, y: event.clientY }, event.currentTarget); } else onSelect(context.id); }} disabled={blocked}><span>{displayTitle(context.title)}</span>{context.unread ? <i aria-hidden="true" /> : null}</button>
+        <button type="button" className="context-select" title={displayTitle(context.title)} aria-label={context.title === "New context" ? "Open new chat" : displayTitle(context.title)} aria-description={[context.pinnedAt != null ? "Pinned chat" : "", context.unread ? "Unread messages" : ""].filter(Boolean).join(". ") || undefined} aria-current={context.id === selectedId ? "page" : undefined} onClick={event => { if (event.ctrlKey) { event.preventDefault(); event.stopPropagation(); onContextMenu(context, { x: event.clientX, y: event.clientY }, event.currentTarget); } else onSelect(context.id); }} disabled={blocked}><span>{displayTitle(context.title)}</span>{context.pinnedAt != null ? <span className="chat-pin" aria-hidden="true"><WorkspaceIcon name="pin" /></span> : null}{context.unread ? <i aria-hidden="true" /> : null}</button>
         <button type="button" className="icon-button" aria-label={`Options for ${displayTitle(context.title)}`} onClick={event => onOptions(context, event.currentTarget)} disabled={blocked}><WorkspaceIcon name="more" /></button>
       </div>) : <p className="no-results">No chats match this title. Clear your search to see all chats.</p>}</nav>
     </div>

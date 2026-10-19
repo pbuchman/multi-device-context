@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { initializeApp, deleteApp } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, Timestamp } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { getAuth } from "firebase-admin/auth";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
@@ -24,6 +24,40 @@ afterAll(async () => {
   await bucket.deleteFiles({ prefix: `users/${owner}/` }); await deleteApp(app);
 });
 describe("agent persistence and title races", () => {
+  it("queries only timestamp pins, including legacy missing/null records and device-scoped pages", async () => {
+    const origin = randomUUID(), foreign = randomUUID(); const ids = Array.from({ length: 6 }, () => randomUUID());
+    const pins = [Timestamp.fromMillis(100), Timestamp.fromMillis(200)];
+    for (const [n, id] of ids.entries()) {
+      await store.context(owner, id).set({ title: "Pin query fixture", deleting: n === 5, originDeviceId: n === 4 ? foreign : origin,
+        createdAt: new Timestamp(100, n * 1000), updatedAt: new Timestamp(100, n * 1000),
+        ...(n === 0 ? {} : { pinnedAt: n === 1 ? null : pins[n === 2 ? 0 : 1] }) });
+    }
+    const exact = await db.collection(`users/${owner}/contexts`).where("deleting", "==", false).where("originDeviceId", "==", origin)
+      .where("pinnedAt", "!=", null).orderBy("pinnedAt", "desc").get();
+    expect(exact.docs.map(d => d.id)).toEqual([ids[3], ids[2]]);
+    const page = await store.listContexts(owner, undefined, 1, { sort: "pinned", deviceId: origin });
+    expect(page.records.map(r => r.id)).toEqual([ids[3]]);
+    const next = await store.listContexts(owner, page.cursor!, 3, { sort: "pinned", deviceId: origin });
+    expect(next.records.map(r => r.id)).toEqual([ids[2], ids[0], ids[1]]); expect(next.hasMore).toBe(false);
+    expect((await store.listContexts(owner, undefined, 10, { pinned: true, deviceId: origin })).records.map(r => r.id)).toEqual([ids[2], ids[3]]);
+    expect((await store.listContexts(owner, undefined, 100, { sort: "pinned", pinned: true })).records.map(r => r.id)).toEqual(expect.arrayContaining([ids[2], ids[3], ids[4]]));
+  });
+  it("serializes concurrent pin sets, preserves their stamp and activity, and atomically unpins with a manual title", async () => {
+    const id = randomUUID(); await store.writeItem(owner, id, { id: randomUUID(), content }, true);
+    const ref = store.context(owner, id), before = (await ref.get()).data()!;
+    await Promise.all([store.updateContext(owner, id, { pinned: true }), store.updateContext(owner, id, { pinned: true })]);
+    const pinned = (await ref.get()).data()!;
+    expect(pinned.pinnedAt).toBeInstanceOf(Timestamp); expect(pinned.updatedAt).toEqual(before.updatedAt);
+    await store.updateContext(owner, id, { pinned: true }); expect((await ref.get()).data()!.pinnedAt).toEqual(pinned.pinnedAt);
+    await store.updateContext(owner, id, { title: "Pinned then renamed", pinned: false });
+    const after = (await ref.get()).data()!;
+    expect(after).toMatchObject({ title: "Pinned then renamed", titleState: "manual", pinnedAt: null });
+    const updateTime = (await ref.get()).updateTime;
+    await store.updateContext(owner, id, { pinned: false }); expect((await ref.get()).updateTime).toEqual(updateTime);
+    await expect(store.updateContext(other, id, { pinned: true })).rejects.toBeInstanceOf(BackendNotFoundError);
+    await ref.update({ deleting: true });
+    await expect(store.updateContext(owner, id, { pinned: true })).rejects.toBeInstanceOf(BackendNotFoundError);
+  });
   it("stores only key hashes, isolates owners, and revokes immediately", async () => {
     const key = await store.createKey(owner, "Integration");
     expect((await db.doc(`agentKeys/${key.id}`).get()).data()).not.toHaveProperty("key");

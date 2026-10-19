@@ -254,6 +254,18 @@ export const AgentContextInputSchema = z.object({
 export type AgentItemInput = z.infer<typeof AgentItemInputSchema>;
 export const AgentKeyNameSchema = z.object({ name: z.string().trim().min(1).max(80) }).strict();
 export const RenameContextSchema = z.object({ title: TitleSchema }).strict();
+export const UpdateContextSchema = z.object({ title: TitleSchema.optional(), pinned: z.boolean().optional() }).strict()
+  .refine(value => value.title !== undefined || value.pinned !== undefined, { message: "Provide title and/or pinned" });
+export type UpdateContext = z.infer<typeof UpdateContextSchema>;
+
+/** Keep the caller's existing chronological order for two unpinned contexts. */
+export function comparePinnedContexts(left: { id: string; pinnedAt?: number | null }, right: { id: string; pinnedAt?: number | null }): number {
+  const leftPinned = typeof left.pinnedAt === "number" && Number.isFinite(left.pinnedAt);
+  const rightPinned = typeof right.pinnedAt === "number" && Number.isFinite(right.pinnedAt);
+  if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+  if (!leftPinned || !rightPinned) return 0;
+  return right.pinnedAt! - left.pinnedAt! || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+}
 export const AgentKeyInfoSchema = z.object({ id: IdSchema, name: z.string().min(1).max(80), createdAt: z.number().nonnegative(), lastUsedAt: z.number().nonnegative().nullable() }).strict();
 export type AgentKeyInfo = z.infer<typeof AgentKeyInfoSchema>;
 

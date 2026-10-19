@@ -14,19 +14,19 @@ agent and receive the result in the same conversation.
 > synthetic fixture. Every account, message, file, device, and illustration is
 > fictional demo data.
 
-## Download v0.6.4
+## Download v0.7.0
 
 | Platform | Direct download | Requirements and signing |
 | --- | --- | --- |
-| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.6.4/Multi-Device-Context-0.6.4-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
-| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.6.4/Multi-Device-Context-0.6.4-win-x64.exe) | Windows x64. Unsigned. |
-| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.6.4/Multi-Device-Context-0.6.4-android-v21-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
+| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/Multi-Device-Context-0.7.0-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
+| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/Multi-Device-Context-0.7.0-win-x64.exe) | Windows x64. Unsigned. |
+| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/Multi-Device-Context-0.7.0-android-v22-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
 
 Review the [installation guide](docs/installation.md) before opening an unsigned
 or non-notarized desktop build. Android setup and device support are covered in
 the [Android guide](docs/android.md). Published checksums are available in
-[SHA256SUMS](https://github.com/pbuchman/multi-device-context/releases/download/v0.6.4/SHA256SUMS),
-and every asset is listed on the [v0.6.4 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.6.4).
+[SHA256SUMS](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/SHA256SUMS),
+and every asset is listed on the [v0.7.0 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.7.0).
 
 Publishing the source and installers does not grant access to the maintainer's
 hosted deployment. Hosted access remains subject to its authentication and
@@ -48,6 +48,8 @@ the service is available.
 - Send text, code blocks, HTTPS links, screenshots, and files up to 100 MiB.
 - Copy or save incoming items only when you choose; receiving content never
   replaces the clipboard automatically.
+- Pin saved chats to the top across your account, or filter the list to pinned
+  chats. A local Draft becomes pinnable after it is saved online.
 - Search chats, resize the desktop sidebar, use light or dark themes, and enlarge
   browser-renderable images inside the app.
 - Keep working through temporary disconnects with local drafts and an outbox;
@@ -60,7 +62,9 @@ the service is available.
 An owner can create a named agent key in Settings, share a context with a local
 agent workflow, and let the agent return text, code, or files to that context.
 The portable CLI can list and watch contexts, append results, upload or download
-attachments, rename contexts, and delete data.
+attachments, rename contexts, pin or unpin saved contexts, and delete data.
+Use `list --pinned` for pinned chats, optionally scoped to an origin device;
+`latest` still selects by creation time and retrieves every message.
 
 Agent keys have full read, write, and permanent-delete access to their owner's
 contexts. Store them outside the repository and revoke them when the handoff is

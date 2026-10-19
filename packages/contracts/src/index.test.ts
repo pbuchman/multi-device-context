@@ -296,3 +296,20 @@ describe("context navigation URLs", () => {
     for (const value of [`https://context/${id}`, `multi-device-context://attacker@context/${id}`, `multi-device-context://context/${id}?redirect=https://evil.test`, "multi-device-context://auth/callback"]) expect(contextIdFromProtocol(value)).toBeUndefined();
   });
 });
+
+describe("context pin contract", () => {
+  it("accepts only a nonempty strict title/pinned patch", async () => {
+    const { UpdateContextSchema } = await import("./index.js");
+    expect(UpdateContextSchema.parse({ title: "  Manual  ", pinned: false })).toEqual({ title: "Manual", pinned: false });
+    expect(UpdateContextSchema.parse({ pinned: true })).toEqual({ pinned: true });
+    for (const value of [{}, { pinned: "true" }, { pinned: null }, { title: " " }, { pinnedAt: 100 }, { title: "Manual", updatedAt: 100 }, { pinned: true, extra: true }]) {
+      expect(UpdateContextSchema.safeParse(value).success).toBe(false);
+    }
+  });
+  it("shares stable pin ordering while retaining existing order for legacy unpinned contexts", async () => {
+    const { comparePinnedContexts } = await import("./index.js");
+    const list = [{ id: "old" }, { id: "null", pinnedAt: null }, { id: "z", pinnedAt: 10 }, { id: "b", pinnedAt: 20 }, { id: "a", pinnedAt: 20 }, { id: "epoch", pinnedAt: 0 }];
+    expect(list.sort(comparePinnedContexts).map(c => c.id)).toEqual(["a", "b", "z", "epoch", "old", "null"]);
+    expect(comparePinnedContexts({ id: "z" }, { id: "a", pinnedAt: null })).toBe(0);
+  });
+});

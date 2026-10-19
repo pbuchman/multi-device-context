@@ -16,7 +16,7 @@ for (let i = 0; i < args.length;) {
   if (args[i].startsWith('--')) {
     const name = args.splice(i, 1)[0].slice(2);
     if (Object.hasOwn(flags, name)) flagError = `Duplicate --${name} option`;
-    if (name === 'once' || name === 'code' || name === 'help') flags[name] = true;
+    if (name === 'once' || name === 'code' || name === 'help' || name === 'pinned') flags[name] = true;
     else if (!args[i] || args[i].startsWith('--')) { flags[name] = undefined; flagError = `Supply a value for --${name}`; }
     else flags[name] = args.splice(i, 1)[0];
   } else i++;
@@ -26,24 +26,42 @@ Config: MDC_CONFIG or ~/.config/multi-device-context/agent.json (mode 0600).
 JSON: {"url":"https://your-host","key":"your-agent-key"}
 Commands:
   devices
-  list [--device NAME | --device-id UUID] [--after CURSOR] [--limit 50]
+  list [--pinned] [--device NAME | --device-id UUID] [--after CURSOR] [--limit 50]
   latest [--device NAME | --device-id UUID] [--limit 50]
   get CONTEXT_ID
   watch [--after CURSOR] [--once]
   create --text TEXT [--code] [--id UUID] [--item-id UUID]
   append CONTEXT_ID --text TEXT [--code] [--item-id UUID]
   rename CONTEXT_ID --title TITLE
+  pin CONTEXT_ID
+  unpin CONTEXT_ID
   delete CONTEXT_ID [ITEM_ID]
   upload CONTEXT_ID FILE [--type MIME] [--item-id UUID]
   download CONTEXT_ID ITEM_ID OUTPUT
 Use --file FILE instead of --text for long text. '-' reads stdin.
-Watch emits JSON lines; save cursor only after processing the event.
+List shows pinned contexts first; --pinned includes only pinned contexts.
+Pin/unpin explicitly set account-wide saved-context state and can be safely retried.
+Watch emits creation JSON lines; pin changes are not events. Save cursor only after processing the event.
 Latest retrieves the newest context by creation time and every item, not the most recently appended conversation.
 Device names match exactly after trimming and ignoring case; ambiguous names require --device-id.
 Delete is permanent. Keys have full access to their owner's contexts.`;
 if (!command || command === 'help' || flags.help) { console.log(help); process.exit(0); }
 try {
   if (flagError) throw new InputError(flagError);
+  const commandOptions = {
+    devices: [], list: ['device', 'device-id', 'after', 'limit', 'pinned'],
+    latest: ['device', 'device-id', 'limit'], get: ['limit'], watch: ['after', 'once', 'limit'],
+    create: ['text', 'file', 'code', 'id', 'item-id'], append: ['text', 'file', 'code', 'item-id'],
+    rename: ['title'], pin: [], unpin: [], delete: [], upload: ['type', 'item-id'], download: [],
+  };
+  if (!Object.hasOwn(commandOptions, command)) throw new InputError('Unknown command; run help');
+  for (const name of Object.keys(flags)) {
+    if (name === 'pinned' && command !== 'list') throw new InputError('--pinned is supported only by list');
+    if (!commandOptions[command].includes(name)) throw new InputError(`Unsupported --${name} option for ${command}`);
+  }
+  const argumentCounts = { devices: [0, 0], list: [0, 0], latest: [0, 0], get: [1, 1], watch: [0, 0], create: [0, 0], append: [1, 1], rename: [1, 1], pin: [1, 1], unpin: [1, 1], delete: [1, 2], upload: [2, 2], download: [3, 3] };
+  const [minimumArgs, maximumArgs] = argumentCounts[command];
+  if (args.length < minimumArgs || args.length > maximumArgs) throw new InputError(`Invalid arguments for ${command}; run help`);
   const hasDeviceName = Object.hasOwn(flags, 'device');
   const hasDeviceId = Object.hasOwn(flags, 'device-id');
   if (hasDeviceName && hasDeviceId) throw new InputError('--device and --device-id are mutually exclusive');
@@ -91,7 +109,7 @@ try {
     return { deviceId: id(matches[0].id) };
   }
   if (command === 'devices') output(await (await apiRequest('/devices')).json());
-  else if (command === 'list') output(await page('', flags.after, await deviceFilter()));
+  else if (command === 'list') output(await page('', flags.after, { ...await deviceFilter(), sort: 'pinned', ...(flags.pinned ? { pinned: 'true' } : {}) }));
   else if (command === 'latest') {
     const result = await page('', undefined, { ...await deviceFilter(), order: 'desc', limit: '1' });
     output(result.records.length ? await getContext(result.records[0].id) : { context: null, items: [], message: 'No contexts found' });
@@ -117,6 +135,7 @@ try {
     const result = await request(command === 'create' ? '' : `/${contextId}/items`, 'POST', command === 'create' ? { id: contextId, item } : item);
     output({ context: await result.json(), itemId: item.id });
   } else if (command === 'rename') output(await (await request('/' + id(args[0]), 'PATCH', { title: flags.title })).json());
+  else if (command === 'pin' || command === 'unpin') output(await (await request('/' + id(args[0]), 'PATCH', { pinned: command === 'pin' })).json());
   else if (command === 'delete') { await request('/' + id(args[0]) + (args[1] ? '/items/' + id(args[1]) : ''), 'DELETE'); output({ deleted: true }); }
   else if (command === 'download') {
     if (!args[2]) throw new InputError('Output path required');

@@ -3,8 +3,9 @@ import { createPortal } from "react-dom";
 import "./chat-context-menu.css";
 
 export interface ChatMenuAnchor { x: number; y: number }
-export function ChatContextMenu<T extends { id: string; title: string }>({ context, anchor, opener, onClose, onRename, onCopy, onDelete }: {
+export function ChatContextMenu<T extends { id: string; title: string }>({ context, anchor, opener, onClose, onRename, onCopy, onDelete, onPin, pinned, pinDisabled, pinDescription }: {
   context: T; anchor: ChatMenuAnchor; opener: HTMLElement;
+  onPin?: ((context: T) => void) | undefined; pinned?: boolean; pinDisabled?: boolean; pinDescription?: string | undefined;
   onClose(): void; onRename(context: T): void; onCopy?: ((context: T) => void) | undefined; onDelete(context: T): void;
 }) {
   const root = useRef<HTMLDivElement>(null);
@@ -18,7 +19,7 @@ export function ChatContextMenu<T extends { id: string; title: string }>({ conte
       const { width, height } = menu.getBoundingClientRect();
       setPosition({ x: Math.max(8, Math.min(anchor.x, window.innerWidth - width - 8)), y: Math.max(8, Math.min(anchor.y, window.innerHeight - height - 8)) });
     };
-    place(); menu.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    place(); menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: true });
     const outside = (event: PointerEvent) => { if (!menu.contains(event.target as Node)) { if (opener.isConnected) opener.focus({ preventScroll: true }); closeRef.current(); } };
     window.addEventListener("resize", place);
     document.addEventListener("pointerdown", outside, true);
@@ -30,7 +31,7 @@ export function ChatContextMenu<T extends { id: string; title: string }>({ conte
   }, [anchor.x, anchor.y, context.id, opener]);
   const activate = (action: (context: T) => void) => { close(); action(context); };
   return createPortal(<div ref={root} className="chat-context-menu" role="menu" aria-label={`Options for ${context.title}`} style={{ left: position.x, top: position.y }} onContextMenu={event => event.preventDefault()} onKeyDown={event => {
-    const buttons = [...root.current!.querySelectorAll<HTMLButtonElement>("button")];
+    const buttons = [...root.current!.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
     const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault(); event.stopPropagation();
@@ -43,6 +44,8 @@ export function ChatContextMenu<T extends { id: string; title: string }>({ conte
     }
   }}>
     <button type="button" role="menuitem" tabIndex={-1} onClick={() => activate(onRename)}>Rename chat</button>
+    {onPin ? <button type="button" role="menuitem" tabIndex={-1} disabled={pinDisabled} aria-description={pinDescription} title={pinDescription} onClick={() => activate(onPin)}>{pinned ? "Unpin chat" : "Pin chat"}</button> : null}
+    {onPin && pinDescription ? <p className="chat-pin-explanation">{pinDescription}</p> : null}
     {onCopy ? <button type="button" role="menuitem" tabIndex={-1} onClick={() => activate(onCopy)}>Copy link</button> : null}
     <button type="button" role="menuitem" tabIndex={-1} className="chat-context-menu-delete" onClick={() => activate(onDelete)}>Delete chat…</button>
   </div>, document.body);

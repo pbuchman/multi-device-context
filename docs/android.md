@@ -20,6 +20,11 @@ CI debug APKs use synthetic configuration and a generic test key; they are not
 installation or upgrade artifacts for personal devices. Device-specific coverage
 that remains necessary is listed under [Device support boundaries](#device-support-boundaries).
 
+Version 0.7.0 adds account-wide pins for saved chats and a pinned-only filter.
+Local Drafts become pinnable after saving online. Physical Android installation,
+update and radio behavior remain separate acceptance checks; see the
+[Preview update procedure](updates.md).
+
 ## Build tools
 
 Use Node.js 22.12+ and pnpm 10.29.3. Install JDK 21 and the Android command-line
@@ -73,12 +78,12 @@ update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
 increase it for each update. It is not automatically incremented. Keep the
-application ID and signing key unchanged. Version 0.6.4 uses code 21, above official
-0.6.3/code 20. Earlier compatible signed codes 15–19 also remain eligible
+application ID and signing key unchanged. Version 0.7.0 uses code 22, above official
+0.6.4/code 21. Earlier compatible signed codes 15–20 also remain eligible
 for an in-place upgrade with the same key; do not reuse a published code.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=21
+export MDC_ANDROID_VERSION_CODE=22
 pnpm --filter @mdc/mobile android:release
 ```
 
