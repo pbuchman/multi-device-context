@@ -160,8 +160,9 @@ with sync_playwright() as playwright:
             expect(page.get_by_text("Created on: Unknown device", exact=True)).to_be_visible()
             title(page, "Close dialog").tap()
             ensure_drawer(page)
-            # Closing the dialog restores focus to its ellipsis; dismiss that focus tooltip for the resting capture.
-            page.keyboard.press("Escape")
+            # Wait for the existing deferred dialog focus restoration before neutralizing the capture.
+            expect(title(page, "Options for Meeting notes")).to_be_focused()
+            title(page, "Website handoff").focus()
             expect(page.get_by_role("tooltip")).to_have_count(0)
             assert_rest(page, touch=True)
             page.screenshot(path=str(SCREENSHOTS / f"touch-{width}-{theme}.png"))
