@@ -73,12 +73,12 @@ update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
 increase it for each update. It is not automatically incremented. Keep the
-application ID and signing key unchanged. Version0.6.2 uses code19, above official
-0.6.1/code18 and0.6.0/code17. Earlier compatible codes15/16 also remain eligible
+application ID and signing key unchanged. Version 0.6.3 uses code 20, above official
+0.6.2/code 19, 0.6.1/code 18 and 0.6.0/code 17. Earlier compatible codes15/16 also remain eligible
 for an in-place upgrade with the same key; do not reuse a published code.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=19
+export MDC_ANDROID_VERSION_CODE=20
 pnpm --filter @mdc/mobile android:release
 ```
 

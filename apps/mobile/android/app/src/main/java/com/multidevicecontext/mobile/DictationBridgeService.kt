@@ -123,10 +123,13 @@ open class DictationState(private val monotonicNow:(Long)->Long={it}) {
  }
  @Synchronized fun snapshot():JSONObject {if(lease?.alive()==false) cancel(DictationCancelReason.LEASE_DIED);return JSONObject(current?.toString() ?: "{\"phase\":\"none\"}")}
  /** Not an origin assertion. Only the approved adapter's later full completion can admit this candidate. */
+ private fun provisionalEligible(eligible:Boolean,now:Long,currentGeneration:()->Boolean):Boolean =
+  current?.optString("phase")=="processing" && lease?.alive()==true && now<deadline && eligible && currentGeneration() && !current!!.optBoolean("inserted")
+   && !current!!.optBoolean("provisionalPending") && !current!!.optBoolean("provisionalInput")
+ /** Android's accessibility commit clears composition inside its batch before supplying text. No input witness is granted here. */
+ @Synchronized fun compositionCleanupAllowed(eligible:Boolean,now:Long,currentGeneration:()->Boolean):Boolean = provisionalEligible(eligible,now,currentGeneration)
  @Synchronized fun provisionalOwner(eligible:Boolean,now:Long,currentGeneration:()->Boolean={true},guard:()->Boolean):String? {
-  val phase=current?.optString("phase")
-  if(phase=="processing" && lease?.alive()==true && now<deadline && eligible && currentGeneration() && !current!!.optBoolean("inserted")
-    && !current!!.optBoolean("provisionalPending") && !current!!.optBoolean("provisionalInput")) {
+  if(provisionalEligible(eligible,now,currentGeneration)) {
    current!!.put("provisionalPending",true).put("inputPath","CORRELATED_ATTRIBUTES_COMMIT")
    provisionalGuard=guard;provisionalCurrent=currentGeneration;return current!!.getString("id")
   }

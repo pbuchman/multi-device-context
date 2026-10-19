@@ -1,4 +1,4 @@
-# Owned local dictation bridge (0.6.2)
+# Owned local dictation bridge (0.6.3)
 
 This optional Android integration is local to the installed MDC and approved
 steering adapter. Ordinary typing, local drafts and the 0.6.0 focus/IME contract
@@ -39,6 +39,11 @@ neither message text nor a target chat. MDC's existing signer remains unchanged.
    fails closed. The raw commit overload and null attributes do **not** identify
    Wispr; ordinary IMEs can call that overload too. Authority comes from the full
    correlated completion chain, not a claimed commit caller UID.
+   Version 0.6.3 also handles Android's complete Accessibility batch:
+   `beginBatchEdit` → `finishComposingText` → three-argument `commitText` →
+   `endBatchEdit`. The composition cleanup grants no input witness; the accepted
+   commit retains the existing provisional-input checks and timing. Cleanup without
+   the commit, repeated cleanup, nested batches and ordinary edits still cancel.
    The candidate alone cannot complete or enqueue. Only the approved adapter's
    later owned processing→exact idle, preserved-range replacement and600ms settle
    confirmation can complete it, with the same native session/context/revision.

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### 0.6.3 — Android dictation completion and update retries
+
+- Android's Accessibility input batch can clear composition before the correlated
+  three-argument commit without cancelling an approved dictation session. Cleanup
+  alone grants no input witness; incomplete or repeated cleanup, nested batches
+  and ordinary edits still revoke automatic sending.
+- Update checks and downloads release their busy controls when they finish while
+  Android is inactive, so a failed download can be retried after returning to the app.
+- A download completed in the background requires a new foreground action before
+  installation. Completion from an old account session cannot unlock a new session.
+- Android version code is 20, preserving the existing application ID, signing
+  identity and local data. This change does not establish why a download failed.
+
 ### 0.6.2 — Correlated Android dictation input
 
 - Android retains the API33 commit shape used by Wispr as a provisional input

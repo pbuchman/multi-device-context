@@ -23,6 +23,18 @@ class DictationWebView(context:Context,attrs:AttributeSet):CapacitorWebView(cont
   DictationRuntime.inputConnectionChanged(SystemClock.elapsedRealtime())
   val target=super.onCreateInputConnection(attributes) ?: return null
   return object:InputConnectionWrapper(target,false) {
+   private var batchDepth=0
+   private var cleanupPending=false
+   @Synchronized override fun beginBatchEdit():Boolean {
+    if(cleanupPending) interfere(DictationCancelReason.INPUT_COMPOSITION)
+    batchDepth++;return target.beginBatchEdit()
+   }
+   @Synchronized override fun endBatchEdit():Boolean {
+    if(batchDepth==1 && cleanupPending) interfere(DictationCancelReason.INPUT_COMPOSITION)
+    if(batchDepth>0) batchDepth--
+    if(batchDepth==0) cleanupPending=false
+    return target.endBatchEdit()
+   }
    override fun commitText(text:CharSequence?,newCursorPosition:Int):Boolean {interfere(DictationCancelReason.INPUT_COMMIT);return super.commitText(text,newCursorPosition)}
    override fun setComposingText(text:CharSequence?,newCursorPosition:Int):Boolean {interfere(DictationCancelReason.INPUT_COMPOSITION);return super.setComposingText(text,newCursorPosition)}
    override fun deleteSurroundingText(beforeLength:Int,afterLength:Int):Boolean {interfere(DictationCancelReason.INPUT_DELETE);return super.deleteSurroundingText(beforeLength,afterLength)}
@@ -30,7 +42,8 @@ class DictationWebView(context:Context,attrs:AttributeSet):CapacitorWebView(cont
    override fun sendKeyEvent(event:KeyEvent?):Boolean {interfere(DictationCancelReason.INPUT_KEY);return super.sendKeyEvent(event)}
    override fun performContextMenuAction(id:Int):Boolean {interfere(DictationCancelReason.INPUT_CONTEXT_MENU);return super.performContextMenuAction(id)}
    @android.annotation.TargetApi(33)
-   override fun commitText(text:CharSequence,newCursorPosition:Int,attributes:android.view.inputmethod.TextAttribute?):Boolean {
+   @Synchronized override fun commitText(text:CharSequence,newCursorPosition:Int,attributes:android.view.inputmethod.TextAttribute?):Boolean {
+    cleanupPending=false
     val generationSource=inputGeneration
     val currentGeneration={generationSource.get()==generation}
     val guard=DictationFieldGuard(this@DictationWebView,currentGeneration)
@@ -45,7 +58,13 @@ class DictationWebView(context:Context,attrs:AttributeSet):CapacitorWebView(cont
    override fun setComposingRegion(start:Int,end:Int):Boolean {interfere(DictationCancelReason.INPUT_COMPOSITION);return super.setComposingRegion(start,end)}
    @android.annotation.TargetApi(33)
    override fun setComposingRegion(start:Int,end:Int,attributes:android.view.inputmethod.TextAttribute?):Boolean {interfere(DictationCancelReason.INPUT_COMPOSITION);return super.setComposingRegion(start,end,attributes)}
-   override fun finishComposingText():Boolean {interfere(DictationCancelReason.INPUT_COMPOSITION);return super.finishComposingText()}
+   @Synchronized override fun finishComposingText():Boolean {
+    val currentGeneration={inputGeneration.get()==generation}
+    val guard=DictationFieldGuard(this@DictationWebView,currentGeneration)
+    if(batchDepth==1 && !cleanupPending && DictationRuntime.compositionCleanupAllowed(guard.valid(),SystemClock.elapsedRealtime(),currentGeneration)) cleanupPending=true
+    else interfere(DictationCancelReason.INPUT_COMPOSITION)
+    return try {target.finishComposingText()} catch(error:RuntimeException) {interfere(DictationCancelReason.PROVISIONAL_REJECTED);throw error}
+   }
    override fun commitCompletion(text:android.view.inputmethod.CompletionInfo?):Boolean {interfere(DictationCancelReason.INPUT_COMMIT);return super.commitCompletion(text)}
    override fun commitCorrection(info:android.view.inputmethod.CorrectionInfo?):Boolean {interfere(DictationCancelReason.INPUT_COMMIT);return super.commitCorrection(info)}
    @android.annotation.TargetApi(34)

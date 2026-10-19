@@ -34,6 +34,17 @@ class DictationStateTest {
   assertEquals("cancelled",command("status",180_001))
  }
  @Test fun doneWithoutObservedInsertionCannotComplete() {finish();assertEquals("cancelled",command("completed",2000))}
+ @Test fun compositionCleanupRequiresCurrentEligibleProcessingAndGrantsNoInputWitness() {
+  prepare();assertFalse(state.compositionCleanupAllowed(true,2) {true})
+  command("recording");assertFalse(state.compositionCleanupAllowed(true,3) {true})
+  command("finishing",1000)
+  assertFalse(state.compositionCleanupAllowed(false,1001) {true})
+  assertFalse(state.compositionCleanupAllowed(true,1001) {false})
+  assertFalse(state.compositionCleanupAllowed(true,61_000) {true})
+  assertTrue(state.compositionCleanupAllowed(true,1001) {true})
+  assertFalse(state.snapshot().optBoolean("provisionalPending"));assertFalse(state.snapshot().optBoolean("provisionalInput"))
+  assertEquals("cancelled",command("completed",1002))
+ }
  @Test fun insertionBeforeDoneInvalidatesInsteadOfSending() {prepare();command("recording");assertNull(state.insertionOwner());assertEquals("cancelled",command("status"))}
  @Test fun failedOrSecondAccessibilityInsertionInvalidates() {
   finish();state.inserted(state.insertionOwner(),false);assertEquals("cancelled",command("status"))

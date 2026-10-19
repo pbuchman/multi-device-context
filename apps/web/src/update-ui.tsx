@@ -117,7 +117,7 @@ export function useUpdateController(options: {
       await Promise.all(operations);
     } catch (cause) {
       if (current()) { setError(cause instanceof Error ? cause.message : "Could not check for updates"); setErrorAction("check"); }
-    } finally { if (current()) setChecking(false); }
+    } finally { if (nativeGeneration.current === generation) setChecking(false); }
   }, [options]);
 
   const updateNative = useCallback(async () => {
@@ -148,7 +148,11 @@ export function useUpdateController(options: {
       });
     } catch (cause) {
       if (current()) { setError(cause instanceof Error ? cause.message : "Could not install the native update"); setErrorAction("update"); }
-    } finally { if (current()) setUpdating(false); }
+    } finally {
+      // Background completion still owns this controller's busy state.
+      // A replaced session must not release a newer operation's controls.
+      if (nativeGeneration.current === generation) setUpdating(false);
+    }
   }, [options, updating]);
 
   const reloadHosted = useCallback(async () => {
