@@ -14,7 +14,7 @@ function fixture() {
     listContexts: vi.fn(async () => ({ records: [], cursor: null, hasMore: false })),
     listDevices: vi.fn(async (_uid: string) => ({ records: [{ id, name: "MacBook" }] })),
     listItems: vi.fn(async () => ({ records: [], cursor: null, hasMore: false })),
-    writeItem: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })), getContext: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })), rename: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1 })),
+    writeItem: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1, pinned: false, pinnedAt: null })), getContext: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1, pinned: false, pinnedAt: null })), updateContext: vi.fn(async () => ({ id, createdAt: 1, updatedAt: 1, pinned: false, pinnedAt: null })),
     listKeys: vi.fn(async () => []), createKey: vi.fn(async () => ({ id, key: "one-time-key", name: "Test", createdAt: 1, lastUsedAt: null })), revokeKey: vi.fn(async () => {}),
     download: vi.fn(async () => ({ stream: Readable.from([Buffer.from([0, 255, 1])]), size: 3, name: "data.bin", contentType: "application/octet-stream" })),
     upload: vi.fn(async (_uid, _context, _item, stream: Readable) => { const chunks = []; for await (const chunk of stream) chunks.push(chunk); expect(Buffer.concat(chunks)).toEqual(Buffer.from([0, 255, 1])); }),
@@ -67,5 +67,28 @@ describe("agent API trust boundaries", () => {
     expect((await app.inject({ url, method: "PUT", headers: { ...headers, "content-type": "application/octet-stream" }, payload: Buffer.from([0, 255, 1]) })).statusCode).toBe(204);
     for (let i = 0; i < 118; i++) expect((await app.inject({ url: "/api/agent/v1/contexts", headers, remoteAddress: `192.0.2.${i + 1}` })).statusCode).toBe(200);
     const denied = await app.inject({ url: "/api/agent/v1/contexts", headers }); expect(denied.statusCode).toBe(429); expect(denied.headers["retry-after"]).toBeTruthy();
+  });
+});
+
+describe("agent pin API", () => {
+  it("validates explicit pin list modes and forwards independent options", async () => {
+    const { app, store } = fixture(); const headers = { authorization: "Bearer agent" };
+    for (const query of ["sort=bad", "sort=", "sort=pinned&sort=created", "pinned=false", "pinned=1", "pinned=true&pinned=true"]) {
+      expect((await app.inject({ url: `/api/agent/v1/contexts?${query}`, headers })).statusCode).toBe(400);
+    }
+    expect(store.listContexts).not.toHaveBeenCalled();
+    expect((await app.inject({ url: `/api/agent/v1/contexts?sort=pinned&pinned=true&deviceId=${id}&order=desc`, headers })).statusCode).toBe(200);
+    expect(store.listContexts).toHaveBeenCalledWith("owner", undefined, 50, { sort: "pinned", pinned: true, deviceId: id, order: "desc" });
+  });
+  it("accepts title and/or explicit boolean pin in one strict patch", async () => {
+    const { app, store } = fixture(); const headers = { authorization: "Bearer agent" }; const url = `/api/agent/v1/contexts/${id}`;
+    for (const payload of [{}, { pinned: "true" }, { pinned: null }, { pinnedAt: 1 }, { title: " " }, { title: "Title", extra: true }]) {
+      expect((await app.inject({ method: "PATCH", url, headers, payload })).statusCode).toBe(400);
+    }
+    expect(store.updateContext).not.toHaveBeenCalled();
+    for (const payload of [{ pinned: true }, { pinned: false }, { title: "Renamed" }, { title: "Renamed", pinned: true }]) {
+      expect((await app.inject({ method: "PATCH", url, headers, payload })).statusCode).toBe(200);
+      expect(store.updateContext).toHaveBeenLastCalledWith("owner", id, payload);
+    }
   });
 });

@@ -45,3 +45,12 @@ describe("Firestore deleting indexes", () => {
     }
   });
 });
+
+it("indexes the complete non-null pin query with and without device origin", () => {
+  const config = JSON.parse(readFileSync(new URL("./firestore.indexes.json", import.meta.url), "utf8"));
+  for (const origin of [false, true]) expect(config.indexes).toContainEqual({ collectionGroup: "contexts", queryScope: "COLLECTION", fields: [
+    { fieldPath: "deleting", order: "ASCENDING" },
+    ...(origin ? [{ fieldPath: "originDeviceId", order: "ASCENDING" }] : []),
+    { fieldPath: "pinnedAt", order: "DESCENDING" },
+  ] });
+});

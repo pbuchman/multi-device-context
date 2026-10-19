@@ -7,6 +7,7 @@ export type ContextRecord = {
   title: string;
   createdAt: number;
   updatedAt: number;
+  pinnedAt?: number | null;
   syncState: SyncState;
   unread?: boolean;
   originDeviceId?: string;

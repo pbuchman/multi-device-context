@@ -3,3 +3,5 @@
 .chat-context-menu>button:hover,.chat-context-menu>button:focus{background:var(--hover)}
 .chat-context-menu-delete{color:var(--danger)}
 @media(pointer:coarse){.chat-context-menu>button{min-height:48px}}
+
+.chat-pin-explanation{max-width:220px;margin:2px 12px 6px;color:var(--muted);font-size:12px;line-height:1.4}.chat-context-menu>button:disabled{opacity:.5}

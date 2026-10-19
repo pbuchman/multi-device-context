@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### 0.7.0 — Pinned saved chats
+
+- Pin saved chats across the account, show the most recently pinned first, and
+  filter the list to pinned chats while preserving search and device access.
+  A local Draft becomes pinnable after saving online.
+- Agent metadata includes pin state. The portable CLI lists pins first, supports
+  `list --pinned` with device filters, and explicitly sets state through `pin`
+  and `unpin`. `latest` still retrieves the newest creation and all messages;
+  `watch` still observes creations in chronological order.
+- Desktop and Android package versions are 0.7.0; Android uses code 22 with the
+  existing package and signing configuration. Earlier 0.6.x dictation and updater
+  corrections remain included. Physical installation, update and radio behavior
+  require separate acceptance; source and CI checks do not establish those results.
+
 ### 0.6.4 — OEM Android APK signing metadata compatibility
 
 - Some OEM frameworks parse an update APK but omit its modern `SigningInfo`.

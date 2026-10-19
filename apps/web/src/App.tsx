@@ -12,7 +12,7 @@ import { subscribeLocal } from "./local-db.js";
 import { AttachmentPreview, fileParts, dayLabel } from "./media.js";
 import { browserCopyFile, clipboardImageFile } from "./clipboard-image.js";
 import type { AccessDevice, ClipboardSnapshot, Content, Device, Id, NativeFile, PendingClipboardShare } from "@mdc/contracts";
-import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES } from "@mdc/contracts";
+import { ContentSchema, IdSchema, MAX_ATTACHMENT_BYTES, comparePinnedContexts } from "@mdc/contracts";
 import { useSyncExternalStore, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, type ReactNode, type ClipboardEvent, type DragEvent, type SyntheticEvent } from "react";
 
 import { useNavigation } from "./navigation.js";
@@ -48,6 +48,7 @@ export type WorkspaceCloud = {
   refreshDeletedItems?(): Promise<{ contextId: Id; itemId: Id }[]>;
   refreshItems?(contextId: Id): Promise<CloudSnapshot<ItemRecord>>;
   setNetworkEnabled?(enabled: boolean): Promise<void>;
+  setContextPinned?(contextId: Id, pinned: boolean): Promise<void>;
   renameContext(contextId: Id, title: string): Promise<void>;
   deleteContext(contextId: Id): Promise<void>;
   deleteItem(contextId: Id, itemId: Id, deleteEmptyContext?: boolean): Promise<void>;
@@ -186,6 +187,14 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const [panel, setPanel] = useState<WorkspacePanel>();
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [chatMenu, setChatMenu] = useState<{ context: ContextRecord; anchor: ChatMenuAnchor; opener: HTMLElement; owner: WorkspaceServices }>();
+  const pendingPins = useRef(new Set<Id>());
+  const [, setPinRevision] = useState(0);
+  const [online, setOnline] = useState(() => navigator.onLine !== false);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine !== false);
+    window.addEventListener("online", update); window.addEventListener("offline", update);
+    return () => { window.removeEventListener("online", update); window.removeEventListener("offline", update); };
+  }, []);
   const settingsOpen = panel?.kind === "settings";
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [compact, setCompact] = useState(() => window.matchMedia?.("(max-width: 839px)").matches ?? false);
@@ -515,7 +524,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     });
   }, [active, isLive, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
 
-  const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))];
+  const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))].sort(comparePinnedContexts);
   useEffect(() => {
     if (chatMenu && (chatMenu.owner !== services || accountBlocked || panel || !allContexts.some(context => context.id === chatMenu.context.id))) setChatMenu(undefined);
   }, [chatMenu, services, accountBlocked, panel, allContexts]);
@@ -1161,6 +1170,27 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const copyChatLink = (context: ContextRecord) => {
     void services.copyText(`${services.appOrigin ?? location.origin}/contexts/${context.id}`).then(() => { if (isLive()) showToast("Chat link copied"); }).catch(cause => { if (isLive()) setError(cause instanceof Error ? cause.message : "Could not copy the link"); });
   };
+  // Resolve the target on every render: an open menu must reflect remote pin changes.
+  const menuContext = chatMenu ? allContexts.find(context => context.id === chatMenu.context.id) : undefined;
+  const panelContext = panel?.kind === "context" ? allContexts.find(context => context.id === panel.context.id) : undefined;
+  const canPin = (context: ContextRecord) => !!services.cloud.setContextPinned && confirmedContextIds.has(context.id) && !navigation.selectedRef.current.drafts[context.id]?.local;
+  const pinDescription = (context: ContextRecord) => !online || fromCache ? "Go online to pin or unpin chats." : pendingPins.current.has(context.id) ? "Saving pin change…" : undefined;
+  const changePin = async (context: ContextRecord) => {
+    if (!isLive() || accountBlocked || !canPin(context) || !online || fromCache || pendingPins.current.has(context.id)) return;
+    const pinned = context.pinnedAt == null;
+    pendingPins.current.add(context.id); setPinRevision(value => value + 1);
+    setError(undefined);
+    if (panelRef.current?.kind === "context") closePanel();
+    try {
+      await services.cloud.setContextPinned!(context.id, pinned);
+      if (isLive()) showToast(pinned ? "Chat pinned" : "Chat unpinned");
+    } catch (cause) {
+      if (isLive()) setError(`${cause instanceof Error ? cause.message : "Could not save pin change"}. Open chat options to retry.`);
+    } finally {
+      pendingPins.current.delete(context.id);
+      if (isLive()) setPinRevision(value => value + 1);
+    }
+  };
   const panelTitle = panel?.kind === "context" ? "Chat options" : panel?.kind === "rename" ? "Rename chat" : panel?.kind === "delete-context" ? "Delete chat?" : panel?.kind === "item" ? "Message options" : panel?.kind === "delete-item" ? "Delete message?" : panel?.kind === "clipboard" ? (panel.snapshot.source === "drop" ? "Send dropped files?" : "Send pasted files?") : panel?.kind === "add" ? "Add to this chat" : panel?.kind === "signout" ? "Sign out?" : "Settings";
   const option = (icon: Parameters<typeof WorkspaceIcon>[0]["name"], label: string, action: () => void, disabled = false, description?: string) => <button type="button" className={`dialog-action ${icon === "trash" ? "danger" : ""}`} onClick={action} disabled={disabled || dialogBusy}><WorkspaceIcon name={icon} /><span>{label}{description ? <small>{description}</small> : null}</span></button>;
   const confirmDelete = async () => {
@@ -1218,12 +1248,13 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         <input ref={fileInput} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; trackLocalInput(sharePickedFiles(files)); }} />
       </main>
     </div>
-    {chatMenu && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu context={chatMenu.context} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
+    {chatMenu && menuContext && chatMenu.owner === services && !panel && !accountBlocked && !lifecycleSaving ? <ChatContextMenu context={menuContext} anchor={chatMenu.anchor} opener={chatMenu.opener} onClose={() => setChatMenu(undefined)} onRename={renameChat} onPin={canPin(menuContext) ? context => void changePin(context) : undefined} pinned={menuContext.pinnedAt != null} pinDisabled={!!pinDescription(menuContext)} pinDescription={pinDescription(menuContext)} onDelete={context => openPanel({ kind: "delete-context", context })} onCopy={navigation.selectedRef.current.drafts[chatMenu.context.id]?.local ? undefined : copyChatLink} /> : null}
     {toast && !lifecycleSaving ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
     {panel ? <WorkspaceDialog title={panelTitle} viewKey={panel.kind} backgroundRef={backgroundRef} busy={dialogBusy || accountBlocked} onClose={() => closePanel()} onConfirm={panel.kind === "clipboard" ? () => { void confirmClipboard(panel.snapshot); } : undefined}>
       {panel.kind === "context" ? <>
         <p className="dialog-description">{displayTitle(panel.context.title)}</p>
         {option("edit", "Rename chat", () => renameChat(panel.context))}
+        {panelContext && canPin(panelContext) ? option("pin", panelContext.pinnedAt != null ? "Unpin chat" : "Pin chat", () => void changePin(panelContext), !!pinDescription(panelContext), pinDescription(panelContext)) : null}
         {!navigation.selectedRef.current.drafts[panel.context.id]?.local ? option("link", "Copy link", () => { copyChatLink(panel.context); closePanel(); }, false, "The link does not give other accounts access.") : null}
         {!services.isDesktop && services.platformKind !== "android" && !navigation.selectedRef.current.drafts[panel.context.id]?.local ? <a className="dialog-action" href={`multi-device-context://context/${panel.context.id}`}><WorkspaceIcon name="share" /><span>Open in app</span></a> : null}
         <div className="dialog-divider" />{option("trash", "Delete chat…", () => setPanel({ kind: "delete-context", context: panel.context }))}

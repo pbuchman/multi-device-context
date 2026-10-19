@@ -62,6 +62,8 @@ test('list resolves a trimmed case-insensitive exact Unicode device name before 
   assert.equal(query(result.requests[1]).get('deviceId'), deviceId);
   assert.equal(query(result.requests[1]).get('limit'), '2');
   assert.equal(query(result.requests[1]).get('after'), 'opaque');
+  assert.equal(query(result.requests[1]).get('sort'), 'pinned');
+  assert.equal(query(result.requests[1]).get('pinned'), null);
 });
 
 test('missing and ambiguous names never query unfiltered contexts', async () => {
@@ -75,7 +77,7 @@ test('missing and ambiguous names never query unfiltered contexts', async () => 
 });
 
 test('latest selects descending first context then reads every item page', async () => {
-  const context = { id: contextId, originDeviceId: deviceId };
+  const context = { id: contextId, originDeviceId: deviceId, pinned: true, pinnedAt: 1234 };
   const result = await run(['latest', '--device-id', deviceId, '--limit', '7'], [
     { body: resultPage([context]) }, { body: context },
     { body: { records: [{ id: itemId }], hasMore: true, cursor: 'item-page-2' } },
@@ -85,6 +87,8 @@ test('latest selects descending first context then reads every item page', async
   assert.deepEqual(JSON.parse(result.stdout), { context, items: [{ id: itemId }, { id: 'second-item' }] });
   assert.equal(query(result.requests[0]).get('deviceId'), deviceId);
   assert.equal(query(result.requests[0]).get('order'), 'desc');
+  assert.equal(query(result.requests[0]).get('sort'), null);
+  assert.equal(query(result.requests[0]).get('pinned'), null);
   assert.equal(query(result.requests[0]).get('limit'), '1');
   assert.equal(path(result.requests[1]), `/api/agent/v1/contexts/${contextId}`);
   assert.equal(query(result.requests[2]).get('limit'), '7');
@@ -97,6 +101,8 @@ test('unfiltered latest and empty latest are explicit', async () => {
   assert.deepEqual(JSON.parse(result.stdout), { context: null, items: [], message: 'No contexts found' });
   assert.equal(query(result.requests[0]).get('deviceId'), null);
   assert.equal(query(result.requests[0]).get('order'), 'desc');
+  assert.equal(query(result.requests[0]).get('sort'), null);
+  assert.equal(query(result.requests[0]).get('pinned'), null);
   assert.equal(result.requests.length, 1);
 });
 
@@ -131,12 +137,12 @@ test('authentication and rate limits stop lookup without leaking key or response
 });
 
 test('existing get reads item pagination', async () => {
-  const context = { id: contextId };
+  const context = { id: contextId, pinned: false, pinnedAt: null };
   const result = await run(['get', contextId], [
     { body: context }, { body: { records: [{ id: itemId }], hasMore: true, cursor: 'next' } }, { body: resultPage([{ id: 'last' }]) },
   ]);
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).items, [{ id: itemId }, { id: 'last' }]);
+  assert.deepEqual(JSON.parse(result.stdout), { context, items: [{ id: itemId }, { id: 'last' }] });
   assert.equal(query(result.requests[2]).get('after'), 'next');
 });
 
@@ -169,4 +175,94 @@ test('configuration permissions remain protected before requests', { skip: proce
   assert.equal(result.code, 1);
   assert.match(result.stderr, /mode 0600/);
   assert.equal(result.requests.length, 0);
+});
+
+test('pinned list preserves device scope and filter on every requested page', async () => {
+  const contexts = [{ id: contextId, pinned: true, pinnedAt: 1234 }];
+  for (const after of [undefined, 'pinned-page-2']) {
+    const result = await run(['list', '--pinned', '--device', device.name, ...(after ? ['--after', after] : [])], [
+      { body: devices }, { body: { records: contexts, cursor: 'pinned-page-3', hasMore: true } },
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).records, contexts);
+    assert.equal(query(result.requests[1]).get('deviceId'), deviceId);
+    assert.equal(query(result.requests[1]).get('sort'), 'pinned');
+    assert.equal(query(result.requests[1]).get('pinned'), 'true');
+    assert.equal(query(result.requests[1]).get('after'), after ?? null);
+  }
+});
+
+test('empty pinned list remains empty with requested device ID', async () => {
+  const result = await run(['list', '--pinned', '--device-id', deviceId], [{ body: resultPage([]) }]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), resultPage([]));
+  assert.equal(result.requests.length, 1);
+  assert.equal(query(result.requests[0]).get('deviceId'), deviceId);
+  assert.equal(query(result.requests[0]).get('pinned'), 'true');
+});
+
+test('pin and unpin explicitly set state and return server metadata across retries', async () => {
+  for (const command of ['pin', 'unpin']) {
+    const context = { id: contextId, pinned: command === 'pin', pinnedAt: command === 'pin' ? 1234 : null };
+    for (let retry = 0; retry < 2; retry++) {
+      const result = await run([command, contextId], [{ body: context }]);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), context);
+      assert.equal(result.requests.length, 1);
+      assert.equal(path(result.requests[0]), `/api/agent/v1/contexts/${contextId}`);
+      assert.equal(result.requests[0].method, 'PATCH');
+      assert.deepEqual(result.requests[0].body, { pinned: context.pinned });
+    }
+  }
+});
+
+test('unsupported pin options and unknown flags fail before requests', async () => {
+  for (const args of [
+    ['latest', '--pinned'], ['watch', '--pinned'], ['get', contextId, '--pinned'],
+    ['pin', contextId, '--pinned'], ['unpin', contextId, '--device-id', deviceId],
+    ['list', '--pinned', 'false'], ['list', '--pinned=false'], ['list', '--unknown', 'value'],
+    ['pin'], ['unpin', 'invalid'], ['pin', contextId, '--title', 'ignored'],
+    ['list', '--pinned', '--pinned'],
+  ]) {
+    const result = await run(args);
+    assert.equal(result.code, 1, args.join(' '));
+    assert.equal(result.requests.length, 0, args.join(' '));
+  }
+});
+
+test('watch stays on chronological creation pages and retains pin metadata', async () => {
+  const context = { id: contextId, pinned: true, pinnedAt: 1234 };
+  const result = await run(['watch', '--once', '--after', 'creation-checkpoint'], [
+    { body: { records: [context], cursor: 'next-creation-page', hasMore: true } },
+    { body: { records: [], cursor: 'next-creation-page', hasMore: false } },
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { type: 'contexts.created', contexts: [context], cursor: 'next-creation-page' });
+  assert.equal(result.requests.length, 2);
+  assert.equal(query(result.requests[0]).get('after'), 'creation-checkpoint');
+  assert.equal(query(result.requests[1]).get('after'), 'next-creation-page');
+  for (const request of result.requests) {
+    assert.equal(query(request).get('sort'), null);
+    assert.equal(query(request).get('pinned'), null);
+    assert.equal(query(request).get('order'), null);
+  }
+});
+
+test('help advertises pinned filtering and explicit pin commands', async () => {
+  const result = await run(['help']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /list \[--pinned\]/);
+  assert.match(result.stdout, /pin CONTEXT_ID/);
+  assert.match(result.stdout, /unpin CONTEXT_ID/);
+  assert.equal(result.requests.length, 0);
+});
+
+
+test('rename still sends only the explicit title and returns context metadata', async () => {
+  const context = { id: contextId, title: 'Release checklist', pinned: true, pinnedAt: 1234 };
+  const result = await run(['rename', contextId, '--title', context.title], [{ body: context }]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), context);
+  assert.equal(result.requests[0].method, 'PATCH');
+  assert.deepEqual(result.requests[0].body, { title: context.title });
 });

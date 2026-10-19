@@ -16,6 +16,7 @@ const fixtureRequest = async (path: string, init?: RequestInit) => {
  if (!response.ok) throw new Error("Synthetic API request failed");
  return response;
 };
+const pins = new URLSearchParams(window.location.search).has("pins");
 const showcase = new URLSearchParams(window.location.search).has("showcase");
 const ids = {
   website: "00000000-0000-4000-8000-000000000001" as Id,
@@ -39,6 +40,10 @@ let contexts: ContextRecord[] = showcase ? [
   { id: ids.design, title: "Design references", createdAt: now - 700_000, updatedAt: now - 380_000, syncState: "synced" },
   { id: ids.notes, title: "Meeting notes", createdAt: now - 800_000, updatedAt: now - 480_000, syncState: "synced" },
 ];
+if (pins) contexts = contexts.map((context, index) => ({ ...context, title: index === 1 ? "Pinned chat with a very long title to inspect the narrow sidebar" : context.title, pinnedAt: index === 1 ? now - 10_000 : null }));
+let pinGate = Promise.resolve();
+let finishPin: (() => void) | undefined;
+let failNextPin = false;
 const item = (id: string, contextId: Id, content: Content, device = dell, age = 100_000): ItemRecord => ({
   id: id as Id, contextId, content, device, createdAt: now - age, ready: true, syncState: "synced",
 });
@@ -125,6 +130,13 @@ const profile = new AccountProfileStore("browser-test", async () => {
 void profile.refresh();
 let deleteGate = Promise.resolve();let finishDelete: (() => void) | undefined;
 Object.assign(window, {
+  mdcPinTest: {
+    records() { return contexts; },
+    remote(contextId: string, pinnedAt: number | null) { contexts = contexts.map(context => context.id === contextId ? { ...context, pinnedAt } : context); emitContexts(); },
+    pause() { pinGate = new Promise<void>(resolve => { finishPin = resolve; }); },
+    finish() { finishPin?.(); },
+    failNext() { failNextPin = true; },
+  },
   mdcProfileTest: { async fail() { profileFailure = true; await profile.refresh(); } },
   mdcDeletionTest: { pause() { deleteGate = new Promise<void>(resolve => { finishDelete = resolve; }); }, finish() { finishDelete?.(); } },
 });
@@ -165,6 +177,14 @@ const services: WorkspaceServices = {
     subscribeDeletedItems(emit) { queueMicrotask(() => emit([])); return () => {}; },
     subscribeContexts(emit) { contextListener = emit; queueMicrotask(emitContexts); return () => { contextListener = undefined; }; },
     subscribeItems(contextId, emit) { itemListeners.set(contextId, emit); queueMicrotask(() => emitItems(contextId)); return () => itemListeners.delete(contextId); },
+    async setContextPinned(contextId, pinned) {
+      await pinGate;
+      if (navigator.onLine === false) throw new Error("Go online to pin or unpin chats");
+      if (failNextPin) { failNextPin = false; throw new Error("Synthetic pin write failed"); }
+      if (!contexts.some(context => context.id === contextId)) throw new Error("This chat is unavailable");
+      contexts = contexts.map(context => context.id === contextId ? { ...context, pinnedAt: pinned ? context.pinnedAt ?? Date.now() : null } : context);
+      emitContexts();
+    },
     async renameContext(contextId, title) { contexts = contexts.map((context) => context.id === contextId ? { ...context, title } : context); emitContexts(); },
     async deleteContext(contextId) { await deleteGate; contexts = contexts.filter((context) => context.id !== contextId); items.delete(contextId); emitContexts(); },
     async deleteItem(contextId, itemId) { items.set(contextId, (items.get(contextId) ?? []).filter((entry) => entry.id !== itemId)); emitItems(contextId); },

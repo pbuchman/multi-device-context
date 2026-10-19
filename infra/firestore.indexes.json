@@ -109,6 +109,38 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "contexts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "deleting",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "pinnedAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "contexts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "deleting",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "originDeviceId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "pinnedAt",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

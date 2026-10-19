@@ -12,6 +12,7 @@ import {
   onSnapshot,
   memoryLocalCache,
   query,
+  runTransaction,
   serverTimestamp,
   updateDoc,
   where,
@@ -106,6 +107,14 @@ function timestampMillis(value: unknown): number {
   return Date.now();
 }
 
+function pinTimestampMillis(value: unknown): number | null {
+  if (value && typeof value === "object" && "toMillis" in value && typeof value.toMillis === "function") {
+    const millis = value.toMillis();
+    return typeof millis === "number" && Number.isFinite(millis) ? millis : null;
+  }
+  return null;
+}
+
 function contextFromDocument(document: QueryDocumentSnapshot<DocumentData>): ContextRecord | undefined {
   const data = document.data();
   if (typeof data.title !== "string") return undefined;
@@ -116,6 +125,7 @@ function contextFromDocument(document: QueryDocumentSnapshot<DocumentData>): Con
     ...(typeof data.ready === "boolean" ? { ready: data.ready } : {}),
     createdAt: timestampMillis(data.createdAt),
     updatedAt: timestampMillis(data.updatedAt),
+    pinnedAt: pinTimestampMillis(data.pinnedAt),
     syncState: document.metadata.hasPendingWrites ? "pending" : document.metadata.fromCache ? "cached" : "synced",
   };
 }
@@ -146,6 +156,7 @@ export class FirebaseCloud {
   readonly #firestore: Firestore;
   #active = true;
   readonly #listeners = new Set<Unsubscribe>();
+  readonly #confirmedPins = new Map<Id, number | null>();
   #networkEnabled = true;
   #networkTransition: Promise<void> = Promise.resolve();
 
@@ -184,13 +195,27 @@ export class FirebaseCloud {
     this.#listeners.add(stop); return () => { this.#listeners.delete(stop); stop(); };
   }
 
+  #preserveConfirmedPins(records: ContextRecord[]): ContextRecord[] {
+    for (const record of records) {
+      if (record.syncState === "pending" && this.#confirmedPins.has(record.id)) {
+        record.pinnedAt = this.#confirmedPins.get(record.id)!;
+      } else {
+        // An initial pending append/rename still contains the existing pin's
+        // resolved Timestamp. A new local serverTimestamp pin reads as null.
+        // Keep this knowledge across listener restarts and foreground refreshes.
+        this.#confirmedPins.set(record.id, record.pinnedAt ?? null);
+      }
+    }
+    return records;
+  }
+
   subscribeContexts(
     emit: (snapshot: CloudSnapshot<ContextRecord>) => void,
     fail: (error: Error) => void,
   ): Unsubscribe {
     const live = this.#contexts();
     return onSnapshot(live, { includeMetadataChanges: true }, (snapshot) => {
-      const records = snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value));
+      const records = this.#preserveConfirmedPins(snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value)));
       records.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
       emit({ records, fromCache: snapshot.metadata.fromCache, hasPendingWrites: snapshot.metadata.hasPendingWrites });
     }, (error) => fail(error));
@@ -201,7 +226,7 @@ export class FirebaseCloud {
     this.#current();
     const snapshot = await getDocsFromServer(live);
     this.#current();
-    const records = snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value));
+    const records = this.#preserveConfirmedPins(snapshot.docs.map(contextFromDocument).filter((value): value is ContextRecord => Boolean(value)));
     records.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
     return { records, fromCache: false, hasPendingWrites: snapshot.metadata.hasPendingWrites };
   }
@@ -251,6 +276,22 @@ export class FirebaseCloud {
     } catch (error) {
       throw cloudFailure(error);
     }
+  }
+
+  async setContextPinned(contextId: Id, pinned: boolean): Promise<void> {
+    this.#current();
+    if (!this.#networkEnabled || (typeof navigator !== "undefined" && navigator.onLine === false)) throw new Error("Go online to pin or unpin chats");
+    const reference = doc(this.#firestore, `users/${this.uid}/contexts/${contextId}`);
+    await runTransaction(this.#firestore, async transaction => {
+      this.#current();
+      const snapshot = await transaction.get(reference);
+      this.#current();
+      if (!snapshot.exists() || snapshot.data().deleting !== false) throw new Error("This chat is unavailable or has been deleted");
+      if (this.device.mode === "own" && snapshot.data().originDeviceId !== this.device.id) throw new Error("This chat is unavailable on this device");
+      if ((pinTimestampMillis(snapshot.data().pinnedAt) !== null) === pinned) return;
+      transaction.update(reference, { pinnedAt: pinned ? serverTimestamp() : null });
+    });
+    this.#current();
   }
 
   async renameContext(contextId: Id, title: string): Promise<void> {

@@ -2,14 +2,14 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { AttachmentStore } from "./attachments.js";
 import { FieldPath, FieldValue, Timestamp, type Firestore, type Query } from "firebase-admin/firestore";
 import type { Storage } from "firebase-admin/storage";
-import { type AgentItemInput, type AgentKeyInfo, type Device, DeviceSchema, IdSchema, attachmentPath } from "@mdc/contracts";
+import { type AgentItemInput, type AgentKeyInfo, type Device, type UpdateContext, DeviceSchema, IdSchema, attachmentPath, comparePinnedContexts } from "@mdc/contracts";
 import type { Backend } from "./server.js";
 import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
 
 type Bucket = ReturnType<Storage["bucket"]>;
 const agentDevice = { id: "00000000-0000-4000-8000-000000000002", name: "Agent" };
 export class BadInputError extends Error { statusCode = 400; }
-export type AgentContextListOptions = { deviceId?: string; order?: "asc" | "desc" };
+export type AgentContextListOptions = { deviceId?: string; order?: "asc" | "desc"; sort?: "created" | "pinned"; pinned?: true };
 const hash = (value: string) => createHash("sha256").update(value).digest();
 export function parseAgentToken(token: string): { id: string; digest: Buffer } | undefined {
   const match = /^mdc_([0-9a-f-]{36})_([A-Za-z0-9_-]{43})$/.exec(token);
@@ -20,6 +20,38 @@ function serialize(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirest
   const data = doc.data()!;
   const { deleting, titleLease, titleLeaseUntil, titleAttempts, ...safe } = data;
   return { ...safe, id: doc.id, createdAt: data.createdAt?.toMillis() ?? 0, updatedAt: data.updatedAt?.toMillis() ?? 0 };
+}
+function serializeContext(doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirestore.DocumentSnapshot): ReturnType<typeof serialize> & { pinned: boolean; pinnedAt: number | null } {
+  const pinnedAt = doc.data()?.pinnedAt;
+  return { ...serialize(doc), pinned: pinnedAt instanceof Timestamp, pinnedAt: pinnedAt instanceof Timestamp ? pinMillis(pinnedAt.seconds, pinnedAt.nanoseconds) : null };
+}
+// The browser SDK retains fractional milliseconds; Admin Timestamp.toMillis()
+// truncates them. Use the same numeric key on both sides of the shared comparator.
+function pinMillis(seconds: number, nanoseconds: number): number { return seconds * 1000 + nanoseconds / 1e6; }
+type Position = [number, number, string];
+type PinCursor = { version: 1; sort: "created" | "pinned"; pinned: boolean; order: "asc" | "desc"; deviceId: string | null; phase: "pins" | "created"; position: Position };
+function position(doc: FirebaseFirestore.QueryDocumentSnapshot, field: "createdAt" | "pinnedAt"): Position {
+  const time = doc.data()[field] as Timestamp;
+  return [time.seconds, time.nanoseconds, doc.id];
+}
+function comparePosition(left: Position, right: Position, direction: "asc" | "desc", pinOrder = false): number {
+  if (pinOrder) return comparePinnedContexts({ id: left[2], pinnedAt: pinMillis(left[0], left[1]) }, { id: right[2], pinnedAt: pinMillis(right[0], right[1]) });
+  const time = left[0] - right[0] || left[1] - right[1];
+  const ids = left[2] < right[2] ? -1 : left[2] > right[2] ? 1 : 0;
+  return (direction === "desc" ? -time : time) || (direction === "asc" ? ids : -ids);
+}
+function decodePinCursor(value: string, parameters: Omit<PinCursor, "version" | "phase" | "position">): PinCursor {
+  try {
+    if (value.length > 1024) throw new Error();
+    const cursor = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as PinCursor;
+    if (!cursor || cursor.version !== 1 || !["pins", "created"].includes(cursor.phase)
+      || Object.keys(parameters).some(key => cursor[key as keyof typeof parameters] !== parameters[key as keyof typeof parameters])
+      || !Array.isArray(cursor.position) || cursor.position.length !== 3
+      || !Number.isInteger(cursor.position[0]) || !Number.isInteger(cursor.position[1]) || !IdSchema.safeParse(cursor.position[2]).success
+      || (cursor.phase === "created" && (parameters.sort !== "pinned" || parameters.pinned))) throw new Error();
+    new Timestamp(cursor.position[0], cursor.position[1]);
+    return cursor;
+  } catch { throw new BadInputError(); }
 }
 export function decodeCursor(value: string): [Timestamp, string] {
   try {
@@ -75,16 +107,16 @@ export class AgentStore extends AttachmentStore {
   async getContext(uid: string, id: string) {
     const doc = await this.context(uid, id).get();
     if (!doc.exists || doc.data()?.deleting !== false) throw new BackendNotFoundError();
-    return serialize(doc);
+    return serializeContext(doc);
   }
-  async page(query: Query, after?: string, limit = 50, order: "asc" | "desc" = "asc") {
+  async page(query: Query, after?: string, limit = 50, order: "asc" | "desc" = "asc", contextRecords = false) {
     let ordered = query.orderBy("createdAt", order).orderBy(FieldPath.documentId(), order);
     if (after) ordered = ordered.startAfter(...decodeCursor(after));
     const result = await ordered.limit(limit).get();
     const last = result.docs.at(-1);
     const time = last?.data().createdAt as Timestamp | undefined;
     return {
-      records: result.docs.map(serialize),
+      records: result.docs.map(contextRecords ? serializeContext : serialize),
       cursor: last && time ? Buffer.from(JSON.stringify([time.seconds, time.nanoseconds, last.id])).toString("base64url") : after ?? null,
       hasMore: result.size === limit,
     };
@@ -92,7 +124,48 @@ export class AgentStore extends AttachmentStore {
   async listContexts(uid: string, after?: string, limit?: number, options: AgentContextListOptions = {}) {
     let query = this.db.collection(`users/${uid}/contexts`).where("deleting", "==", false);
     if (options.deviceId) query = query.where("originDeviceId", "==", options.deviceId);
-    return this.page(query, after, limit, options.order);
+    // Preserve the original timestamp tuple for default/latest/watch clients.
+    if (options.sort !== "pinned" && !options.pinned) return this.page(query, after, limit, options.order, true);
+    return this.pinPage(query, after, limit ?? 50, options);
+  }
+  private async pinPage(query: Query, after: string | undefined, limit: number, options: AgentContextListOptions) {
+    const parameters = { sort: options.sort ?? "created", pinned: options.pinned ?? false, order: options.order ?? "asc", deviceId: options.deviceId ?? null } as const;
+    const cursor = after ? decodePinCursor(after, parameters) : undefined;
+    // != null excludes both absent legacy fields and explicit null. Pins are few;
+    // fetch the complete indexed set so old contexts are never hidden by a page limit.
+    const pins = (await query.where("pinnedAt", "!=", null).orderBy("pinnedAt", "desc").get()).docs
+      .filter(doc => doc.data().pinnedAt instanceof Timestamp);
+    const pinField = parameters.sort === "pinned" ? "pinnedAt" : "createdAt";
+    const pinDirection = parameters.sort === "pinned" ? "desc" : parameters.order;
+    pins.sort((a, b) => comparePosition(position(a, pinField), position(b, pinField), pinDirection, parameters.sort === "pinned"));
+    const found: { doc: FirebaseFirestore.QueryDocumentSnapshot; phase: "pins" | "created"; position: Position }[] = [];
+    if (cursor?.phase !== "created") {
+      for (const doc of pins) {
+        const current = position(doc, pinField);
+        if (cursor && comparePosition(current, cursor.position, pinDirection, parameters.sort === "pinned") <= 0) continue;
+        found.push({ doc, phase: "pins", position: current });
+        if (found.length > limit) break;
+      }
+    }
+    if (!parameters.pinned && found.length <= limit) {
+      let scanPosition = cursor?.phase === "created" ? cursor.position : undefined;
+      const batchSize = Math.max(50, limit + 1);
+      while (found.length <= limit) {
+        let chronological = query.orderBy("createdAt", parameters.order).orderBy(FieldPath.documentId(), parameters.order);
+        if (scanPosition) chronological = chronological.startAfter(new Timestamp(scanPosition[0], scanPosition[1]), scanPosition[2]);
+        const page = await chronological.limit(batchSize).get();
+        for (const doc of page.docs) {
+          scanPosition = position(doc, "createdAt");
+          if (!(doc.data().pinnedAt instanceof Timestamp)) found.push({ doc, phase: "created", position: scanPosition });
+          if (found.length > limit) break;
+        }
+        if (page.size < batchSize) break;
+      }
+    }
+    const selected = found.slice(0, limit);
+    const last = selected.at(-1);
+    return { records: selected.map(entry => serializeContext(entry.doc)), hasMore: found.length > limit,
+      cursor: last ? Buffer.from(JSON.stringify({ version: 1, ...parameters, phase: last.phase, position: last.position } satisfies PinCursor)).toString("base64url") : after ?? null };
   }
   async listDevices(uid: string): Promise<{ records: Device[] }> {
     const [registered, contexts] = await Promise.all([
@@ -165,11 +238,18 @@ export class AgentStore extends AttachmentStore {
     return this.getContext(uid, id);
   }
   async rename(uid: string, id: string, title: string) {
+    return this.updateContext(uid, id, { title });
+  }
+  async updateContext(uid: string, id: string, update: UpdateContext) {
     const ref = this.context(uid, id);
     await this.db.runTransaction(async tx => {
       const doc = await tx.get(ref);
       if (!doc.exists || doc.data()?.deleting !== false) throw new BackendNotFoundError();
-      tx.update(ref, { title, titleState: "manual", updatedAt: FieldValue.serverTimestamp() });
+      const changes: FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData> = {};
+      if (update.title !== undefined) Object.assign(changes, { title: update.title, titleState: "manual", updatedAt: FieldValue.serverTimestamp() });
+      const pinned = doc.data()?.pinnedAt instanceof Timestamp;
+      if (update.pinned !== undefined && update.pinned !== pinned) changes.pinnedAt = update.pinned ? FieldValue.serverTimestamp() : null;
+      if (Object.keys(changes).length) tx.update(ref, changes);
     });
     return this.getContext(uid, id);
   }

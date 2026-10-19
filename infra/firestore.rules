@@ -35,7 +35,8 @@ service cloud.firestore {
     }
 
     function validContext(data) {
-      return data.keys().hasOnly(['title', 'createdAt', 'updatedAt', 'deleting', 'originDeviceId', 'firstItemId', 'ready', 'titleState', 'titleLease', 'titleLeaseUntil', 'titleAttempts'])
+      return data.keys().hasOnly(['title', 'createdAt', 'updatedAt', 'deleting', 'originDeviceId', 'firstItemId', 'ready', 'titleState', 'titleLease', 'titleLeaseUntil', 'titleAttempts', 'pinnedAt'])
+        && (!('pinnedAt' in data) || data.pinnedAt == null || data.pinnedAt is timestamp)
         && (!('originDeviceId' in data) || isUuid(data.originDeviceId))
         && (!('firstItemId' in data) || isUuid(data.firstItemId))
         && (!('ready' in data) || data.ready is bool)
@@ -105,6 +106,7 @@ service cloud.firestore {
         && !exists(/databases/$(database)/documents/users/$(uid)/deletedContexts/$(contextId))
         && validContext(request.resource.data)
         && request.resource.data.originDeviceId == request.auth.token.mdcDeviceId
+        && (!('pinnedAt' in request.resource.data) || request.resource.data.pinnedAt == null)
         && !request.resource.data.keys().hasAny(['titleLease', 'titleLeaseUntil', 'titleAttempts'])
         && (!('titleState' in request.resource.data) || request.resource.data.titleState in ['pending', 'manual'])
         && request.resource.data.createdAt == request.time
@@ -117,6 +119,16 @@ service cloud.firestore {
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.updatedAt == request.time
         && request.resource.data.deleting == false;
+      // Pinning is an online-only metadata transaction on a saved, live context.
+      // The timestamp is authoritative server time and never changes updatedAt.
+      allow update: if canAccess(uid, resource.data)
+        && resource.data.deleting == false
+        && validContext(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pinnedAt'])
+        && 'pinnedAt' in request.resource.data
+        && (request.resource.data.pinnedAt == null
+          || (request.resource.data.pinnedAt == request.time
+            && (!('pinnedAt' in resource.data) || resource.data.pinnedAt == null)));
       allow delete: if false;
 
       match /items/{itemId} {

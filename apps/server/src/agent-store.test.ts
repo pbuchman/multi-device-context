@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { Timestamp } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { AgentStore, decodeCursor } from "./agent-store.js";
+import { BackendNotFoundError } from "./backend-errors.js";
 
 type Data = Record<string, any>;
 const uid = "owner";
@@ -11,19 +12,27 @@ const compare = (a: any, b: any): number => a instanceof Timestamp && b instance
 const field = (data: Data, name: string) => name.split(".").reduce((value, key) => value?.[key], data);
 class Database {
   documents = new Map<string, Data>();
+  writes = 0;
+  async runTransaction(work: (tx: any) => unknown) {
+    return work({ get: (ref: any) => ref.get(), update: (ref: any, update: Data) => {
+      this.writes++;
+      const resolved = Object.fromEntries(Object.entries(update).map(([key, value]) => [key, value instanceof FieldValue && value.isEqual(FieldValue.serverTimestamp()) ? timestamp(1000, this.writes) : value]));
+      this.documents.set(ref.path, { ...this.documents.get(ref.path), ...resolved });
+    } });
+  }
   doc(path: string): any {
     const ref = { path, id: path.split("/").at(-1), collection: (name: string) => this.collection(`${path}/${name}`), get: async () => ({ id: ref.id, ref, exists: this.documents.has(path), data: () => this.documents.get(path) }) };
     return ref;
   }
-  collection(path: string, filters: [string, unknown][] = [], orders: [string, string][] = [], cursor?: any[], maximum = Infinity): any {
+  collection(path: string, filters: [string, string, unknown][] = [], orders: [string, string][] = [], cursor?: any[], maximum = Infinity): any {
     const query = {
       doc: (id: string) => this.doc(`${path}/${id}`),
-      where: (name: string, _op: string, value: unknown) => this.collection(path, [...filters, [name, value]], orders, cursor, maximum),
+      where: (name: string, op: string, value: unknown) => this.collection(path, [...filters, [name, op, value]], orders, cursor, maximum),
       orderBy: (name: unknown, direction = "asc") => this.collection(path, filters, [...orders, [typeof name === "string" ? name : "__name__", direction]], cursor, maximum),
       startAfter: (...value: any[]) => this.collection(path, filters, orders, value, maximum),
       limit: (n: number) => this.collection(path, filters, orders, cursor, n),
       get: async () => {
-        let entries = [...this.documents].filter(([key, data]) => key.startsWith(`${path}/`) && !key.slice(path.length + 1).includes("/") && filters.every(([name, value]) => field(data, name) === value));
+        let entries = [...this.documents].filter(([key, data]) => key.startsWith(`${path}/`) && !key.slice(path.length + 1).includes("/") && filters.every(([name, op, value]) => op === "!=" ? field(data, name) !== undefined && field(data, name) !== value : field(data, name) === value));
         const value = ([key, data]: [string, Data], name: string) => name === "__name__" ? key.split("/").at(-1) : field(data, name);
         entries.sort((a, b) => { for (const [name, direction] of orders) { const n = compare(value(a, name), value(b, name)) * (direction === "desc" ? -1 : 1); if (n) return n; } return 0; });
         if (cursor) entries = entries.filter(entry => { for (const [index, [name, direction]] of orders.entries()) { const n = compare(value(entry, name), cursor[index]) * (direction === "desc" ? -1 : 1); if (n) return n > 0; } return false; });
@@ -129,5 +138,93 @@ describe("agent device discovery", () => {
       f.item(path, uuid(n + 3000), { id: uuid(n + 2000), name: `Legacy ${n}` });
     }
     expect((await f.store.listDevices(uid)).records).toHaveLength(210);
+  });
+});
+
+describe("account context pins", () => {
+  it("serializes legacy contexts as unpinned without adding context fields to items", async () => {
+    const f = fixture(); const path = f.context(uuid(400)); f.item(path, uuid(401), { id: deviceA, name: "Phone" });
+    expect(await f.store.getContext(uid, uuid(400))).toMatchObject({ pinned: false, pinnedAt: null });
+    expect((await f.store.listContexts(uid)).records[0]).toMatchObject({ pinned: false, pinnedAt: null });
+    const entry = (await f.store.listItems(uid, uuid(400))).records[0];
+    expect(entry).not.toHaveProperty("pinned"); expect(entry).not.toHaveProperty("pinnedAt");
+  });
+  it("pins idempotently, leaves activity alone, and combines title/pin updates atomically", async () => {
+    const f = fixture(); const path = f.context(uuid(410));
+    const original = f.db.documents.get(path)!.updatedAt;
+    const first = await f.store.updateContext(uid, uuid(410), { pinned: true });
+    expect(first).toMatchObject({ pinned: true, pinnedAt: 1000000.000001 });
+    const stamp = f.db.documents.get(path)!.pinnedAt;
+    await f.store.updateContext(uid, uuid(410), { pinned: true });
+    expect(f.db.writes).toBe(1); expect(f.db.documents.get(path)!.pinnedAt).toEqual(stamp);
+    expect(f.db.documents.get(path)!.updatedAt).toEqual(original);
+    await f.store.updateContext(uid, uuid(410), { title: "Manual", pinned: false });
+    expect(f.db.writes).toBe(2);
+    expect(f.db.documents.get(path)).toMatchObject({ title: "Manual", titleState: "manual", pinnedAt: null });
+    expect(f.db.documents.get(path)!.updatedAt).not.toEqual(original);
+    await f.store.updateContext(uid, uuid(410), { pinned: false }); expect(f.db.writes).toBe(2);
+    await expect(f.store.updateContext("other", uuid(410), { pinned: true })).rejects.toBeInstanceOf(BackendNotFoundError);
+    f.db.documents.get(path)!.deleting = true;
+    await expect(f.store.updateContext(uid, uuid(410), { title: "No resurrection", pinned: true })).rejects.toBeInstanceOf(BackendNotFoundError);
+    expect(f.db.writes).toBe(2);
+  });
+  it("finds old pins outside ordinary pages and fills the unpinned phase across skipped pages", async () => {
+    const f = fixture();
+    for (let n = 500; n < 625; n++) f.context(uuid(n), { createdAt: timestamp(1, n), pinnedAt: n < 560 ? timestamp(10 + n) : null });
+    f.context(uuid(700), { createdAt: timestamp(100), pinnedAt: timestamp(1000) });
+    f.context(uuid(701), { createdAt: timestamp(100), pinnedAt: timestamp(1000) });
+    f.context(uuid(702), { originDeviceId: deviceB, pinnedAt: timestamp(30) });
+    f.context(uuid(703), { deleting: true, pinnedAt: timestamp(40) });
+    for (const order of ["asc", "desc"] as const) {
+      let after: string | undefined; const records: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        const page = await f.store.listContexts(uid, after, 9, { sort: "pinned", deviceId: deviceA, order });
+        records.push(...page.records.map(r => r.id)); after = page.cursor!;
+        if (!page.hasMore) break;
+      }
+      const pins = [uuid(700), uuid(701), ...Array.from({ length: 60 }, (_, n) => uuid(559 - n))];
+      const unpinned = Array.from({ length: 65 }, (_, n) => uuid(order === "asc" ? 560 + n : 624 - n));
+      expect(records).toEqual([...pins, ...unpinned]);
+      expect(new Set(records).size).toBe(records.length);
+    }
+  });
+  it("filters only real pins, supports creation sorting, and binds new cursors to every query option", async () => {
+    const f = fixture();
+    f.context(uuid(800), { createdAt: timestamp(2, 123456789), pinnedAt: timestamp(8) });
+    f.context(uuid(801), { createdAt: timestamp(2, 123456790), pinnedAt: timestamp(7) });
+    f.context(uuid(802), { pinnedAt: null }); f.context(uuid(803));
+    const first = await f.store.listContexts(uid, undefined, 1, { pinned: true });
+    expect(first.records[0]?.id).toBe(uuid(800));
+    expect(JSON.parse(Buffer.from(first.cursor!, "base64url").toString()).position).toEqual([2, 123456789, uuid(800)]);
+    const next = await f.store.listContexts(uid, first.cursor!, 1, { pinned: true });
+    expect(next.records.map(r => r.id)).toEqual([uuid(801)]); expect(next.hasMore).toBe(false);
+    for (const options of [{ sort: "pinned" as const, pinned: true as const }, { pinned: true as const, order: "desc" as const }, { pinned: true as const, deviceId: deviceB }, {}]) {
+      await expect(f.store.listContexts(uid, first.cursor!, 1, options)).rejects.toMatchObject({ statusCode: 400 });
+    }
+    const legacy = await f.store.listContexts(uid, undefined, 1);
+    await expect(f.store.listContexts(uid, legacy.cursor!, 1, { sort: "pinned" })).rejects.toMatchObject({ statusCode: 400 });
+    for (const after of ["bad", Buffer.from(JSON.stringify({ version: 1 })).toString("base64url")]) {
+      await expect(f.store.listContexts(uid, after, 1, { sort: "pinned" })).rejects.toMatchObject({ statusCode: 400 });
+    }
+    expect((await f.store.listContexts(uid, undefined, 10, { sort: "pinned", pinned: true })).records.map(r => r.id)).toEqual([uuid(800), uuid(801)]);
+  });
+  it("keeps chronological latest and watch tuples independent of account pins", async () => {
+    const f = fixture(); f.context(uuid(900), { createdAt: timestamp(1), pinnedAt: timestamp(50) });
+    f.context(uuid(901), { createdAt: timestamp(2, 999999999) });
+    const watch = await f.store.listContexts(uid, undefined, 1);
+    expect(watch.records[0]?.id).toBe(uuid(900)); expect(decodeCursor(watch.cursor!)[0]).toEqual(timestamp(1));
+    expect((await f.store.listContexts(uid, watch.cursor!, 1)).records[0]?.id).toBe(uuid(901));
+    expect((await f.store.listContexts(uid, undefined, 1, { order: "desc" })).records[0]?.id).toBe(uuid(901));
+  });
+  it("preserves browser fractional pin milliseconds in serialization, ordering and cursor seeks", async () => {
+    const f = fixture();
+    f.context(uuid(910), { pinnedAt: timestamp(1000, 1000) });
+    f.context(uuid(911), { pinnedAt: timestamp(1000, 500000) });
+    const first = await f.store.listContexts(uid, undefined, 1, { sort: "pinned" });
+    expect(first.records[0]).toMatchObject({ id: uuid(911), pinnedAt: 1000000.5 });
+    expect(JSON.parse(Buffer.from(first.cursor!, "base64url").toString()).position).toEqual([1000, 500000, uuid(911)]);
+    const next = await f.store.listContexts(uid, first.cursor!, 1, { sort: "pinned" });
+    expect(next.records[0]).toMatchObject({ id: uuid(910), pinnedAt: 1000000.001 });
+    expect(next.hasMore).toBe(false);
   });
 });
