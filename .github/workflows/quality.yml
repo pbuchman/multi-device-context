@@ -56,6 +56,7 @@ jobs:
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:4173/e2e.html > /dev/null && break; sleep 1; done
           python apps/web/e2e/context_ui.py
           python apps/web/e2e/pinning.py
+          python apps/web/e2e/context_colors.py
           python apps/web/e2e/device_names.py
           python apps/web/e2e/file_input.py
           python apps/web/e2e/native_fetch_composer.py

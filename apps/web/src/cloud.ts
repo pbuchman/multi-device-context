@@ -1,6 +1,6 @@
 import { apiUrl } from "./api.js";
 import { liveDocumentQuery } from "./queries.js";
-import { ContentSchema, DeviceSchema, AccessDeviceSchema, type AccessDevice, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
+import { ContextOriginsRequestSchema, ContextOriginsResponseSchema, type ContextOrigin, ContentSchema, DeviceSchema, AccessDeviceSchema, type AccessDevice, type Content, type Device, type Id, type AgentKeyInfo } from "@mdc/contracts";
 import type { FirebaseApp } from "firebase/app";
 import {
   collection,
@@ -181,6 +181,11 @@ export class FirebaseCloud {
     return id ? query(liveDocumentQuery(contexts, id), ...this.#scope()) : query(contexts, where("deleting", "==", false), ...this.#scope());
   }
   #markers(name: "deletedContexts" | "deletedItems") { this.#current(); return query(collection(this.#firestore, `users/${this.uid}/${name}`), ...this.#scope()); }
+  async getContextOrigins(contextIds: Id[]): Promise<ContextOrigin[]> {
+    const body = ContextOriginsRequestSchema.parse({ contextIds });
+    const response = await this.#api("/api/context-origins", "POST", body);
+    return ContextOriginsResponseSchema.parse(await response.json()).records;
+  }
   async refreshDevice(): Promise<AccessDevice> { return AccessDeviceSchema.parse(await (await this.#api("/api/device", "GET")).json()); }
   async renameDevice(name: string): Promise<AccessDevice> { return AccessDeviceSchema.parse(await (await this.#api("/api/device", "PATCH", { name })).json()); }
   subscribeDevice(emit: (device: AccessDevice) => void, fail: (error: Error) => void): Unsubscribe {

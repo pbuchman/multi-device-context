@@ -14,19 +14,19 @@ agent and receive the result in the same conversation.
 > synthetic fixture. Every account, message, file, device, and illustration is
 > fictional demo data.
 
-## Download v0.7.0
+## Download v0.7.1
 
 | Platform | Direct download | Requirements and signing |
 | --- | --- | --- |
-| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/Multi-Device-Context-0.7.0-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
-| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/Multi-Device-Context-0.7.0-win-x64.exe) | Windows x64. Unsigned. |
-| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/Multi-Device-Context-0.7.0-android-v22-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
+| macOS | [Download DMG](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.1/Multi-Device-Context-0.7.1-mac-arm64.dmg) | Apple Silicon, macOS 13+. Ad-hoc signed; not notarized. |
+| Windows | [Download EXE](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.1/Multi-Device-Context-0.7.1-win-x64.exe) | Windows x64. Unsigned. |
+| Android | [Download APK](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.1/Multi-Device-Context-0.7.1-android-v23-release.apk) | Android 8/API 26+. External APK, privately signed with the existing release key. |
 
 Review the [installation guide](docs/installation.md) before opening an unsigned
 or non-notarized desktop build. Android setup and device support are covered in
 the [Android guide](docs/android.md). Published checksums are available in
-[SHA256SUMS](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.0/SHA256SUMS),
-and every asset is listed on the [v0.7.0 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.7.0).
+[SHA256SUMS](https://github.com/pbuchman/multi-device-context/releases/download/v0.7.1/SHA256SUMS),
+and every asset is listed on the [v0.7.1 release page](https://github.com/pbuchman/multi-device-context/releases/tag/v0.7.1).
 
 Publishing the source and installers does not grant access to the maintainer's
 hosted deployment. Hosted access remains subject to its authentication and

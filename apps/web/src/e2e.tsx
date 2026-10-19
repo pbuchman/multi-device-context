@@ -3,13 +3,14 @@ import { AccessPanel } from "./AccessPage.js";
 import { AccessClient } from "./access-client.js";
 import { DurableOutbox } from "./outbox.js";
 import { AccountProfileStore, ProfileLoadError } from "./account-profile.js";
-import type { Content, Id } from "@mdc/contracts";
+import type { ContextOrigin, Content, Id } from "@mdc/contracts";
 import { createRoot } from "react-dom/client";
 
 import { ContextWorkspace, type WorkspaceServices } from "./App.js";
 import type { CloudSnapshot } from "./cloud.js";
 import type { ContextRecord, ItemRecord } from "./model.js";
 
+const deviceColors = new URLSearchParams(window.location.search).has("deviceColors");
 const deviceNames = new URLSearchParams(window.location.search).has("deviceNames");
 const fixtureRequest = async (path: string, init?: RequestInit) => {
  const response = await fetch(`/__e2e/api${path}`, init);
@@ -41,6 +42,20 @@ let contexts: ContextRecord[] = showcase ? [
   { id: ids.notes, title: "Meeting notes", createdAt: now - 800_000, updatedAt: now - 480_000, syncState: "synced" },
 ];
 if (pins) contexts = contexts.map((context, index) => ({ ...context, title: index === 1 ? "Pinned chat with a very long title to inspect the narrow sidebar" : context.title, pinnedAt: index === 1 ? now - 10_000 : null }));
+const fixtureOrigins: ContextOrigin[] = [
+  { ...dell, colorIndex: 0 }, { ...mac, colorIndex: 1 }, { ...browser, colorIndex: 2 },
+];
+if (deviceColors) contexts = contexts.map((context, index) => ({ ...context,
+  ...(index < 4 ? { originDeviceId: [dell.id, mac.id, browser.id, dell.id][index] } : {}),
+}));
+let originFailure = false;
+let originRequests = 0;
+Object.assign(window, { mdcOriginTest: {
+  records() { return contexts; },
+  requests() { return originRequests; },
+  rename(id: string, name: string) { const origin = fixtureOrigins.find(origin => origin.id === id); if (origin) origin.name = name; },
+  failNext() { originFailure = true; },
+} });
 let pinGate = Promise.resolve();
 let finishPin: (() => void) | undefined;
 let failNextPin = false;
@@ -169,6 +184,12 @@ const services: WorkspaceServices = {
     async openAccessPanel() { window.open("/e2e.html?deviceNames&access", "_blank", "noopener,noreferrer"); },
   } : {}),
   cloud: {
+    ...(deviceColors ? { async getContextOrigins(contextIds: Id[]) {
+      originRequests += 1;
+      if (originFailure) { originFailure = false; throw new Error("Synthetic metadata failure"); }
+      const sources = new Set(contexts.filter(context => contextIds.includes(context.id)).map(context => context.originDeviceId));
+      return fixtureOrigins.filter(origin => sources.has(origin.id)).map(origin => ({ ...origin }));
+    } } : {}),
     async refreshContexts() { await refreshGate; return { records: contexts, fromCache: false, hasPendingWrites: false }; },
     async refreshDeletedContexts() { return []; },
     async refreshDeletedItems() { return []; },

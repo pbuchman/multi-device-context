@@ -20,9 +20,14 @@ CI debug APKs use synthetic configuration and a generic test key; they are not
 installation or upgrade artifacts for personal devices. Device-specific coverage
 that remains necessary is listed under [Device support boundaries](#device-support-boundaries).
 
-Version 0.7.0 adds account-wide pins for saved chats and a pinned-only filter.
-Local Drafts become pinnable after saving online. Physical Android installation,
-update and radio behavior remain separate acceptance checks; see the
+Version 0.7.1 adds subtle pastel saved-chat rows based on the original source
+device, with automatic account-stable colors for light and dark themes. Unknown
+origins stay neutral. The origin name appears on hover or focus of the row's
+options button and in the opened context options for touch access; no extra
+labels appear at rest and there are no manual color settings. Account-wide pins
+from 0.7.0 remain included; local Drafts become pinnable after saving online.
+Source and CI checks remain separate from physical Android installation,
+update and radio acceptance; see the
 [Preview update procedure](updates.md).
 
 ## Build tools
@@ -78,12 +83,12 @@ update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
 increase it for each update. It is not automatically incremented. Keep the
-application ID and signing key unchanged. Version 0.7.0 uses code 22, above official
-0.6.4/code 21. Earlier compatible signed codes 15–20 also remain eligible
+application ID and signing key unchanged. Version 0.7.1 uses code 23, above official
+0.7.0/code 22. Earlier compatible signed codes 15–21 also remain eligible
 for an in-place upgrade with the same key; do not reuse a published code.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=22
+export MDC_ANDROID_VERSION_CODE=23
 pnpm --filter @mdc/mobile android:release
 ```
 
