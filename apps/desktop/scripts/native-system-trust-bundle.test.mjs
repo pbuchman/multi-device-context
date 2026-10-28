@@ -74,3 +74,8 @@ test("accepts only the owned local phase-controller arguments", () => {
     /loopback HTTPS/u,
   );
 });
+
+test("binds the acceptance runtime expectation to the desktop manifest's exact Electron pin", async () => {
+  const metadata = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(harness.expectedElectronVersion, metadata.devDependencies.electron);
+});
