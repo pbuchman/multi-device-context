@@ -1,6 +1,6 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { diagnostic } from "./diagnostics.js";
-import { IoWatchdog, type IoOperation } from "./io-watchdog.js";
+import { IoWatchdog, type IoOperation, type DependencyGuard } from "./io-watchdog.js";
 import { assertDeviceContext, assertDeviceDeletion, type DeviceIdentity } from "./device-access.js";
 import type { Auth } from "firebase-admin/auth";
 import type { Firestore, Transaction } from "firebase-admin/firestore";
@@ -176,6 +176,7 @@ export class FirebaseBackend implements Backend {
     }
   }
 
+  get dependencyGuard(): DependencyGuard { return this.io; }
   isFatal() { return this.io.fatal; }
   isUnavailable() { return this.io.fatal || this.cleanupFailure !== undefined; }
 

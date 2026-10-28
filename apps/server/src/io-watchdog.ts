@@ -1,6 +1,8 @@
 import { recoveryDiagnostic } from "./diagnostics.js";
 
-export type IoOperation = "readiness-firestore" | "readiness-storage" | "deletion-firestore" | "deletion-storage" | "cleanup-firestore";
+export type IoOperation = "readiness-firestore" | "readiness-storage" | "deletion-firestore" | "deletion-storage" | "cleanup-firestore"
+  | "device-auth-token" | "device-auth-firestore" | "agent-auth-firestore-read" | "agent-auth-firestore-write";
+export type DependencyGuard = Pick<IoWatchdog, "run">;
 export class DependencyUnavailable extends Error {
   readonly statusCode = 503;
   constructor() { super("Dependency unavailable"); }

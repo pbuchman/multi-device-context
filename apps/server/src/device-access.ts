@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { AccessDeviceSchema, DeviceEnrollmentSchema, DeviceRenameSchema, IdSchema, type AccessDevice } from "@mdc/contracts";
 import type { Auth } from "firebase-admin/auth";
 import { Timestamp, type Firestore, type Transaction } from "firebase-admin/firestore";
+import { DependencyUnavailable, IoWatchdog, type DependencyGuard } from "./io-watchdog.js";
 
 export class DeviceUnauthorized extends Error { statusCode = 401; }
 export class DeviceForbidden extends Error { statusCode = 403; }
@@ -53,7 +54,7 @@ export async function assertFullDevice(db: Firestore, identity: DeviceIdentity, 
 }
 
 export class DeviceAccessStore implements DeviceAccessPort {
-  constructor(readonly db: Firestore, private readonly auth: Auth) {}
+  constructor(readonly db: Firestore, private readonly auth: Auth, private readonly io: DependencyGuard = new IoWatchdog()) {}
   async enroll(uid: string, input: { name: string; platform: "browser" | "desktop" | "android" }) {
     const parsed = DeviceEnrollmentSchema.parse(input);
     const id = randomUUID(), credential = randomBytes(32).toString("base64url"), now = Timestamp.now();
@@ -74,11 +75,15 @@ export class DeviceAccessStore implements DeviceAccessPort {
   }
   async authenticate(token: string): Promise<DevicePrincipal> {
     try {
-      const claims = await this.auth.verifyIdToken(token);
+      const claims = await this.io.run("device-auth-token", () => this.auth.verifyIdToken(token));
       const id = IdSchema.parse(claims.mdcDeviceId);
-      const device = accessDevice(id, (await this.db.doc(`users/${claims.uid}/devices/${id}`).get()).data());
+      const snapshot = await this.io.run("device-auth-firestore", () => this.db.doc(`users/${claims.uid}/devices/${id}`).get());
+      const device = accessDevice(id, snapshot.data());
       return { uid: claims.uid, device };
-    } catch { throw new DeviceUnauthorized(); }
+    } catch (error) {
+      if (error instanceof DependencyUnavailable) throw error;
+      throw new DeviceUnauthorized();
+    }
   }
   async rename(identity: DeviceIdentity, input: { name: string }): Promise<AccessDevice> {
     const { name } = DeviceRenameSchema.parse(input);

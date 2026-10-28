@@ -41,7 +41,7 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env, lifecycl
     publicConfig: config.publicConfig,
     verifier: createAuthVerifier(config.publicConfig),
     backend,
-    devices: new DeviceAccessStore(getFirestore(adminApp), getAuth(adminApp)),
+    devices: new DeviceAccessStore(getFirestore(adminApp), getAuth(adminApp), backend.dependencyGuard),
     contextOrigins: new ContextOriginsStore(getFirestore(adminApp)),
     access: new FirestoreAccessAdministration(getFirestore(adminApp), { origin: config.publicConfig.appOrigin }),
     attachments: new AttachmentStore(getFirestore(adminApp), bucket, backend),

@@ -1,5 +1,6 @@
 import type { SettingsPort } from "./settings.js";
 import { WindowLimit, Readiness } from "./limits.js";
+import { DependencyUnavailable, type DependencyGuard } from "./io-watchdog.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -26,6 +27,7 @@ export interface Backend {
   deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void>;
   deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity, deleteEmptyContext?: boolean): Promise<void>;
   checkReady(): Promise<void>;
+  readonly dependencyGuard?: DependencyGuard;
   isFatal?(): boolean;
   isUnavailable?(): boolean;
   close(): Promise<void>;
@@ -120,7 +122,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     const token = /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1];
     if (!token || !options.devices) return undefined;
     let principal: DevicePrincipal;
-    try { principal = await options.devices.authenticate(token); } catch { return undefined; }
+    try { principal = await options.devices.authenticate(token); }
+    catch (error) { if (error instanceof DependencyUnavailable) throw error; return undefined; }
     allowOwner(request, principal.uid);
     return principal;
   };
@@ -179,9 +182,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       typeof error === "object" && error !== null && "statusCode" in error
         ? (error as { statusCode?: unknown }).statusCode
         : undefined;
-    const status = error instanceof BackendNotFoundError ? 404 : error instanceof BackendConflictError ? 409
+    const status = error instanceof DependencyUnavailable ? 503 : error instanceof BackendNotFoundError ? 404 : error instanceof BackendConflictError ? 409
       : typeof candidate === "number" && candidate >= 400 && candidate < 500 ? candidate : 500;
     const labels: Record<number, string> = {
+      503: "Service Unavailable",
       400: "Bad Request",
       401: "Unauthorized",
       403: "Forbidden",
