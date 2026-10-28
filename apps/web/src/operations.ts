@@ -25,7 +25,7 @@ export class ContextOperations {
       // so a fresh intent is not left looking indefinitely in flight offline.
       for (const deletion of await this.outbox.deletions()) {
         if (deletion.paused || deletion.nextAttemptAt > Date.now()) continue;
-        await this.outbox.failDeletion(deletion, error instanceof PublishFailure && !error.retryable, error instanceof PublishFailure ? error.retryAfterMs : 0);
+        await this.outbox.failDeletion(deletion, error instanceof PublishFailure && !error.retryable, error instanceof PublishFailure ? error.retryAfterMs : 0, error);
       }
       throw error;
     }
@@ -36,7 +36,7 @@ export class ContextOperations {
         else await this.cloud.deleteContext(deletion.contextId);
         await this.outbox.remove(deletion.key);
       } catch (error) {
-        await this.outbox.failDeletion(deletion, error instanceof PublishFailure && !error.retryable, error instanceof PublishFailure ? error.retryAfterMs : 0);
+        await this.outbox.failDeletion(deletion, error instanceof PublishFailure && !error.retryable, error instanceof PublishFailure ? error.retryAfterMs : 0, error);
       }
     }
   }

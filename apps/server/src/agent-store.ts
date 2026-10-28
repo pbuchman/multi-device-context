@@ -5,6 +5,7 @@ import type { Storage } from "firebase-admin/storage";
 import { type AgentItemInput, type AgentKeyInfo, type Device, type UpdateContext, DeviceSchema, IdSchema, attachmentPath, comparePinnedContexts } from "@mdc/contracts";
 import type { Backend } from "./server.js";
 import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
+import { DependencyUnavailable } from "./io-watchdog.js";
 
 type Bucket = ReturnType<Storage["bucket"]>;
 const agentDevice = { id: "00000000-0000-4000-8000-000000000002", name: "Agent" };
@@ -88,18 +89,21 @@ export class AgentStore extends AttachmentStore {
       if (doc.data()?.uid === uid) tx.delete(ref);
     });
   }
-  async authenticate(token: string): Promise<{ uid: string; keyId: string } | undefined> {
+  async authenticate(token: string, guardDeletion = false): Promise<{ uid: string; keyId: string } | undefined> {
     const parsed = parseAgentToken(token);
     if (!parsed) return undefined;
+    const io = guardDeletion ? this.backend.dependencyGuard : undefined;
+    if (guardDeletion && !io) throw new DependencyUnavailable();
     const ref = this.db.doc(`agentKeys/${parsed.id}`);
-    const doc = await ref.get();
+    const doc = await (io ? io.run("agent-auth-firestore-read", () => ref.get()) : ref.get());
     const data = doc.data();
     if (!data || typeof data.digest !== "string") return undefined;
     const expected = Buffer.from(data.digest, "hex");
     if (expected.length !== parsed.digest.length || !timingSafeEqual(expected, parsed.digest)) return undefined;
     if (!data.lastUsedAt || Date.now() - data.lastUsedAt > 60_000) {
       // update cannot resurrect a revoked key; a racing revocation rejects this request.
-      await ref.update({ lastUsedAt: Date.now() });
+      const update = () => ref.update({ lastUsedAt: Date.now() });
+      await (io ? io.run("agent-auth-firestore-write", update) : update());
     }
     return { uid: data.uid as string, keyId: parsed.id };
   }

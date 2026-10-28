@@ -19,6 +19,7 @@ import {
   nodeErrorEvidence,
   normalizeThumbprint,
   parseOutputArgument,
+  pinnedElectronVersion,
   sanitizedFailure,
 } from "./native-system-trust-helpers.mjs";
 
@@ -27,6 +28,9 @@ const FETCH_DEADLINE_MS = 10_000;
 const ELECTRON_DEADLINE_MS = 45_000;
 const BUILD_DEADLINE_MS = 30_000;
 const AUTHORIZATION = "Bearer native-system-trust-fixture";
+export const expectedElectronVersion = pinnedElectronVersion(
+  JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")),
+);
 
 function withDeadline(promise, deadlineMs, description, onDeadline) {
   let timer;
@@ -510,7 +514,7 @@ async function runElectronPhaseController(arguments_) {
     }
     const output = evaluation.result?.value;
     assert(output && typeof output === "object", "Packaged Electron probe returned no result");
-    assert.equal(output.runtime.electronVersion, "44.5.1", "Packaged acceptance runtime did not use Electron 44.5.1");
+    assert.equal(output.runtime.electronVersion, expectedElectronVersion, `Packaged acceptance runtime did not use pinned Electron ${expectedElectronVersion}`);
     assert.equal(output.runtime.packagedApplication, true, "Acceptance probe did not run inside a packaged application");
     assert.equal(
       resolve(output.runtime.executablePath).toLocaleLowerCase("en-US"),
@@ -565,7 +569,7 @@ async function launchElectronPhase({ electronPath, bundlePath, fixtureRoot, name
   const output = JSON.parse(await readFile(resultPath, "utf8"));
   assert.equal(typeof output.result?.ok, "boolean", `Electron ${name} phase did not return a result`);
   assert.deepEqual(output.runtime, {
-    electronVersion: "44.5.1",
+    electronVersion: expectedElectronVersion,
     packagedExecutableOwned: true,
     packagedApplication: true,
     userDataOwned: true,
@@ -637,7 +641,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
   try {
     const require = createRequire(import.meta.url);
     const electronMetadata = JSON.parse(await readFile(require.resolve("electron/package.json"), "utf8"));
-    assert.equal(electronMetadata.version, "44.5.1", "The acceptance test requires pinned Electron 44.5.1");
+    assert.equal(electronMetadata.version, expectedElectronVersion, `The acceptance test requires pinned Electron ${expectedElectronVersion}`);
     report.electronVersion = electronMetadata.version;
     const electronPath = packagedElectronExecutable(desktopDirectory);
     const archivePath = join(dirname(electronPath), "resources", "app.asar");
@@ -656,7 +660,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
       },
       phaseProfiles: "fresh owned fixture directory per phase",
     };
-    await checkpoint("Selected the packaged Electron 44.5.1 runtime and recorded its executable and ASAR fingerprints");
+    await checkpoint(`Selected the packaged Electron ${expectedElectronVersion} runtime and recorded its executable and ASAR fingerprints`);
 
     const openSsl = await findOpenSsl();
     certificate = await generateCertificates(openSsl, fixtureRoot);

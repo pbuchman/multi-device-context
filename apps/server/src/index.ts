@@ -17,8 +17,10 @@ import { ContextOriginsStore } from "./context-origins.js";
 import { FirebaseBackend } from "./firebase.js";
 import { AccountSettings } from "./settings.js";
 import { TitleWorker } from "./titles.js";
+import { RecoveryLifecycle } from "./lifecycle.js";
+import { DependencyUnavailable, type IoOperation } from "./io-watchdog.js";
 
-export async function startServer(env: NodeJS.ProcessEnv = process.env) {
+export async function startServer(env: NodeJS.ProcessEnv = process.env, lifecycle?: RecoveryLifecycle) {
   const config = readServerConfig(env);
   const adminApp = initializeApp({
     credential: applicationDefault(),
@@ -31,6 +33,7 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
     bucket,
     auth: getAuth(adminApp),
     dispose: () => deleteApp(adminApp),
+    onFatal: (_operation: IoOperation) => lifecycle?.request("io-timeout"),
   });
   const settings = new AccountSettings(getFirestore(adminApp), env.MDC_AI_EXISTING_OWNER_UID);
   const server = buildServer({
@@ -38,12 +41,16 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
     publicConfig: config.publicConfig,
     verifier: createAuthVerifier(config.publicConfig),
     backend,
-    devices: new DeviceAccessStore(getFirestore(adminApp), getAuth(adminApp)),
+    devices: new DeviceAccessStore(getFirestore(adminApp), getAuth(adminApp), backend.dependencyGuard),
     contextOrigins: new ContextOriginsStore(getFirestore(adminApp)),
     access: new FirestoreAccessAdministration(getFirestore(adminApp), { origin: config.publicConfig.appOrigin }),
     attachments: new AttachmentStore(getFirestore(adminApp), bucket, backend),
     webDist: config.webDist,
     agents: new AgentStore(getFirestore(adminApp), bucket, backend),
+  });
+  lifecycle?.attach({
+    close: () => server.close(),
+    forceClose: () => { server.server.closeAllConnections(); server.server.closeIdleConnections(); },
   });
   const titles = new TitleWorker(getFirestore(adminApp), env.MDC_OPENROUTER_API_KEY, env.MDC_TITLE_MODEL, settings, async ({ uid, contextId, itemId, content }) => {
     const [bytes] = await bucket.file(attachmentPath(uid, contextId, itemId)).download();
@@ -53,34 +60,27 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
   server.addHook("preClose", async () => { await titles.close(); });
   try {
     await backend.startCleanup();
+    if (backend.isFatal() || lifecycle?.stopping) throw new DependencyUnavailable();
     titles.start();
     await server.listen({ host: config.host, port: config.port });
     return server;
   } catch (error) {
-    await server.close();
+    // The boundary still forces exit if Fastify/Firebase disposal never settles.
+    if (lifecycle) lifecycle.request("startup-failed");
+    else await server.close();
     throw error;
   }
 }
 
 async function main(): Promise<void> {
-  let server: Awaited<ReturnType<typeof startServer>> | undefined;
+  const lifecycle = new RecoveryLifecycle();
+  process.once("SIGINT", () => lifecycle.request("operator-signal"));
+  process.once("SIGTERM", () => lifecycle.request("operator-signal"));
   try {
-    server = await startServer();
+    await startServer(process.env, lifecycle);
   } catch {
-    process.stderr.write("Server startup failed\n");
-    process.exitCode = 1;
-    return;
+    lifecycle.request("startup-failed");
   }
-
-  const shutdown = async () => {
-    try {
-      await server?.close();
-    } catch {
-      process.exitCode = 1;
-    }
-  };
-  process.once("SIGINT", () => void shutdown());
-  process.once("SIGTERM", () => void shutdown());
 }
 
 const entry = process.argv[1];

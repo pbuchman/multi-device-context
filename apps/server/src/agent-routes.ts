@@ -5,6 +5,7 @@ import { type AgentStore, type AgentContextListOptions, BadInputError } from "./
 import type { AuthVerifier } from "./auth.js";
 import type { Backend } from "./server.js";
 import { BackendConflictError, BackendNotFoundError } from "./backend-errors.js";
+import { DependencyUnavailable } from "./io-watchdog.js";
 
 export type AgentPort = Pick<AgentStore, "createKey" | "listKeys" | "revokeKey" | "authenticate" | "getContext" | "listContexts" | "listDevices" | "listItems" | "writeItem" | "updateContext" | "download" | "upload">;
 function bearer(request: FastifyRequest): string {
@@ -55,7 +56,7 @@ export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, veri
   void app.register(async api => {
     api.decorateRequest("ownerUid", "");
     api.addHook("onRequest", async (request, reply) => {
-      const identity = await store.authenticate(bearer(request));
+      const identity = await store.authenticate(bearer(request), request.method === "DELETE");
       if (!identity) return reply.code(401).send({ error: "Unauthorized" });
       allowOwner(request, identity.uid);
       (request as FastifyRequest & { ownerUid: string }).ownerUid = identity.uid;
@@ -63,8 +64,10 @@ export function registerAgentRoutes(app: FastifyInstance, store: AgentPort, veri
     });
     api.addContentTypeParser("application/octet-stream", (_request, payload, done) => done(null, payload));
     api.setErrorHandler((error, _request, reply) => {
-      const status = error instanceof BackendNotFoundError ? 404 : error instanceof BackendConflictError ? 409 : (error as { statusCode?: number }).statusCode ?? 500;
-      return reply.code(status).send({ error: status === 404 ? "Not Found" : status === 409 ? "Conflict" : status === 400 ? "Bad Request" : "Request Failed" });
+      const candidate = (error as { statusCode?: unknown }).statusCode;
+      const status = error instanceof DependencyUnavailable ? 503 : error instanceof BackendNotFoundError ? 404 : error instanceof BackendConflictError ? 409
+        : typeof candidate === "number" && candidate >= 400 && candidate < 500 ? candidate : 500;
+      return reply.code(status).send({ error: status === 404 ? "Not Found" : status === 409 ? "Conflict" : status === 400 ? "Bad Request" : status === 503 ? "Service Unavailable" : "Request Failed" });
     });
     const owner = (r: FastifyRequest) => (r as FastifyRequest & { ownerUid: string }).ownerUid;
     const base = "/api/agent/v1/contexts";

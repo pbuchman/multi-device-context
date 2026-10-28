@@ -6,7 +6,12 @@ import { subscribeLocal } from "./local-db.js";
 
 export function useNavigation(namespace: string, initialId?: Id) {
   const store = useMemo(() => new DraftStore(namespace), [namespace]);
-  const [issue, setIssue] = useState<string>();
+  const [issue, setIssueState] = useState<string>();
+  const mounted = useRef(false);
+  const generation = useRef(0);
+  const setIssue = useCallback((message?: string, owner = generation.current) => {
+    if (mounted.current && owner === generation.current) setIssueState(message);
+  }, []);
   const [state, setState] = useState(() => {
     const id = initialId ?? contextIdFromPath(location.pathname) ?? crypto.randomUUID();
     return { id, drafts: { [id]: { ...emptyDraft(), local: !initialId && !contextIdFromPath(location.pathname) } } as Record<string, Draft> };
@@ -15,7 +20,6 @@ export function useNavigation(namespace: string, initialId?: Id) {
   const chain = useRef<Promise<void>>(Promise.resolve());
   const busy = useRef(0);
   const failed = useRef<(() => Promise<unknown>)[]>([]);
-  const initialized = useRef(false);
   const revisionRef = useRef(0);
   const reloadSequence = useRef(0);
   const update = useCallback((fn: (s: typeof state) => typeof state) => {
@@ -25,30 +29,40 @@ export function useNavigation(namespace: string, initialId?: Id) {
     latest.current = next; setState(next);
   }, []);
   const reload = useCallback(async () => {
+    if (!mounted.current) return;
     const sequence = ++reloadSequence.current;
     const drafts = await store.list();
     const removed = await store.isRemoved(latest.current.id);
     // A completed write may already have started a newer reload. Its snapshot
     // must not be replaced by this older read after the write queue is idle.
-    if (sequence !== reloadSequence.current) return;
+    if (!mounted.current || sequence !== reloadSequence.current) return;
     if (!busy.current && removed) {
       const id = crypto.randomUUID(); update(() => ({ id, drafts: { ...drafts, [id]: emptyDraft() } })); history.replaceState({}, "", "/"); return;
     }
     if (!busy.current) update(s => ({ ...s, drafts: { ...(s.drafts[s.id] && !drafts[s.id] ? { [s.id]: s.drafts[s.id]! } : {}), ...drafts } }));
   }, [store, update]);
   const queue = useCallback((operation: () => Promise<unknown>) => {
+    const owner = generation.current;
     busy.current++;
-    chain.current = chain.current.then(operation).then(() => {}).catch(() => { failed.current.push(operation); setIssue("Your draft could not be saved locally. Keep this tab open and retry."); }).finally(async () => {
-      busy.current--; if (!busy.current) await reload().catch(() => setIssue("Could not restore local drafts"));
+    chain.current = chain.current.then(operation).then(() => {}).catch(() => { failed.current.push(operation); setIssue("Your draft could not be saved locally. Keep this tab open and retry.", owner); }).finally(async () => {
+      busy.current--; if (!busy.current && mounted.current && owner === generation.current) await reload().catch(() => setIssue("Could not restore local drafts", owner));
     });
-  }, [reload]);
+  }, [reload, setIssue]);
   useEffect(() => {
-    if (!initialized.current) { initialized.current = true; queue(async () => { await store.migrate(); }); }
-    return subscribeLocal(() => { if (!busy.current) void reload().catch(() => setIssue("Could not synchronize local drafts")); });
-  }, [store, queue, reload]);
-  const persist = useCallback((id: string, draft: Draft) => queue(async () => {
-    if (await store.save(id, draft)) setIssue("Concurrent changes were preserved in a Recovered draft.");
-  }), [store, queue]);
+    mounted.current = true;
+    const owner = generation.current;
+    // Each effect setup owns its reload, including StrictMode's replay. The
+    // migration is idempotent; accepted writes keep running after cleanup.
+    queue(() => store.migrate());
+    const unsubscribe = subscribeLocal(() => { if (!busy.current) void reload().catch(() => setIssue("Could not synchronize local drafts", owner)); });
+    return () => { mounted.current = false; generation.current++; reloadSequence.current++; unsubscribe(); };
+  }, [store, queue, reload, setIssue]);
+  const persist = useCallback((id: string, draft: Draft) => {
+    const owner = generation.current;
+    queue(async () => {
+      if (await store.save(id, draft)) setIssue("Concurrent changes were preserved in a Recovered draft.", owner);
+    });
+  }, [store, queue, setIssue]);
   const select = useCallback((id?: Id, replace = false) => {
     const nextId = id ?? crypto.randomUUID();
     update(s => ({ id: nextId, drafts: { ...s.drafts, [nextId]: s.drafts[nextId] ?? { ...emptyDraft(), local: !id } } }));

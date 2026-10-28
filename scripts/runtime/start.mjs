@@ -1,39 +1,44 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { supervise } from './supervisor.mjs';
 import { loadRuntime } from './package.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
-async function main() {
-  if (!process.env.MDC_BOOTSTRAP_FILE) throw new Error('MDC_BOOTSTRAP_FILE must point to private configuration');
-  const { environment } = await loadRuntime(process.env.MDC_BOOTSTRAP_FILE);
-  const server = join(root, 'apps/server/dist/index.js');
-  const webDist = join(root, 'apps/web/dist');
+export async function runRuntime({
+  bootstrapFile = process.env.MDC_BOOTSTRAP_FILE, load = loadRuntime,
+  applicationRoot = root, checkConfig = process.argv.includes('--check-config'),
+  supervisorOptions = {},
+} = {}) {
+  if (!bootstrapFile) throw new Error('MDC_BOOTSTRAP_FILE must point to private configuration');
+  const { environment } = await load(bootstrapFile);
+  const server = join(applicationRoot, 'apps/server/dist/index.js');
+  const webDist = join(applicationRoot, 'apps/web/dist');
   for (const file of [server, join(webDist, 'index.html')]) {
     if (!(await stat(file)).isFile()) throw new Error('Application build is incomplete');
   }
   environment.MDC_WEB_DIST = webDist;
-  if (process.argv.includes('--check-config')) {
+  if (checkConfig) {
     console.log('Private runtime configuration and application build verified');
     return;
   }
-  const child = spawn(process.execPath, [server], { cwd: root, env: environment, stdio: 'inherit' });
-  const terminate = () => child.kill('SIGTERM');
-  const interrupt = () => child.kill('SIGINT');
-  process.on('SIGTERM', terminate);
-  process.on('SIGINT', interrupt);
-  child.on('error', () => { console.error('Cannot start application process'); process.exitCode = 1; });
-  child.on('exit', code => {
-    process.removeListener('SIGTERM', terminate);
-    process.removeListener('SIGINT', interrupt);
-    process.exitCode = code ?? 1;
+  return supervise({
+    command: process.execPath, args: [server], cwd: applicationRoot,
+    environment, ...supervisorOptions,
   });
 }
 
-main().catch(error => {
+async function main() {
+  const code = await runRuntime();
+  if (code !== undefined) process.exitCode = code;
+}
+
+// PM2 fork mode imports its app with argv[1] still pointing at ProcessContainerFork.
+// Its explicit app path distinguishes this entrypoint from ordinary library imports.
+const entrypoints = [process.argv[1], process.env.pm_exec_path];
+if (entrypoints.some(entry => entry && import.meta.url === pathToFileURL(entry).href)) main().catch(error => {
   // Error objects from cloud clients may contain credentials; emit our bounded messages only.
   const safe = new Set([
     'MDC_BOOTSTRAP_FILE must point to private configuration', 'Invalid bootstrap configuration',

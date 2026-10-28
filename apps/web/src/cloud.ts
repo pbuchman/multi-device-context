@@ -56,10 +56,10 @@ export function cloudFailure(error: unknown): PublishFailure {
     .some((label) => code === label || code.endsWith(`/${label}`));
   if (rejected) {
     const authentication = code.includes("unauthenticated") || code.includes("unauthorized");
-    return new PublishFailure(authentication ? "Sign in again to continue sharing" : "This share needs your attention before retrying", false);
+    return new PublishFailure(authentication ? "Sign in again to continue sharing" : "This share needs your attention before retrying", false, 0, { category: authentication ? "auth" : "access" });
   }
   const message = error instanceof Error && error.message ? error.message : "Cloud service is temporarily unavailable";
-  return new PublishFailure(message, true);
+  return new PublishFailure(message, true, 0, { category: error instanceof TypeError || code.includes("network") ? "network" : "server" });
 }
 
 export async function publishQueuedShare(record: QueuedShare, port: CloudWritePort): Promise<void> {
@@ -353,11 +353,13 @@ export class FirebaseCloud {
   async revokeKey(id: string): Promise<void> { await this.#api(`/api/agent-keys/${id}`, "DELETE"); }
 
   async deleteContext(contextId: Id): Promise<void> {
-    await this.#api(`/api/contexts/${contextId}`, "DELETE");
+    const response = await this.#api(`/api/contexts/${contextId}`, "DELETE");
+    if (response.status !== 204) throw new PublishFailure("Deletion was not confirmed", false, 0, { category: "request", httpStatus: response.status });
   }
 
   async deleteItem(contextId: Id, itemId: Id, deleteEmptyContext = false): Promise<void> {
-    await this.#api(`/api/contexts/${contextId}/items/${itemId}`, "DELETE", deleteEmptyContext ? { deleteEmptyContext: true } : undefined);
+    const response = await this.#api(`/api/contexts/${contextId}/items/${itemId}`, "DELETE", deleteEmptyContext ? { deleteEmptyContext: true } : undefined);
+    if (response.status !== 204) throw new PublishFailure("Deletion was not confirmed", false, 0, { category: "request", httpStatus: response.status });
   }
 
   async attachmentBytes(contextId: Id, itemId: Id, content: Extract<Content, { kind: "attachment" }>): Promise<Uint8Array> {
@@ -372,15 +374,21 @@ export class FirebaseCloud {
 
   async #api(path: string, method: "GET" | "POST" | "DELETE" | "PATCH", body?: unknown): Promise<Response> {
     this.#current();
-    const token = await this.accessToken();
+    const token = await this.accessToken().catch(error => {
+      const failure = cloudFailure(error);
+      if (failure.category === "network") throw failure;
+      throw new PublishFailure("Sign in again to continue", false, 0, { category: "auth" });
+    });
     this.#current();
     const response = await fetch(apiUrl(path), {
       method,
       headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
-    });
+    }).catch(error => { throw cloudFailure(error); });
     this.#current();
-    if (!response.ok) throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "Cloud request failed", response.status >= 500 || response.status === 429, Math.min(3600, Math.max(0, Number(response.headers.get("retry-after")) || 0)) * 1000);
+    if (!response.ok) throw new PublishFailure(response.status === 401 ? "Sign in again to continue" : "Cloud request failed", response.status >= 500 || response.status === 429,
+      Math.min(3600, Math.max(0, Number(response.headers.get("retry-after")) || 0)) * 1000,
+      { category: response.status === 401 ? "auth" : response.status === 403 || response.status === 404 ? "access" : response.status >= 500 || response.status === 429 ? "server" : "request", httpStatus: response.status });
     return response;
   }
 

@@ -21,7 +21,7 @@ import { SessionManager, type ActiveSession, type SessionProfile } from "./auth.
 import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
 import { drainNativeClipboardQueue, type NativeQueueStore } from "./desktop.js";
 import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
-import { DurableOutbox, type QueuedShare } from "./outbox.js";
+import { DurableOutbox, type FailureCategory, type QueuedShare } from "./outbox.js";
 import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
 import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, displayTitle, formatFileSize } from "./workspace-view.js";
 import { contextSourceLabel, useContextOrigins } from "./context-origins.js";
@@ -63,7 +63,7 @@ export type WorkspaceOutbox = {
   removeContext?(id: Id): Promise<void>;
   removeItem?(contextId: Id, itemId: Id): Promise<void>;
   cancelled?(): Promise<{ contexts: Id[]; items: Id[] }>;
-  deletions?(): Promise<{ contextId: Id; itemId?: Id; attempts?: number; paused?: boolean; nextAttemptAt?: number }[]>;
+  deletions?(): Promise<{ contextId: Id; itemId?: Id; attempts?: number; paused?: boolean; nextAttemptAt?: number; errorCategory?: FailureCategory; httpStatus?: number }[]>;
   enqueueBatch?(drafts: ShareDraft[]): Promise<void>;
   enqueue(draft: ShareDraft): Promise<void>;
   count(): Promise<number>;
@@ -705,7 +705,15 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const failedDeletion = deletions.some(record => record.paused || ((record.attempts ?? 0) > 0 && record.nextAttemptAt !== 0));
     setDeletionCount(deletions.length);
     setDeletionFailed(failedDeletion);
-    if (failedDeletion) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+    if (failedDeletion) {
+      const failure = deletions.find(record => record.paused || ((record.attempts ?? 0) > 0 && record.nextAttemptAt !== 0));
+      const detail = failure?.errorCategory === "network" ? "Reconnect to continue, or Retry."
+        : failure?.errorCategory === "auth" ? "Sign in again, then Retry."
+        : failure?.errorCategory === "access" ? "Access was denied. Check this device's access before Retry."
+        : failure?.errorCategory === "server" ? "The server could not finish. Retry shortly."
+        : "Retry to request confirmation.";
+      setError(`Deletion is not confirmed yet. ${detail}`);
+    }
     else if (pendingDeletionCount.current) setError(current => current?.startsWith("Deletion is not confirmed") ? undefined : current);
     pendingDeletionCount.current = deletions.length;
     const cancelled = await services.outbox.cancelled?.();
@@ -1064,7 +1072,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (navigation.selectedRef.current.id === context.id) setSelectedId(undefined);
       if (complete) showToast("Context permanently deleted");
       await refreshQueue();
-    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry to request confirmation."); }
     finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const deleteItem = async (item: ItemRecord) => {
@@ -1084,14 +1092,14 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       }
       if (complete) showToast("Message permanently deleted");
       await refreshQueue();
-    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry to request confirmation."); }
     finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const retry = async () => {
     setError(undefined); navigation.retry();
     nativeReconcile.current?.();
     try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await refreshQueue(); await services.drain(); await refreshQueue(); }
-    catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
+    catch { setError("Operation is not confirmed yet. Retry to request confirmation."); }
   };
 
   const settleLocalInput = async () => {
@@ -1359,13 +1367,14 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   updateDeviceName(verifiedPolicy);
   const initialContexts = await cloud.refreshContexts();
   await applyLocalAccess(outbox.namespace, session.device, initialContexts.records.filter(context => context.originDeviceId === device.id).map(context => context.id));
+  await outbox.recoverLegacyDeletions();
   if (session.device.mode === "own") {
     localStorage.removeItem(`mdc-confirmed:${outbox.namespace}`);
     localStorage.removeItem(`mdc-read:${session.uid}:${device.id}`);
   }
   const operations = new ContextOperations(outbox, {
     deletionMarkers: async () => { await checkAccess(); return cloud.deletionMarkers(); },
-    publish: record => cloud.publish(record), deleteContext: id => cloud.deleteContext(id), deleteItem: (id, item) => cloud.deleteItem(id, item),
+    publish: record => cloud.publish(record), deleteContext: id => cloud.deleteContext(id), deleteItem: (id, item, deleteEmptyContext) => cloud.deleteItem(id, item, deleteEmptyContext),
   });
   const runner = operations.runner;
   runner.stop();
@@ -1455,7 +1464,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
         else window.open(`${session.config.appOrigin}/access?device=${encodeURIComponent(device.id)}`, "_blank", "noopener,noreferrer");
       },
       settings: cloud,
-      remove: (contextId, itemId) => operations.remove(contextId, itemId),
+      remove: (contextId, itemId, deleteEmptyContext) => operations.remove(contextId, itemId, deleteEmptyContext),
       isDesktop: session.platform.kind === "desktop",
       platformKind: session.platform.kind,
       ...(session.platform.dictation ? { dictation: session.platform.dictation } : {}),
