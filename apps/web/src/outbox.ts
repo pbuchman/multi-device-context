@@ -345,9 +345,11 @@ export class DurableOutbox {
     const transaction = database.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     for (const record of records) {
-      if ((!key || record.key === key) && await requestResult(store.get(record.key))) {
-        store.put({ ...record, status: "pending", paused: false, nextAttemptAt: 0, lastError: undefined });
-      }
+      if (key && record.key !== key) continue;
+      // Startup recovery may have committed since the initial selection.
+      // Preserve its version and metadata, and never restore a removed row.
+      const current = await requestResult(store.get(record.key)) as StoredAction | Deletion | undefined;
+      if (current) store.put({ ...current, status: "pending", paused: false, nextAttemptAt: 0, lastError: undefined });
     }
     await transactionDone(transaction);
   }

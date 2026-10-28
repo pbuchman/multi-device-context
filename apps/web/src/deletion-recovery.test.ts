@@ -48,3 +48,19 @@ it("tags fresh deletion records so a permanent failure stays paused after startu
   await box.failDeletion(fresh!, true, 0, new PublishFailure("private body", false, 0, { category: "auth", httpStatus: 401 }));
   expect(await box.recoverLegacyDeletions()).toBe(0); expect(await box.deletions()).toEqual([expect.objectContaining({ paused: true, errorCategory: "auth", httpStatus: 401 })]); box.close();
 });
+it.each([false, true])("preserves recovery committed by another tab during explicit Retry (single row=%s)", async single => {
+  const first = new DurableOutbox(account), second = new DurableOutbox(account);
+  await applyLocalAccess(first.namespace, { id: deviceId, mode: "all", version: 1 }, []);
+  const legacy = await put(first.namespace, contextId, { errorCategory: "access", httpStatus: 404 });
+  // Open both connections first so retry's initial read and recovery's write
+  // overlap on the same legacy row, as they can during startup in two tabs.
+  await first.deletions(); await second.deletions();
+  const [, recovered] = await Promise.all([first.retry(single ? legacy.key : undefined), second.recoverLegacyDeletions()]);
+  expect(recovered).toBe(1);
+  const [retried] = await first.deletions();
+  expect(retried).toMatchObject({ recoveryVersion: 1, paused: false, nextAttemptAt: 0, errorCategory: "access", httpStatus: 404 });
+  await first.failDeletion(retried!, true, 0, new PublishFailure("synthetic denial", false, 0, { category: "access", httpStatus: 404 }));
+  expect(await second.recoverLegacyDeletions()).toBe(0);
+  expect(await first.deletions()).toEqual([expect.objectContaining({ recoveryVersion: 1, paused: true, errorCategory: "access", httpStatus: 404 })]);
+  first.close(); second.close();
+});
