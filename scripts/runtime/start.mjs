@@ -35,7 +35,10 @@ async function main() {
   if (code !== undefined) process.exitCode = code;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
+// PM2 fork mode imports its app with argv[1] still pointing at ProcessContainerFork.
+// Its explicit app path distinguishes this entrypoint from ordinary library imports.
+const entrypoints = [process.argv[1], process.env.pm_exec_path];
+if (entrypoints.some(entry => entry && import.meta.url === pathToFileURL(entry).href)) main().catch(error => {
   // Error objects from cloud clients may contain credentials; emit our bounded messages only.
   const safe = new Set([
     'MDC_BOOTSTRAP_FILE must point to private configuration', 'Invalid bootstrap configuration',
