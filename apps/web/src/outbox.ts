@@ -27,7 +27,9 @@ type DictationMarker = { key: string; kind: "dictation"; namespace: string; sess
 
 type StoredAction = QueuedShare & { kind: "action" };
 type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
-export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
+export type FailureCategory = "network" | "auth" | "access" | "server" | "request";
+export const DELETION_RECOVERY_VERSION = 1;
+export type Deletion = { recoveryVersion?: number; errorCategory?: FailureCategory; httpStatus?: number; key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
 type ItemMarker = { key: string; kind: "deleted-item"; namespace: string; contextId: Id; itemId: Id };
 type StoredRecord = StoredAction | NativeMarker | DictationMarker | DeletedMarker | ItemMarker | Deletion;
 
@@ -249,7 +251,7 @@ export class DurableOutbox {
       store.put({ key: `deleted:${this.namespace}:${contextId}`, kind: "deleted", namespace: this.namespace, contextId } satisfies DeletedMarker);
       for (const record of records) if (record.kind === "deletion" && record.contextId === contextId && record.itemId) store.delete(record.key);
     }
-    if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId, ...(deleteEmptyContext ? { deleteEmptyContext: true } : {}) } : {}), attempts: 0, nextAttemptAt: 0, paused: false } satisfies Deletion);
+    if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId, ...(deleteEmptyContext ? { deleteEmptyContext: true } : {}) } : {}), attempts: 0, nextAttemptAt: 0, paused: false, recoveryVersion: DELETION_RECOVERY_VERSION } satisfies Deletion);
     await complete; changed();
   }
   async cancelled(): Promise<{ contexts: Id[]; items: Id[] }> {
@@ -263,11 +265,34 @@ export class DurableOutbox {
     const policy = await transactionAccess(tx.objectStore(STORE_NAME), this.namespace);
     return records.filter((r): r is Deletion => r.kind === "deletion" && allowedByLocalPolicy(policy, r.contextId));
   }
-  async failDeletion(record: Deletion, paused: boolean, retryAfterMs = 0) {
-    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    if (await requestResult(store.get(record.key))) store.put({ ...record, paused, attempts: record.attempts + 1, nextAttemptAt: Date.now() + Math.max(retryAfterMs, Math.min(60_000, 1000 * 2 ** Math.min(record.attempts, 6))) });
-    await transactionDone(tx); changed();
+  /** The row version and resume commit atomically, including across open tabs. */
+  async recoverLegacyDeletions(): Promise<number> {
+    const db = await this.#db(), tx = db.transaction(STORE_NAME, "readwrite"), complete = transactionDone(tx);
+    const store = tx.objectStore(STORE_NAME), policy = await transactionAccess(store, this.namespace);
+    let recovered = 0;
+    if (policy) {
+      const records = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
+      for (const record of records) {
+        if (record.kind !== "deletion" || !record.paused || (record.recoveryVersion ?? 0) >= DELETION_RECOVERY_VERSION || !allowedByLocalPolicy(policy, record.contextId)) continue;
+        store.put({ ...record, recoveryVersion: DELETION_RECOVERY_VERSION, paused: false, nextAttemptAt: 0 });
+        recovered++;
+      }
+    }
+    await complete;
+    if (recovered) changed();
+    return recovered;
+  }
+  async failDeletion(record: Deletion, paused: boolean, retryAfterMs = 0, error?: unknown) {
+    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readwrite"), complete = transactionDone(tx);
+    const store = tx.objectStore(STORE_NAME), current = await requestResult(store.get(record.key)) as Deletion | undefined;
+    if (current) {
+      const category = error instanceof PublishFailure ? error.category : error instanceof TypeError ? "network" : "server";
+      const httpStatus = error instanceof PublishFailure ? error.httpStatus : undefined;
+      store.put({ ...current, paused, attempts: current.attempts + 1,
+        nextAttemptAt: Date.now() + Math.max(retryAfterMs, Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6))),
+        errorCategory: category, httpStatus });
+    }
+    await complete; changed();
   }
   async isCancelled(record: QueuedShare): Promise<boolean> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
@@ -343,8 +368,13 @@ export class DurableOutbox {
 }
 
 export class PublishFailure extends Error {
-  constructor(message: string, readonly retryable: boolean, readonly retryAfterMs = 0) {
+  readonly category: FailureCategory;
+  readonly httpStatus?: number;
+  constructor(message: string, readonly retryable: boolean, readonly retryAfterMs = 0,
+    metadata: { category?: FailureCategory; httpStatus?: number } = {}) {
     super(message);
+    this.category = ["network", "auth", "access", "server", "request"].includes(metadata.category ?? "") ? metadata.category! : retryable ? "server" : "request";
+    if (Number.isInteger(metadata.httpStatus) && metadata.httpStatus! >= 100 && metadata.httpStatus! <= 599) this.httpStatus = metadata.httpStatus!;
   }
 }
 

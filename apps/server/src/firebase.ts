@@ -1,6 +1,6 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { diagnostic } from "./diagnostics.js";
-import { assertDeviceContext, type DeviceIdentity } from "./device-access.js";
+import { assertDeviceContext, assertDeviceDeletion, type DeviceIdentity } from "./device-access.js";
 import type { Auth } from "firebase-admin/auth";
 import type { Firestore } from "firebase-admin/firestore";
 import type { Storage } from "firebase-admin/storage";
@@ -172,11 +172,15 @@ export class FirebaseBackend implements Backend {
     const reference = this.firestore.doc(itemPath(uid, contextId, itemId));
     const deletionMarker = this.firestore.doc(`users/${uid}/deletedItems/${contextId}_${itemId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
-      const [snapshot, parent, previousMarker] = await Promise.all([transaction.get(reference), transaction.get(this.firestore.doc(contextPath(uid, contextId))), transaction.get(deletionMarker)]);
-      const access = parent.data() ?? previousMarker.data();
-      if (device) await assertDeviceContext(this.firestore, device, access, transaction);
-      const originDeviceId = access?.originDeviceId;
-      transaction.set(deletionMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
+      const [snapshot, parent, previousMarker, parentMarker] = await Promise.all([
+        transaction.get(reference), transaction.get(this.firestore.doc(contextPath(uid, contextId))),
+        transaction.get(deletionMarker), transaction.get(this.firestore.doc(`users/${uid}/deletedContexts/${contextId}`)),
+      ]);
+      const evidence = [parent.data(), parentMarker.data(), previousMarker.data()];
+      const originDeviceId = device
+        ? await assertDeviceDeletion(this.firestore, uid, device, evidence, !snapshot.exists, transaction)
+        : evidence.find(record => record !== undefined)?.originDeviceId;
+      if (!previousMarker.exists) transaction.set(deletionMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
       if (!snapshot.exists) return false;
       const record = snapshot.data() as ItemRecord;
       if (record.deleting !== true) transaction.update(reference, { deleting: true });
@@ -212,17 +216,23 @@ export class FirebaseBackend implements Backend {
         transaction.get(contextMarker),
         transaction.get(parent.collection("items").where("deleting", "==", false).limit(2)),
       ]);
-      const access = context.data() ?? previousItemMarker.data();
-      if (device) await assertDeviceContext(this.firestore, device, access, transaction);
-      const originDeviceId = access?.originDeviceId;
-      transaction.set(itemMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
+      // A missing parent does not prove its subcollection is empty. In
+      // particular, an absent target must not authorize sweeping orphan items.
+      const descendants = !context.exists ? await transaction.get(parent.collection("items").limit(1)) : undefined;
+      const whollyAbsent = !target.exists && (!descendants || descendants.empty);
+      const evidence = [context.data(), previousContextMarker.data(), previousItemMarker.data()];
+      const originDeviceId = device
+        ? await assertDeviceDeletion(this.firestore, uid, device, evidence, whollyAbsent, transaction)
+        : evidence.find(record => record !== undefined)?.originDeviceId;
+      const marker = { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) };
+      if (!previousItemMarker.exists) transaction.set(itemMarker, marker);
       if (context.exists && context.data()?.deleting === true && previousContextMarker.exists) return "context" as const;
       const hasSibling = live.docs.some(entry => entry.id !== itemId);
-      if (context.exists && context.data()?.deleting === false && !hasSibling) {
-        transaction.set(contextMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
-        transaction.update(parent, { deleting: true });
+      if (!hasSibling && ((!context.exists && whollyAbsent) || context.data()?.deleting === false)) {
+        if (!previousContextMarker.exists) transaction.set(contextMarker, marker);
+        if (context.exists) transaction.update(parent, { deleting: true });
         if (target.exists && target.data()?.deleting !== true) transaction.update(item, { deleting: true });
-        return "context" as const;
+        return context.exists ? "context" as const : "missing" as const;
       }
       if (target.exists && target.data()?.deleting !== true) transaction.update(item, { deleting: true });
       return target.exists ? "item" as const : "missing" as const;
@@ -239,12 +249,13 @@ export class FirebaseBackend implements Backend {
     const deletionMarker = this.firestore.doc(`users/${uid}/deletedContexts/${contextId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
       const [snapshot, previousMarker] = await Promise.all([transaction.get(reference), transaction.get(deletionMarker)]);
-      const access = snapshot.data() ?? previousMarker.data();
-      if (device) await assertDeviceContext(this.firestore, device, access, transaction);
-      // Retain only the deleted UUID, so a disconnected client's original
-      // create cannot resurrect content after the cleanup removes this parent.
-      const originDeviceId = access?.originDeviceId;
-      transaction.set(deletionMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
+      const evidence = [snapshot.data(), previousMarker.data()];
+      const originDeviceId = device
+        ? await assertDeviceDeletion(this.firestore, uid, device, evidence, !snapshot.exists, transaction)
+        : evidence.find(record => record !== undefined)?.originDeviceId;
+      // The absent-parent read and tombstone commit conflict with concurrent creates.
+      // Retain existing provenance so retries cannot reassign a deleted context.
+      if (!previousMarker.exists) transaction.set(deletionMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
       if (!snapshot.exists) return false;
       const record = snapshot.data() as ContextRecord;
       if (record.deleting !== true) transaction.update(reference, { deleting: true });

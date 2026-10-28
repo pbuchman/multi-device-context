@@ -229,6 +229,60 @@ describe("FirebaseBackend device authorization", () => {
     expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true, originDeviceId: deviceId });
     await expect(backend.deleteContext(UID, CONTEXT_ID, device)).resolves.toBeUndefined();
   });
+  it.each(["own", "all"] as const)("commits absent context deletion for an active %s device and retains identity provenance on retry", async mode => {
+    const { backend, firestore } = fixture();
+    firestore.documents.set(`users/${UID}/devices/${deviceId}`, grant(mode));
+    await backend.deleteContext(UID, CONTEXT_ID, device);
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true, originDeviceId: deviceId });
+    await backend.deleteContext(UID, CONTEXT_ID, device);
+    expect(firestore.documents.get(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toEqual({ deleted: true, originDeviceId: deviceId });
+  });
+  it.each([false, true])("commits a wholly absent item deletion including conditional last-item intent (%s)", async final => {
+    const { backend, firestore } = fixture();
+    firestore.documents.set(`users/${UID}/devices/${deviceId}`, grant("own"));
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, device, final);
+    expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true, originDeviceId: deviceId });
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(final);
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, device, final);
+  });
+  it.each([false, true])("uses a deleted parent's marker to authorize a missing item without changing provenance (%s)", async final => {
+    const { backend, firestore } = fixture();
+    firestore.documents.set(`users/${UID}/devices/${deviceId}`, grant("own"));
+    const marker = `users/${UID}/deletedContexts/${CONTEXT_ID}`;
+    firestore.documents.set(marker, { deleted: true, originDeviceId: deviceId });
+    await backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, device, final);
+    expect(firestore.documents.get(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toEqual({ deleted: true, originDeviceId: deviceId });
+    expect(firestore.documents.get(marker)).toEqual({ deleted: true, originDeviceId: deviceId });
+  });
+  it.each([false, true])("denies foreign parent markers and unauthorised orphan items (%s)", async final => {
+    const { backend, firestore } = fixture(); const { item } = paths();
+    firestore.documents.set(`users/${UID}/devices/${deviceId}`, grant("own"));
+    const marker = `users/${UID}/deletedContexts/${CONTEXT_ID}`;
+    firestore.documents.set(marker, { deleted: true, originDeviceId: ITEM_ID });
+    await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, device, final)).rejects.toMatchObject({ statusCode: 404 });
+    firestore.documents.delete(marker);
+    firestore.documents.set(item, { deleting: false, device: { id: deviceId } });
+    await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, device, final)).rejects.toMatchObject({ statusCode: 404 });
+    expect(firestore.documents.has(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toBe(false);
+  });
+  it.each(["own", "all"] as const)("does not sweep unauthorized orphan descendants for an absent final item (%s)", async mode => {
+    const { backend, firestore } = fixture(); const { context } = paths();
+    firestore.documents.set(`users/${UID}/devices/${deviceId}`, grant(mode));
+    const orphan = `${context}/items/00000000-0000-4000-8000-000000000099`;
+    firestore.documents.set(orphan, { deleting: true });
+    await expect(backend.deleteItem(UID, CONTEXT_ID, ITEM_ID, device, true)).rejects.toMatchObject({ statusCode: 404 });
+    expect(firestore.documents.has(orphan)).toBe(true);
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(false);
+    expect(firestore.documents.has(`users/${UID}/deletedItems/${CONTEXT_ID}_${ITEM_ID}`)).toBe(false);
+  });
+  it("denies revoked and cross-user deletion identities before writing absent-resource markers", async () => {
+    const { backend, firestore } = fixture();
+    await expect(backend.deleteContext(UID, CONTEXT_ID, device)).rejects.toMatchObject({ statusCode: 401 });
+    firestore.documents.set(`users/${UID}/devices/${deviceId}`, grant("all"));
+    await expect(backend.deleteContext("other", CONTEXT_ID, device)).rejects.toMatchObject({ statusCode: 401 });
+    await expect(backend.deleteItem("other", CONTEXT_ID, ITEM_ID, device)).rejects.toMatchObject({ statusCode: 401 });
+    expect([...firestore.documents.keys()].some(path => path.includes("/deleted"))).toBe(false);
+  });
   it("rechecks a downgrade inside upload finalization instead of trusting earlier authorization", async () => {
     const { backend, firestore, bucket } = fixture(); const { context, item, object } = paths();
     const policy = `users/${UID}/devices/${deviceId}`;

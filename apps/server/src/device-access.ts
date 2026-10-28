@@ -30,6 +30,21 @@ export async function assertDeviceContext(db: Firestore, identity: DeviceIdentit
   if (!context || (device.mode !== "all" && context.originDeviceId !== device.id)) throw new DeviceContextNotFound();
 }
 
+/** Authorize deletion against live policy and any retained provenance. Only a wholly
+ * absent resource may acquire the caller's origin; an orphan item is not a grant. */
+export async function assertDeviceDeletion(db: Firestore, uid: string, identity: DeviceIdentity,
+  evidence: (Record<string, unknown> | undefined)[], resourceAbsent: boolean, transaction: Transaction): Promise<string | undefined> {
+  if (identity.uid !== uid) throw new DeviceUnauthorized();
+  const snapshot = await transaction.get(db.doc(`users/${uid}/devices/${identity.deviceId}`));
+  let device: AccessDevice;
+  try { device = accessDevice(identity.deviceId, snapshot.data()); } catch { throw new DeviceUnauthorized(); }
+  const retained = evidence.filter((record): record is Record<string, unknown> => record !== undefined);
+  if ((!retained.length && !resourceAbsent) || (device.mode !== "all" && retained.some(record => record.originDeviceId !== device.id)))
+    throw new DeviceContextNotFound();
+  const origin = retained.length ? retained[0]!.originDeviceId : device.id;
+  return typeof origin === "string" ? origin : undefined;
+}
+
 export async function assertFullDevice(db: Firestore, identity: DeviceIdentity, transaction: Transaction): Promise<void> {
   const snapshot = await transaction.get(db.doc(`users/${identity.uid}/devices/${identity.deviceId}`));
   let device: AccessDevice;

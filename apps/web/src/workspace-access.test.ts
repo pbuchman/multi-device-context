@@ -3,12 +3,12 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { ShareDraft } from "./model.js";
 import type { ActiveSession } from "./auth.js";
 import { applyLocalAccess } from "./local-access.js";
-const state = vi.hoisted(() => ({ device: { id: "11111111-1111-4111-8111-111111111111", name: "Verified Phone", platform: "android" as const, mode: "all" as "own" | "all", version: 1, createdAt: 1, updatedAt: 1 }, listener: undefined as undefined | ((value: unknown) => void), failed: undefined as undefined | (() => void), publish: vi.fn(async()=>{}), invalidated: vi.fn() }));
+const state = vi.hoisted(() => ({ device: { id: "11111111-1111-4111-8111-111111111111", name: "Verified Phone", platform: "android" as const, mode: "all" as "own" | "all", version: 1, createdAt: 1, updatedAt: 1 }, listener: undefined as undefined | ((value: unknown) => void), failed: undefined as undefined | (() => void), deleteItem: vi.fn(async()=>{}), publish: vi.fn(async()=>{}), invalidated: vi.fn() }));
 vi.mock("./history.js",()=>({prepareHistory:async()=>{}}));
 vi.mock("./cloud.js",async importOriginal=>({ ...await importOriginal<typeof import("./cloud.js")>(), FirebaseCloud: class {
  constructor(){} refreshContexts=async()=>({records:[],fromCache:false,hasPendingWrites:false}); refreshDevice=async()=>state.device;
  subscribeDevice=(emit:(value:unknown)=>void,fail:()=>void)=>{state.listener=emit;state.failed=fail;return()=>{state.listener=undefined;state.failed=undefined;}};
- deletionMarkers=async()=>({contexts:[],items:[]});publish=state.publish;deleteContext=async()=>{};deleteItem=async()=>{};invalidate=state.invalidated;
+ deletionMarkers=async()=>({contexts:[],items:[]});publish=state.publish;deleteContext=async()=>{};deleteItem=state.deleteItem;invalidate=state.invalidated;
 } }));
 import { buildServices } from "./App.js";
 afterEach(()=>{vi.clearAllMocks();localStorage.clear();});
@@ -49,4 +49,22 @@ it("keeps durable queued names immutable when the active installation is renamed
  await bundle.services.outbox.enqueue({...draft,itemId:crypto.randomUUID(),title:"After rename",device:bundle.services.device});
  const queued=await bundle.services.outbox.list();expect(queued.find(record=>record.itemId===draft.itemId)?.device.name).toBe("Verified Phone");expect(queued.find(record=>record.itemId!==draft.itemId)?.device.name).toBe("New installation name");
  expect(draft.device.name).toBe("Verified Phone");bundle.dispose();
+});
+
+it("production services preserve conditional final-item deletion through both adapter boundaries",async()=>{
+ const bundle=await buildServices(session(),vi.fn());
+ bundle.services.resume?.();
+ await bundle.services.remove!(crypto.randomUUID(),crypto.randomUUID(),true);
+ await vi.waitFor(()=>expect(state.deleteItem).toHaveBeenCalledWith(expect.any(String),expect.any(String),true));bundle.dispose();
+});
+
+it("production initialization resumes legacy deletion only after verified access is installed",async()=>{
+ const active=session();const {DurableOutbox}=await import("./outbox.js");const {openLocalDatabase,done}=await import("./local-db.js");
+ const box=new DurableOutbox({projectId:active.config.firebase.projectId,uid:active.uid});
+ const contextId=crypto.randomUUID(), key=`deletion:${box.namespace}:${contextId}:context`;
+ const db=await openLocalDatabase(),tx=db.transaction("records","readwrite"),complete=done(tx);
+ tx.objectStore("records").put({key,namespace:box.namespace,kind:"deletion",contextId,attempts:1,paused:true,nextAttemptAt:1000});await complete;db.close();
+ const bundle=await buildServices(active,vi.fn());
+ expect(await box.deletions()).toEqual([expect.objectContaining({paused:false,nextAttemptAt:0,recoveryVersion:1})]);
+ bundle.dispose();box.close();
 });
