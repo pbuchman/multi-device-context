@@ -187,7 +187,7 @@ class FakeBucket {
   }
 }
 
-function fixture() {
+function fixture(options: { onFatal?: (reason: string) => void; dispose?: () => Promise<void> } = {}) {
   const firestore = new FakeFirestore();
   const bucket = new FakeBucket();
   const auth = { createCustomToken: vi.fn(async (uid: string) => `custom:${uid}`) };
@@ -196,6 +196,7 @@ function fixture() {
     bucket: bucket as never,
     auth: auth as never,
     cleanupIntervalMs: 60_000,
+    ...options,
   });
   return { backend, firestore, bucket, auth };
 }
@@ -207,7 +208,7 @@ function paths() {
   return { context, item, object };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("FirebaseBackend device authorization", () => {
   const deviceId = "00000000-0000-4000-8000-000000000010";
@@ -504,5 +505,197 @@ describe("FirebaseBackend readiness", () => {
     expect(firestore.requestedPaths).toContain("internalHealth/readiness");
     expect(firestore.requestedPaths).not.toContain("__health__/readiness");
     expect(bucket.bucketMetadataReads).toBe(1);
+  });
+});
+
+
+describe("stalled dependency recovery", () => {
+  it.each(["firestore", "storage"] as const)("latches one fatal after a hung %s readiness probe and ignores late success", async dependency => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn();
+    const { backend, firestore, bucket } = fixture({ onFatal });
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    if (dependency === "firestore") vi.spyOn(FakeDocumentReference.prototype, "get").mockImplementation(async function (this: FakeDocumentReference) { await pending; return new FakeSnapshot(this, undefined); });
+    else vi.spyOn(bucket, "getMetadata").mockImplementation(async () => { await pending; return [{}]; });
+    const result = backend.checkReady().catch(error => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await Promise.race([result, Promise.resolve("still-running")])).toMatchObject({ statusCode: 503 });
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(backend.checkReady()).rejects.toMatchObject({ statusCode: 503 });
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    await backend.close();
+  });
+
+  it("waits for each guarded probe even when its peer fails immediately", async () => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn();
+    const { backend, bucket } = fixture({ onFatal });
+    vi.spyOn(FakeDocumentReference.prototype, "get").mockRejectedValue(new Error("ordinary"));
+    const metadata = vi.spyOn(bucket, "getMetadata").mockImplementation(() => new Promise(() => {}));
+    const result = backend.checkReady().catch(error => error);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(await Promise.race([result, Promise.resolve("pending")])).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await Promise.race([result, Promise.resolve("pending")])).toMatchObject({ statusCode: 503 });
+    expect(metadata).toHaveBeenCalledTimes(1);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    await backend.close();
+  });
+
+  it("retries settled readiness and cleanup failures without a fatal restart", async () => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn();
+    const { backend, bucket } = fixture({ onFatal });
+    vi.spyOn(bucket, "getMetadata").mockRejectedValueOnce(new Error("ordinary failure"));
+    await expect(backend.checkReady()).rejects.toThrow();
+    await expect(backend.checkReady()).resolves.toBeUndefined();
+    const query = vi.spyOn(FakeQuery.prototype, "get").mockRejectedValueOnce(new Error("ordinary cleanup failure"));
+    await backend.startCleanup();
+    await expect(backend.checkReady()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(backend.checkReady()).resolves.toBeUndefined();
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(onFatal).not.toHaveBeenCalled();
+    await backend.close();
+  });
+
+  it("never overlaps hung cleanup, resumes mutation after a late result, or blocks disposal", async () => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn(), dispose = vi.fn(async () => {});
+    const { backend } = fixture({ onFatal, dispose });
+    let finish!: (value: { docs: never[]; empty: boolean }) => void;
+    const query = vi.spyOn(FakeQuery.prototype, "get").mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const start = backend.startCleanup().then(() => "done");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(await Promise.race([start, Promise.resolve("hung")])).toBe("done");
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(query).toHaveBeenCalledTimes(1);
+    finish({ docs: [], empty: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query).toHaveBeenCalledTimes(1);
+    await backend.close();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not queue transaction writes after a timed-out read completes late", async () => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn();
+    const { backend, firestore, bucket } = fixture({ onFatal });
+    const { context } = paths();
+    firestore.documents.set(context, { deleting: false });
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const read = FakeDocumentReference.prototype.get;
+    vi.spyOn(FakeDocumentReference.prototype, "get").mockImplementation(async function (this: FakeDocumentReference) { await pending; return read.call(this); });
+    const listing = vi.spyOn(bucket, "getFiles");
+    const deletion = backend.deleteContext(UID, CONTEXT_ID).catch(error => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await Promise.race([deletion, Promise.resolve("hung")])).toMatchObject({ statusCode: 503 });
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firestore.documents.get(context)?.deleting).toBe(false);
+    expect(firestore.documents.has(`users/${UID}/deletedContexts/${CONTEXT_ID}`)).toBe(false);
+    expect(listing).not.toHaveBeenCalled();
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    await backend.close();
+  });
+
+  it.each(["list", "object-delete", "document-delete"] as const)("guards hung deletion %s calls and never advances after a late result", async operation => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn();
+    const { backend, firestore, bucket } = fixture({ onFatal });
+    const { context, item, object } = paths();
+    firestore.documents.set(context, { deleting: false });
+    firestore.documents.set(item, { deleting: false });
+    bucket.objects.set(object, { size: 1, contentType: "text/plain", generation: "1" });
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    if (operation === "list") {
+      const listing = bucket.getFiles.bind(bucket);
+      vi.spyOn(bucket, "getFiles").mockImplementation(async options => { await pending; return listing(options); });
+    } else if (operation === "object-delete") vi.spyOn(FakeFile.prototype, "delete").mockImplementation(async () => { await pending; });
+    else vi.spyOn(FakeDocumentReference.prototype, "delete").mockImplementation(async () => { await pending; });
+    const deletion = backend.deleteItem(UID, CONTEXT_ID, ITEM_ID).catch(error => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await Promise.race([deletion, Promise.resolve("pending")])).toMatchObject({ statusCode: 503 });
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    await expect(backend.runCleanupPass()).rejects.toMatchObject({ statusCode: 503 });
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firestore.documents.has(item)).toBe(true);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    await backend.close();
+  });
+
+  it("cancels watchdogs on disposal without waiting for hung I/O or reviving late work", async () => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn(), dispose = vi.fn(async () => {});
+    const { backend } = fixture({ onFatal, dispose });
+    let finish!: (value: { docs: never[]; empty: boolean }) => void;
+    const query = vi.spyOn(FakeQuery.prototype, "get").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const start = backend.startCleanup();
+    await vi.advanceTimersByTimeAsync(0);
+    await backend.close();
+    await start;
+    await backend.close();
+    await vi.advanceTimersByTimeAsync(120_000);
+    finish({ docs: [], empty: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(onFatal).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a previous cleanup failure until a long progressing retry actually completes", async () => {
+    vi.useFakeTimers();
+    const { backend, firestore, bucket } = fixture();
+    const { context, item, object } = paths();
+    const second = `${context}/items/second`;
+    firestore.documents.set(context, { deleting: true });
+    firestore.documents.set(item, { deleting: true });
+    firestore.documents.set(second, { deleting: true });
+    bucket.objects.set(object, { size: 1, contentType: "text/plain", generation: "1" });
+    bucket.objects.set(`${second}/original`, { size: 1, contentType: "text/plain", generation: "2" });
+    vi.spyOn(FakeQuery.prototype, "get").mockRejectedValueOnce(new Error("ordinary cleanup failure"));
+    const listing = bucket.getFiles.bind(bucket);
+    vi.spyOn(bucket, "getFiles").mockImplementation(async options => {
+      await new Promise(resolve => setTimeout(resolve, 20_000));
+      return listing(options);
+    });
+    await backend.startCleanup();
+    expect(backend.isUnavailable()).toBe(true);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(backend.isUnavailable()).toBe(true);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(backend.isUnavailable()).toBe(false);
+    expect(firestore.documents.has(context)).toBe(false);
+    await backend.close();
+  });
+
+  it("allows a progressing deletion to run longer than thirty seconds", async () => {
+    vi.useFakeTimers();
+    const onFatal = vi.fn();
+    const { backend, firestore, bucket } = fixture({ onFatal });
+    const { context, item, object } = paths();
+    firestore.documents.set(context, { deleting: false });
+    firestore.documents.set(item, { deleting: false });
+    bucket.objects.set(object, { size: 1, contentType: "text/plain", generation: "1" });
+    const list = bucket.getFiles.bind(bucket);
+    vi.spyOn(bucket, "getFiles").mockImplementation(async options => {
+      await new Promise(resolve => setTimeout(resolve, 20_000));
+      return list(options);
+    });
+    const deletion = backend.deleteContext(UID, CONTEXT_ID);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await deletion;
+    expect(firestore.documents.has(context)).toBe(false);
+    expect(firestore.documents.has(item)).toBe(false);
+    expect(bucket.objects.size).toBe(0);
+    expect(onFatal).not.toHaveBeenCalled();
+    await backend.close();
   });
 });

@@ -17,23 +17,32 @@ export class WindowLimit {
 
 /** Requests never trigger GCP calls; one background check can be in flight. */
 export class Readiness {
-  private checkedAt = 0;
+  private checkedAt?: number;
   private healthy = false;
   private running = false;
+  private closed = false;
   private timer?: ReturnType<typeof setInterval>;
-  constructor(private check: () => Promise<void>, private clock = Date.now) {}
+  private finishStartup: (() => void) | undefined;
+  constructor(private check: () => Promise<void>, private clock = () => performance.now(), private fatal = () => false, private unavailable = () => false) {}
   async start() {
+    if (this.closed || this.timer) return;
     this.timer = setInterval(() => { void this.refresh(); }, 30_000); this.timer.unref();
-    // Do not prevent the HTTP server from starting when a dependency is hung.
-    await Promise.race([this.refresh(), new Promise<void>(resolve => { const t = setTimeout(resolve, 5000); t.unref(); })]);
+    // HTTP startup stays bounded even when a guarded dependency is still pending.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([this.refresh(), new Promise<void>(resolve => {
+        this.finishStartup = resolve;
+        timer = setTimeout(resolve, 5000); timer.unref();
+      })]);
+    } finally { clearTimeout(timer); this.finishStartup = undefined; }
   }
   async refresh() {
-    if (this.running) return;
+    if (this.running || this.closed || this.fatal()) return;
     this.running = true;
-    try { await this.check(); this.healthy = true; }
+    try { await this.check(); this.healthy = !this.closed && !this.fatal() && !this.unavailable(); }
     catch { this.healthy = false; }
-    finally { this.checkedAt = this.clock(); this.running = false; }
+    finally { this.checkedAt = this.clock(); if (!this.fatal()) this.running = false; }
   }
-  ok() { return this.checkedAt > 0 && this.healthy && this.clock() - this.checkedAt <= 45_000; }
-  close() { clearInterval(this.timer); }
+  ok() { return !this.closed && !this.fatal() && !this.unavailable() && this.checkedAt !== undefined && this.healthy && this.clock() - this.checkedAt <= 45_000; }
+  close() { this.closed = true; clearInterval(this.timer); this.finishStartup?.(); }
 }

@@ -26,6 +26,8 @@ export interface Backend {
   deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void>;
   deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity, deleteEmptyContext?: boolean): Promise<void>;
   checkReady(): Promise<void>;
+  isFatal?(): boolean;
+  isUnavailable?(): boolean;
   close(): Promise<void>;
 }
 
@@ -122,7 +124,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     allowOwner(request, principal.uid);
     return principal;
   };
-  const readiness = new Readiness(() => backend.checkReady());
+  const readiness = new Readiness(() => backend.checkReady(), undefined, () => backend.isFatal?.() ?? false, () => backend.isUnavailable?.() ?? false);
   app.addHook("onReady", () => readiness.start());
   app.addHook("onRequest", async (request, reply) => {
     const path = request.url.split("?", 1)[0]!;

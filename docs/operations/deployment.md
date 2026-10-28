@@ -85,6 +85,35 @@ server environment. `scripts/runtime/package.mjs` retrieves the pinned package,
 validates its exact shape and project identities, and atomically replaces the
 runtime directory's mode-0600 `runtime-key.json`.
 
+## Stalled dependency recovery
+
+Readiness runs in the background every 30 seconds and keeps a positive result for
+45 seconds using a monotonic clock. Firestore and Storage readiness probes each
+have their own 10-second deadline. Cleanup and deletion guard each Firestore or
+Storage operation for 30 seconds; a large deletion can continue as long as its
+individual calls make progress. Persisted tombstones retain retry intent.
+
+A settled dependency error makes readiness unavailable and retries on the next
+scheduled pass. A deadline permanently latches this process unavailable and
+requests exactly one shutdown. Late SDK results cannot restore readiness or
+advance deletion work. Shutdown allows 10 seconds of graceful disposal, closes
+remaining HTTP connections, and exits with recovery code 75 by 15 seconds even
+if an SDK or close hook remains pending. This also covers startup cleanup.
+
+The runtime launcher retrieves and validates its pinned package once. On child
+exit 75 it starts only a new MDC child using the retained environment and private
+runtime credential path, without another Secret Manager request. Repeated
+recovery waits 1, 2, 4, 8, 16, then 30 seconds, capped at 30; five minutes of child
+uptime resets the delay. Ordinary startup/configuration failures retain the
+existing PM2/systemd path. SIGTERM or SIGINT to the launcher cancels pending
+recovery and shuts down its child. Other services and shared infrastructure stay
+outside this recovery boundary.
+
+Recovery diagnostics use enumerated operation, outcome and reason fields with
+monotonic durations. They omit SDK error objects, resource names, credentials,
+configuration values and request payloads. Public health response schemas stay
+unchanged.
+
 ## Build and preflight
 
 Use Node.js 22.12 or newer, pnpm 10.29.3, Java 21 for rules tests, the Google

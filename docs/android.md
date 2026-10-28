@@ -20,6 +20,10 @@ CI debug APKs use synthetic configuration and a generic test key; they are not
 installation or upgrade artifacts for personal devices. Device-specific coverage
 that remains necessary is listed under [Device support boundaries](#device-support-boundaries).
 
+Android candidate 0.7.2/code 24 includes deletion recovery improvements and the
+current bundled UI. Signing, publication and physical upgrade acceptance are
+separate release steps. Desktop installer metadata remains at 0.7.1.
+
 Version 0.7.1 adds subtle pastel saved-chat rows based on the original source
 device, with automatic account-stable colors for light and dark themes. Unknown
 origins stay neutral. The origin name appears on hover or focus of the row's
@@ -83,12 +87,13 @@ update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
 increase it for each update. It is not automatically incremented. Keep the
-application ID and signing key unchanged. Version 0.7.1 uses code 23, above official
-0.7.0/code 22. Earlier compatible signed codes 15–21 also remain eligible
+application ID and signing key unchanged. The next candidate, version 0.7.2, uses
+code 24, above published 0.7.1/code 23 and 0.7.0/code 22. Earlier compatible
+signed codes 15–21 also remain eligible
 for an in-place upgrade with the same key; do not reuse a published code.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=23
+export MDC_ANDROID_VERSION_CODE=24
 pnpm --filter @mdc/mobile android:release
 ```
 
