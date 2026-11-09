@@ -84,6 +84,11 @@ type Dependencies = {
   fetch?: typeof fetch;
   key?: CryptoKey | JWTVerifyGetKey;
 };
+class RefreshSessionExpiredError extends Error {
+  constructor() {
+    super("Your session expired. Sign in with Google again.");
+  }
+}
 export class AuthManager {
   private readonly request: typeof fetch;
   private readonly key: CryptoKey | JWTVerifyGetKey;
@@ -180,13 +185,24 @@ export class AuthManager {
         "The sign-in configuration changed. Sign out, then sign in again.",
       );
     }
-    if (session)
-      return this.exchange(
-        { grant_type: "refresh_token", refresh_token: session.refreshToken },
-        generation,
-        undefined,
-        session,
-      );
+    if (session) {
+      try {
+        return await this.exchange(
+          { grant_type: "refresh_token", refresh_token: session.refreshToken },
+          generation,
+          undefined,
+          session,
+        );
+      } catch (error) {
+        if (
+          !(error instanceof RefreshSessionExpiredError) ||
+          !interactive ||
+          generation !== this.generation ||
+          this.dependencies.readSession()
+        )
+          throw error;
+      }
+    }
     if (!interactive) throw new Error("Sign in with Google to continue.");
     const attempt = createPkceAttempt();
     const url = new URL("authorize", this.issuer);
@@ -275,12 +291,15 @@ export class AuthManager {
     }
     if (!response.ok) {
       if (
-        response.status === 400 &&
+        (response.status === 400 || response.status === 403) &&
         data.error === "invalid_grant" &&
         previous &&
         generation === this.generation
-      )
+      ) {
         await this.dependencies.clearSession();
+        this.cached = undefined;
+        throw new RefreshSessionExpiredError();
+      }
       throw new Error(
         data.error === "invalid_grant"
           ? "Your session expired. Sign in with Google again."
