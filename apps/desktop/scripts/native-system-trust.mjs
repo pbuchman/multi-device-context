@@ -510,7 +510,7 @@ async function runElectronPhaseController(arguments_) {
     }
     const output = evaluation.result?.value;
     assert(output && typeof output === "object", "Packaged Electron probe returned no result");
-    assert.equal(output.runtime.electronVersion, "44.5.1", "Packaged acceptance runtime did not use Electron 44.5.1");
+    assert.equal(output.runtime.electronVersion, "44.9.1", "Packaged acceptance runtime did not use Electron 44.9.1");
     assert.equal(output.runtime.packagedApplication, true, "Acceptance probe did not run inside a packaged application");
     assert.equal(
       resolve(output.runtime.executablePath).toLocaleLowerCase("en-US"),
@@ -565,7 +565,7 @@ async function launchElectronPhase({ electronPath, bundlePath, fixtureRoot, name
   const output = JSON.parse(await readFile(resultPath, "utf8"));
   assert.equal(typeof output.result?.ok, "boolean", `Electron ${name} phase did not return a result`);
   assert.deepEqual(output.runtime, {
-    electronVersion: "44.5.1",
+    electronVersion: "44.9.1",
     packagedExecutableOwned: true,
     packagedApplication: true,
     userDataOwned: true,
@@ -637,7 +637,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
   try {
     const require = createRequire(import.meta.url);
     const electronMetadata = JSON.parse(await readFile(require.resolve("electron/package.json"), "utf8"));
-    assert.equal(electronMetadata.version, "44.5.1", "The acceptance test requires pinned Electron 44.5.1");
+    assert.equal(electronMetadata.version, "44.9.1", "The acceptance test requires pinned Electron 44.9.1");
     report.electronVersion = electronMetadata.version;
     const electronPath = packagedElectronExecutable(desktopDirectory);
     const archivePath = join(dirname(electronPath), "resources", "app.asar");
@@ -656,7 +656,7 @@ export async function main(arguments_ = process.argv.slice(2)) {
       },
       phaseProfiles: "fresh owned fixture directory per phase",
     };
-    await checkpoint("Selected the packaged Electron 44.5.1 runtime and recorded its executable and ASAR fingerprints");
+    await checkpoint("Selected the packaged Electron 44.9.1 runtime and recorded its executable and ASAR fingerprints");
 
     const openSsl = await findOpenSsl();
     certificate = await generateCertificates(openSsl, fixtureRoot);
