@@ -270,6 +270,109 @@ describe("native browser authentication", () => {
     await expect(manager.getAccessToken()).rejects.toThrow();
     expect(saved).toBeUndefined();
   });
+
+  it.each([400, 403])("clears an expired refresh rejected with HTTP %s so the next sign-in opens the browser", async status => {
+    let saved: StoredSession | undefined = {
+      uid: "owner", subject: "google-oauth2|one", refreshToken: "expired", authScope: authenticationScope(settings),
+    };
+    const openBrowser = vi.fn(async () => {});
+    const request = vi.fn<typeof fetch>(async () => Response.json({ error: "invalid_grant" }, { status }));
+    const manager = new AuthManager(settings, {
+      readSession: () => saved, writeSession: async value => { saved = value; },
+      clearSession: async () => { saved = undefined; }, openBrowser, fetch: request,
+    });
+    await expect(manager.getAccessToken()).rejects.toThrow(/session expired/);
+    expect(saved).toBeUndefined();
+    expect(openBrowser).not.toHaveBeenCalled();
+    const retry = manager.getAccessToken(true);
+    const cancelled = expect(retry).rejects.toThrow(/Signed out/);
+    expect(openBrowser).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledOnce();
+    await manager.signOut();
+    await cancelled;
+  });
+
+  it.each([400, 403])("completes interactive PKCE in the same attempt after HTTP %s rejects a refresh", async status => {
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const subject = "google-oauth2|recovered";
+    const uid = createHash("sha256").update(issuer + "\0" + subject).digest("base64url");
+    let saved: StoredSession | undefined = { uid, subject, refreshToken: "expired", authScope: authenticationScope(settings) };
+    let authorize: URL | undefined;
+    const sign = (payload: JWTPayload, audience: string) => new SignJWT(payload)
+      .setProtectedHeader({ alg: "RS256" }).setIssuer(issuer).setAudience(audience)
+      .setIssuedAt().setExpirationTime("1h").sign(privateKey);
+    const access = await sign({ sub: subject, azp: settings.nativeClientId }, settings.audience);
+    const openBrowser = vi.fn(async (url: string) => {
+      authorize = new URL(url);
+      expect(saved).toBeUndefined();
+      expect(manager.handleCallback(`multi-device-context://auth/callback?code=recovered-code&state=${authorize.searchParams.get("state")}`)).toBe(true);
+    });
+    const request = vi.fn<typeof fetch>(async (_input, init) => {
+      const parameters = JSON.parse(String(init?.body)) as Record<string, string>;
+      if (parameters.grant_type === "refresh_token") {
+        expect(parameters.refresh_token).toBe("expired");
+        return Response.json({ error: "invalid_grant" }, { status });
+      }
+      expect(parameters.grant_type).toBe("authorization_code");
+      expect(parameters.code).toBe("recovered-code");
+      expect(createHash("sha256").update(parameters.code_verifier!).digest("base64url")).toBe(authorize!.searchParams.get("code_challenge"));
+      return Response.json({
+        access_token: access, refresh_token: "recovered-refresh", token_type: "Bearer", expires_in: 3600,
+        id_token: await sign({ sub: subject, nonce: authorize!.searchParams.get("nonce"), name: "Recovered user" }, settings.nativeClientId),
+      });
+    });
+    const manager = new AuthManager(settings, {
+      readSession: () => saved, writeSession: async value => { saved = value; },
+      clearSession: async () => { saved = undefined; }, openBrowser, fetch: request, key: publicKey,
+    });
+    expect(await manager.getAccessToken(true)).toBe(access);
+    expect(openBrowser).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(saved).toEqual({ uid, subject, refreshToken: "recovered-refresh", authScope: authenticationScope(settings) });
+    expect(await manager.getAccountProfile()).toEqual({ uid, name: "Recovered user" });
+  });
+
+  it.each([
+    [503, "invalid_grant"], [429, "too_many_requests"], [403, "access_denied"],
+    [400, "invalid_request"], [401, "invalid_grant"], [200, "malformed"], [0, "network"],
+  ] as const)("preserves the session and avoids interactive fallback for %s %s", async (status, error) => {
+    const previous: StoredSession = { uid: "owner", subject: "google-oauth2|one", refreshToken: "retryable", authScope: authenticationScope(settings) };
+    let saved: StoredSession | undefined = previous;
+    const clearSession = vi.fn(async () => { saved = undefined; });
+    const openBrowser = vi.fn(async () => {});
+    const manager = new AuthManager(settings, {
+      readSession: () => saved, writeSession: async value => { saved = value; }, clearSession, openBrowser,
+      fetch: async () => {
+        if (!status) throw new Error("Synthetic network failure");
+        return error === "malformed" ? new Response("not-json") : Response.json({ error }, { status });
+      },
+    });
+    await expect(manager.getAccessToken(true)).rejects.toThrow();
+    expect(saved).toEqual(previous);
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(openBrowser).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 403])("does not clear a newer session or open a browser when a late HTTP %s rejection arrives", async status => {
+    let saved: StoredSession | undefined = { uid: "old-owner", subject: "google-oauth2|old", refreshToken: "old", authScope: authenticationScope(settings) };
+    let finish!: (response: Response) => void;
+    const clearSession = vi.fn(async () => { saved = undefined; });
+    const openBrowser = vi.fn(async () => {});
+    const manager = new AuthManager(settings, {
+      readSession: () => saved, writeSession: async value => { saved = value; }, clearSession, openBrowser,
+      fetch: async input => String(input).endsWith("oauth/revoke") ? new Response("{}") : new Promise(resolve => { finish = resolve; }),
+    });
+    const pending = manager.getAccessToken(true);
+    const rejected = expect(pending).rejects.toThrow();
+    await manager.signOut();
+    const current: StoredSession = { uid: "new-owner", subject: "google-oauth2|new", refreshToken: "new", authScope: authenticationScope(settings) };
+    saved = current;
+    finish(Response.json({ error: "invalid_grant" }, { status }));
+    await rejected;
+    expect(saved).toEqual(current);
+    expect(clearSession).toHaveBeenCalledOnce();
+    expect(openBrowser).not.toHaveBeenCalled();
+  });
 });
 
 it.each(["valid", "missing", "empty claims", "multi audience valid", "wrong subject", "wrong audience", "wrong issuer", "wrong azp", "multi audience without azp", "bad signature"])("verifies refreshed account profile: %s", async variant => {
