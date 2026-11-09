@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@auth0/auth0-spa-js": "2.27.0",
+    "@auth0/auth0-spa-js": "2.28.2",
     "@capacitor/app": "8.1.1",
     "@capacitor/core": "8.5.2",
     "@mdc/contracts": "workspace:*",
