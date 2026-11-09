@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### 0.7.2 — Compact macOS menu bar icon
+
+- macOS uses a compact native menu bar icon with Retina representations and
+  template rendering for light and dark menu bars.
+- Desktop and Android package versions are 0.7.2; Android uses code 24 to keep
+  the shared Preview update catalog aligned. Android behavior is unchanged.
+- Source and CI checks are separate from physical macOS appearance,
+  installation and update acceptance; physical Mac validation remains pending.
+
 ### 0.7.1 — Context origin colors
 
 - Saved-chat rows use subtle pastel backgrounds based on the original source

@@ -100,6 +100,28 @@ try {
   checkpoint(
     "Installed packaged executable, expected architecture, secure preferences and OS encryption",
   );
+  if (process.platform === "darwin") {
+    step("Inspect the installed menu-bar image representations");
+    const trayImage = await app.evaluate(({ app, nativeImage }) => {
+      const { join } = process.getBuiltinModule("path");
+      const image = nativeImage.createFromPath(join(app.getAppPath(), "dist", "resources", "trayTemplate.png"));
+      const retina = image.toPNG({ scaleFactor: 2 });
+      return {
+        empty: image.isEmpty(),
+        template: image.isTemplateImage(),
+        size: image.getSize(),
+        scales: image.getScaleFactors(),
+        retinaSize: { width: retina.readUInt32BE(16), height: retina.readUInt32BE(20) },
+      };
+    });
+    assert.equal(trayImage.empty, false);
+    assert.equal(trayImage.template, true);
+    assert.deepEqual(trayImage.size, { width: 16, height: 16 });
+    assert.ok(trayImage.scales.includes(1));
+    assert.ok(trayImage.scales.includes(2));
+    assert.deepEqual(trayImage.retinaSize, { width: 32, height: 32 });
+    checkpoint("Installed macOS template menu-bar image is 16 points with a 32 px Retina representation");
+  }
   assert.equal(
     runtime.login.openAtLogin,
     true,

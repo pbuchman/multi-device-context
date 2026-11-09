@@ -13,7 +13,9 @@ for x in [280,744]: draw.ellipse((x-24,472,x+24,520),fill='#b8d7c9')
 image.save(root/'app.png')
 image.save(root/'app.ico',sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
 image.resize((64,64),Image.Resampling.LANCZOS).save(root/'tray.png')
-for size,name in [(32,'trayTemplate.png'),(64,'trayTemplate@2x.png')]:
+# macOS uses the base dimensions as points; @2x adds detail without enlarging it.
+# https://www.electronjs.org/docs/latest/api/tray#platform-considerations
+for size,dpi,name in [(16,72,'trayTemplate.png'),(32,144,'trayTemplate@2x.png')]:
     tray=Image.new('RGBA',(128,128)); pen=ImageDraw.Draw(tray)
     for points in [[(20,42),(104,42),(84,22)],[(108,86),(24,86),(44,106)]]: pen.line(points,fill='black',width=12,joint='curve')
-    tray.resize((size,size),Image.Resampling.LANCZOS).save(root/name)
+    tray.resize((size,size),Image.Resampling.LANCZOS).save(root/name,dpi=(dpi,dpi))
