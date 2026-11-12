@@ -237,13 +237,46 @@ documentation changes onto the recorded deployed source, then restart only
 The UI build remains the retained deployed UI SHA; unchanged UI bytes do not
 need a new `uiBuild`.
 
-The 12 November 2026 runtime fix uses the separate prerelease tag
-`runtime-2026.11.12.1`; it does not advance desktop version/feed metadata.
-Rollback restores the previous launcher source and restarts only this service.
-The newly provisioned local package is harmless to the previous launcher, which
-continues its own documented startup behavior; do not delete or restore secret
-files as part of a source rollback. If the previous launcher requires cloud
-retrieval, verify that separately before choosing it as a recovery path.
+### 12 November 2026 server and hosted interface prerelease
+
+The separate prerelease `runtime-2026.11.12.1` includes the local-configuration
+runtime fix and reviewed dependency/lockfile updates. Those updates affect server
+dependencies and the web bundle, including `fast-xml-parser` and bundled `re2js`.
+It therefore requires new server and hosted interface builds from the exact
+candidate; the retained-output runtime-only procedure above does not apply to
+this release. Desktop and Android installer artifacts, native versions and update
+feed metadata remain unchanged.
+
+Require the complete [Quality workflow](../../.github/workflows/quality.yml) to
+pass for the exact release SHA, including dependency audits, tests, typechecks,
+rules/emulator checks, builds, secret scanning and browser checks. Fix dependency
+findings in the reviewed inputs rather than weakening audit or test gates. Also
+verify the runtime regressions above and run the exact-source synthetic browser
+fixture against the candidate. CI evidence for an earlier SHA does not qualify
+the updated lockfile or release candidate.
+
+Build the candidate server and web outputs, provision and preflight before source
+promotion, then follow **Roll out the server before the interface** below. Verify
+the new server against the retained old UI first. After switching to the new web
+build, require `/api/version` to report the candidate's full `uiBuild` and verify
+that the public entry document and fetched asset SHA-256 hashes match the
+candidate outputs. Retain the old hashed assets in the served new directory for
+the rollout window so already open clients can finish imports; also keep a
+complete old bundle outside the checkout for rollback. The old `uiBuild` is only
+an intermediate server compatibility check, not this release's final state.
+
+Acceptance requires local/public readiness and security checks plus a fresh
+browser load with the expected UI build and no relevant console or page errors.
+Record synthetic browser results separately from public asset verification and
+physical-device checks. Missing applicable browser evidence leaves verification
+incomplete; successful builds alone do not establish deployment.
+
+Rollback restores the prior compatible server, locked dependencies, launcher and
+complete web bundle, then restarts only this application's service. Do not delete
+or restore secret files merely to roll back source. If the previous launcher
+requires cloud retrieval, verify that separately before selecting it as a
+recovery path; a provisioned local package does not remove that older launcher's
+cloud dependency.
 
 ## Deploy rules and indexes first
 
