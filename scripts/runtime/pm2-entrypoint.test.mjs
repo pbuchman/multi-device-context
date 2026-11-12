@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -13,8 +13,8 @@ const source = dirname(fileURLToPath(import.meta.url));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t, mode, recover = false) {
-  const root = await mkdtemp(join(tmpdir(), 'mdc-pm2-entry-'));
+async function fixture(t, mode, recover = false, { failure, exitCode } = {}) {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'mdc-pm2-entry-'));
   const runtime = join(root, 'scripts/runtime');
   const entry = join(runtime, 'start.mjs');
   const state = join(root, 'generation');
@@ -27,7 +27,11 @@ async function fixture(t, mode, recover = false) {
   await writeFile(join(runtime, 'package.mjs'), `
     export async function loadRuntime(file) {
       if (file !== 'synthetic-bootstrap-not-read') throw new Error('Unexpected fixture input');
+      // Exercise an IPC channel that remains referenced. PM2's optional idle
+      // heuristic must not be required to finish the launcher's lifetime.
+      process.channel?.ref();
       process.stdout.write(JSON.stringify({ event: 'loader', argvEntry: process.argv[1], pmEntry: process.env.pm_exec_path }) + '\\n');
+      ${failure ? `throw new Error(${JSON.stringify(failure)});` : ''}
       return { environment: { MDC_RETAINED: 'synthetic-retained-config', MDC_FIXTURE_STATE: ${JSON.stringify(state)}, MDC_RECOVER: '${recover}' } };
     }
   `);
@@ -38,7 +42,10 @@ async function fixture(t, mode, recover = false) {
     const generation = existsSync(state) ? Number(readFileSync(state, 'utf8')) + 1 : 1;
     writeFileSync(state, String(generation));
     const report = extra => process.stdout.write(JSON.stringify({ event: 'child', generation, pid: process.pid, retained: process.env.MDC_RETAINED, ...extra }) + '\\n');
-    if (process.env.MDC_RECOVER === 'true' && generation === 1) {
+    if (${Number.isInteger(exitCode)}) {
+      report({ ordinaryExit: ${exitCode ?? 'undefined'} });
+      setTimeout(() => process.exit(${exitCode ?? 'undefined'}), 20);
+    } else if (process.env.MDC_RECOVER === 'true' && generation === 1) {
       report({ recoveryExit: 75 });
       setTimeout(() => process.exit(75), 20);
     } else {
@@ -68,7 +75,7 @@ async function fixture(t, mode, recover = false) {
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const events = [];
-  let buffered = '', stderr = '', exited = false;
+  let buffered = '', stderr = '', exited = false, result;
   child.stdout.on('data', data => {
     buffered += data;
     let newline;
@@ -79,7 +86,7 @@ async function fixture(t, mode, recover = false) {
   });
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-2000); });
   child.on('error', () => { exited = true; });
-  child.on('exit', () => { exited = true; });
+  child.on('exit', (code, signal) => { exited = true; result = { code, signal }; });
   t.after(async () => {
     if (!exited) child.kill('SIGTERM');
     for (let attempt = 0; !exited && attempt < 25; attempt++) await delay(20);
@@ -97,7 +104,7 @@ async function fixture(t, mode, recover = false) {
     while (!predicate() && !exited && performance.now() < deadline) await delay(20);
     assert.ok(predicate(), `Expected synthetic entrypoint progress; events=${JSON.stringify(events)}, exited=${exited}, stderr=${stderr}`);
   };
-  return { child, events, state, entry, waitFor };
+  return { child, events, state, entry, waitFor, get exited() { return exited; }, get result() { return result; }, get stderr() { return stderr; } };
 }
 
 for (const mode of ['direct', 'pm2']) test(`starts loader and supervised application through ${mode} entrypoint`, { timeout: 10_000 }, async t => {
@@ -132,4 +139,29 @@ test('importing the runtime from another PM2 entrypoint keeps runRuntime side-ef
   const f = await fixture(t, 'import');
   await f.waitFor(() => f.events.some(event => event.event === 'imported'));
   assert.equal(f.events.some(event => event.event === 'loader' || event.event === 'child'), false);
+});
+
+for (const mode of ['direct', 'pm2']) test(`${mode} startup failure exits despite an open IPC channel and sanitizes errors`, { timeout: 10_000 }, async t => {
+  const f = await fixture(t, mode, false, { failure: 'PRIVATE_SENTINEL raw cloud or credential error' });
+  await f.waitFor(() => f.exited);
+  assert.deepEqual(f.result, { code: 1, signal: null });
+  assert.equal(f.events.some(event => event.event === 'child'), false);
+  assert.match(f.stderr, /Runtime startup failed; verify private setup and application build/);
+  assert.doesNotMatch(f.stderr, /PRIVATE_SENTINEL/);
+});
+
+test('PM2 startup configuration failure reports its bounded category and exits', { timeout: 10_000 }, async t => {
+  const failure = 'Local runtime package does not match pinned bootstrap configuration';
+  const f = await fixture(t, 'pm2', false, { failure });
+  await f.waitFor(() => f.exited);
+  assert.deepEqual(f.result, { code: 1, signal: null });
+  assert.match(f.stderr, new RegExp(failure));
+  assert.equal(f.events.some(event => event.event === 'child'), false);
+});
+
+test('PM2 launcher exits with an ordinary child failure instead of retaining an empty supervisor', { timeout: 10_000 }, async t => {
+  const f = await fixture(t, 'pm2', false, { exitCode: 2 });
+  await f.waitFor(() => f.exited);
+  assert.deepEqual(f.result, { code: 2, signal: null });
+  assert.equal(f.events.filter(event => event.event === 'child').length, 1);
 });

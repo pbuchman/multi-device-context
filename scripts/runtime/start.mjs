@@ -31,23 +31,29 @@ export async function runRuntime({
 }
 
 async function main() {
-  const code = await runRuntime();
-  if (code !== undefined) process.exitCode = code;
+  return (await runRuntime()) ?? 0;
 }
 
 // PM2 fork mode imports its app with argv[1] still pointing at ProcessContainerFork.
 // Its explicit app path distinguishes this entrypoint from ordinary library imports.
 const entrypoints = [process.argv[1], process.env.pm_exec_path];
-if (entrypoints.some(entry => entry && import.meta.url === pathToFileURL(entry).href)) main().catch(error => {
+if (entrypoints.some(entry => entry && import.meta.url === pathToFileURL(entry).href)) main().then(code => {
+  // PM2 owns a referenced IPC channel. exitCode alone leaves a launcher with
+  // no application child alive, so complete the supervised lifetime explicitly.
+  process.exit(code);
+}).catch(error => {
   // Error objects from cloud clients may contain credentials; emit our bounded messages only.
   const safe = new Set([
     'MDC_BOOTSTRAP_FILE must point to private configuration', 'Invalid bootstrap configuration',
     'Cannot read private configuration: require an owned regular file with mode 0600',
     'Cannot retrieve pinned runtime package from Secret Manager', 'Runtime package is not JSON',
     'Invalid runtime package', 'Unsafe private runtime directory',
+    'Local runtime package does not match pinned bootstrap configuration',
+    'Unsafe private configuration destination',
     'Runtime credential destination is a symlink', 'Unsafe runtime credential destination',
     'Application build is incomplete',
   ]);
-  console.error(safe.has(error?.message) ? error.message : 'Runtime startup failed; verify private setup and application build');
-  process.exitCode = 1;
+  const message = safe.has(error?.message) ? error.message : 'Runtime startup failed; verify private setup and application build';
+  const deadline = setTimeout(() => process.exit(1), 1000);
+  process.stderr.write(message + '\n', () => { clearTimeout(deadline); process.exit(1); });
 });
