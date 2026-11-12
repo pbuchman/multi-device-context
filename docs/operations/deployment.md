@@ -79,11 +79,68 @@ Create a mode-0600 bootstrap file in a mode-0700 directory:
 }
 ```
 
-Pin a positive secret version; never use `latest`. The bootstrap identity may
-read only this secret. Its owned mode-0600 credential file does not enter the
-server environment. `scripts/runtime/package.mjs` retrieves the pinned package,
-validates its exact shape and project identities, and atomically replaces the
-runtime directory's mode-0600 `runtime-key.json`.
+Pin a positive secret version; never use `latest`. Preserve the version selected
+in the approved current bootstrap rather than restoring a historical example.
+The bootstrap identity may read only this secret. Its owned mode-0600 credential
+file does not enter the server environment.
+
+Provisioning and startup are separate operations. As the application user, use
+the reviewed candidate's explicit provisioning command before switching the
+deployed source to a launcher that requires a local package:
+
+```sh
+node "$MDC_CANDIDATE/scripts/runtime/provision.mjs" "$MDC_BOOTSTRAP" --from-cloud
+```
+
+This is the only runtime command that retrieves Secret Manager. It selects the
+bootstrap's numeric version, validates the package schema and runtime identity,
+and atomically writes `runtimeDirectory/runtime-package.json` with mode 0600 in
+the owned mode-0700 runtime directory. The local envelope binds the payload to
+the exact bootstrap project, secret, version, and runtime service-account email.
+It never stores the bootstrap credential. The command does not restart a service
+or replace `runtime-key.json`. A denied request or invalid candidate leaves an
+existing local package and runtime key unchanged; stop that provisioning step
+and report the bounded error. Do not switch source, use another identity, select
+an older version, or fall back to a cached package after a failed retrieval.
+
+An explicitly owner-selected protected package can instead be imported without
+cloud access. This input has the original Secret Manager payload shape, not the
+local envelope:
+
+```sh
+node "$MDC_CANDIDATE/scripts/runtime/provision.mjs" "$MDC_BOOTSTRAP" --from-file "$MDC_PRIVATE_PACKAGE"
+```
+
+The import validates schema and identity and binds the package to the selected
+bootstrap version. It does not prove that the input bytes came from that remote
+version; the owner must establish that provenance before selecting the file.
+Imports are separate authorized provisioning operations, never an automatic
+fallback after denial. Never paste package contents into a shell command.
+
+After provisioning, run the candidate's local preflight before source promotion:
+
+```sh
+MDC_BOOTSTRAP_FILE="$MDC_BOOTSTRAP" node "$MDC_CANDIDATE/scripts/runtime/start.mjs" --check-config
+```
+
+Startup, preflight and host rendering read only the protected local package,
+revalidate its schema and pinned bootstrap identity, and atomically project
+the mode-0600 `runtime-key.json` for the server. They do not read the bootstrap
+credential or invoke gcloud. Missing, mismatched or unsafe local files fail
+closed without cloud fallback. Files require the application owner, mode 0600,
+a single hard link and no symlink path components; private runtime directories
+require mode 0700. Use canonical absolute paths, including on macOS where
+`/var` may be a symlink to `/private/var`.
+
+Ordinary restarts and retained-child recovery therefore use the selected local
+runtime source even while cloud retrieval is unavailable. Cloud capture,
+publishing, IAM and network access are not runtime-configuration startup
+prerequisites. Application operations and readiness still depend on their
+network services, including Firestore, Storage and Auth0.
+For rotation, explicitly select the reviewed numeric version, provision and
+validate it, then restart only this service and verify local/public health.
+Preserve the prior protected package and bootstrap together for an authorized
+rollback; do not restore one without its matching pin.
 
 ## Stalled dependency recovery
 
@@ -100,13 +157,15 @@ advance deletion work. Shutdown allows 10 seconds of graceful disposal, closes
 remaining HTTP connections, and exits with recovery code 75 by 15 seconds even
 if an SDK or close hook remains pending. This also covers startup cleanup.
 
-The runtime launcher retrieves and validates its pinned package once. On child
+The runtime launcher reads and validates its local pinned package once. On child
 exit 75 it starts only a new MDC child using the retained environment and private
 runtime credential path, without another Secret Manager request. Repeated
 recovery waits 1, 2, 4, 8, 16, then 30 seconds, capped at 30; five minutes of child
 uptime resets the delay. Ordinary startup/configuration failures retain the
-existing PM2/systemd path. SIGTERM or SIGINT to the launcher cancels pending
-recovery and shuts down its child. Other services and shared infrastructure stay
+existing PM2/systemd path. A configuration failure or ordinary child exit
+explicitly terminates the launcher, including PM2's referenced IPC channel, so
+PM2 can restart it instead of retaining an empty supervisor. SIGTERM or SIGINT
+to the launcher cancels pending recovery and shuts down its child. Other services and shared infrastructure stay
 outside this recovery boundary.
 
 Recovery diagnostics use enumerated operation, outcome and reason fields with
@@ -117,8 +176,9 @@ unchanged.
 ## Build and preflight
 
 Use Node.js 22.12 or newer, pnpm 10.29.3, Java 21 for rules tests, the Google
-Cloud CLI, and a clean deployment checkout. Record the currently deployed source
-revision and pinned secret version before an update. Do not reset, overwrite, or
+Cloud CLI for explicit cloud provisioning, and a clean deployment checkout.
+Record the currently deployed source revision and pinned secret version before
+an update. Do not reset, overwrite, or
 deploy from a dirty checkout.
 
 Set non-secret shell variables to the intended absolute paths and reviewed source
@@ -130,6 +190,11 @@ MDC_BOOTSTRAP=/absolute/private/bootstrap.json
 MDC_HOST_FILES=/absolute/private/new-host-files
 MDC_REVISION=reviewed-commit-sha
 ```
+
+For first migration to the local-package launcher, also set `MDC_CANDIDATE` to
+the separate clean, built candidate checkout. Provision and run its local
+preflight as described above before changing the deployed checkout. A retained
+`runtime-key.json` alone is not a complete runtime package.
 
 ```sh
 git -C "$MDC_DEPLOY" status --porcelain
@@ -151,6 +216,34 @@ anything. Review the generated systemd unit and Caddy fragment. Confirm the unit
 uses the dedicated runtime directory and PM2 home, the server binds only to
 loopback, and Caddy forwards `CF-Connecting-IP` only from the local tunnel
 connector. The production web and desktop builds must contain no source maps.
+
+### Runtime-only hotfix qualification
+
+For a runtime-only release, compare the exact candidate against the recorded
+deployed source. If only `scripts/runtime` and deployment documentation changed,
+retain the deployed server/web build outputs and unchanged native artifacts.
+Do not rebuild or publish an installer, Android APK, or update feed for this
+scope. Qualify the exact candidate SHA with the Quality workflow and runtime
+regressions, including real PM2 fork/IPC startup failure, ordinary child exit,
+and local startup/restart without the cloud CLI or bootstrap credential.
+
+Provision and preflight from the clean candidate before promoting its source.
+For the preflight, retain complete copies of the deployed server/web outputs
+at the candidate's expected build paths; runtime-only changes do not require
+rebuilding those outputs. Preserve the previous launcher source and current
+application outputs outside the checkout. Promote only the reviewed runtime and
+documentation changes onto the recorded deployed source, then restart only
+`multi-device-context.service` and perform the loopback/public checks below.
+The UI build remains the retained deployed UI SHA; unchanged UI bytes do not
+need a new `uiBuild`.
+
+The 12 November 2026 runtime fix uses the separate prerelease tag
+`runtime-2026.11.12.1`; it does not advance desktop version/feed metadata.
+Rollback restores the previous launcher source and restarts only this service.
+The newly provisioned local package is harmless to the previous launcher, which
+continues its own documented startup behavior; do not delete or restore secret
+files as part of a source rollback. If the previous launcher requires cloud
+retrieval, verify that separately before choosing it as a recovery path.
 
 ## Deploy rules and indexes first
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, stat, readFile, writeFile, chmod, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, stat, readFile, writeFile, chmod, symlink, link, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseBootstrap, parseRuntimePackage, readPrivateJSON, writeRuntimeCredential } from './config.mjs';
@@ -30,7 +30,7 @@ const payload = () => ({
 });
 
 test('private config reads reject broad permissions and symlinks', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'mdc-private-read-'));
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'mdc-private-read-'));
   try {
     const path = join(dir, 'config.json');
     await writeFile(path, JSON.stringify(bootstrap), { mode: 0o600 });
@@ -40,6 +40,10 @@ test('private config reads reject broad permissions and symlinks', async () => {
     await chmod(path, 0o600);
     await symlink(path, join(dir, 'alias.json'));
     await assert.rejects(readPrivateJSON(join(dir, 'alias.json')), /private configuration/);
+    await symlink(dir, join(dir, 'parent-alias'));
+    await assert.rejects(readPrivateJSON(join(dir, 'parent-alias/config.json')), /private configuration/);
+    await link(path, join(dir, 'hardlink.json'));
+    await assert.rejects(readPrivateJSON(path), /private configuration/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -74,7 +78,7 @@ test('rejects non-loopback binding, malformed origins and invalid key without ec
 });
 
 test('projects the runtime key privately and refuses symlink destinations', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'mdc-runtime-test-'));
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'mdc-runtime-test-'));
   try {
     const b = { ...bootstrap, runtimeDirectory: join(dir, 'private') };
     const path = await writeRuntimeCredential(b, payload().serviceAccount);
