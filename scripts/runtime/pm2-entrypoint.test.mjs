@@ -27,6 +27,9 @@ async function fixture(t, mode, recover = false, { failure, exitCode } = {}) {
   await writeFile(join(runtime, 'package.mjs'), `
     export async function loadRuntime(file) {
       if (file !== 'synthetic-bootstrap-not-read') throw new Error('Unexpected fixture input');
+      // Exercise an IPC channel that remains referenced. PM2's optional idle
+      // heuristic must not be required to finish the launcher's lifetime.
+      process.channel?.ref();
       process.stdout.write(JSON.stringify({ event: 'loader', argvEntry: process.argv[1], pmEntry: process.env.pm_exec_path }) + '\\n');
       ${failure ? `throw new Error(${JSON.stringify(failure)});` : ''}
       return { environment: { MDC_RETAINED: 'synthetic-retained-config', MDC_FIXTURE_STATE: ${JSON.stringify(state)}, MDC_RECOVER: '${recover}' } };
