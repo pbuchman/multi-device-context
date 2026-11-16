@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@auth0/auth0-spa-js": "2.27.0",
-    "@capacitor/app": "8.1.1",
+    "@capacitor/app": "8.1.2",
     "@capacitor/core": "8.5.2",
     "@mdc/contracts": "workspace:*",
     "@simplewebauthn/browser": "14.0.0",
