@@ -12,7 +12,7 @@ concurrency:
   group: quality-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  verify:
+  quality:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -41,8 +41,6 @@ jobs:
       - run: pnpm test
       - run: pnpm build:web && pnpm --filter @mdc/server build
       - run: pnpm test:rules
-      - name: Dependency audit
-        run: pnpm audit && pnpm audit --prod
       - name: Full-history secret scan
         run: |
           go install github.com/zricethezav/gitleaks/v8@v8.30.1
@@ -65,3 +63,28 @@ jobs:
         env:
           MDC_APP_ORIGIN: https://example.invalid
         run: pnpm --filter @mdc/desktop build && pnpm --filter @mdc/desktop exec node scripts/check-package.mjs
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.12.0'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm security:audit
+  ci:
+    if: ${{ always() }}
+    needs: [quality, audit]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - name: Require quality and audit
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
+        run: test "$QUALITY_RESULT" = success && test "$AUDIT_RESULT" = success

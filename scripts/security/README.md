@@ -22,8 +22,10 @@ reference uses its pinned patch. Frozen installs verify patch integrity.
   entries; positive-lifetime stale reuse remains supported.
 
 The advisory service identifies package versions, not our patch contents, so
-`pnpm audit` reports these two advisories as explicitly ignored. Other findings
-still fail CI. Do not add blanket severity or unfixable-advisory exclusions.
+`pnpm audit` reports these two advisories as explicitly ignored. Other high or
+critical findings fail CI; low and moderate findings remain in the audit report.
+Do not add blanket package or unfixable-advisory exclusions. See the
+[dependency policy](../dependencies/README.md) for the audit and repair commands.
 
 Remove each override, patch, exception and corresponding guard only after an
 upstream replacement passes the exploit regression tests. In particular,

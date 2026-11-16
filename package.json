@@ -7,7 +7,7 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "test": "pnpm test:security && vitest run && pnpm test:runtime && pnpm test:mobile && pnpm test:operations && pnpm test:updates && pnpm test:agent && pnpm --filter @mdc/desktop test:update-harness",
+    "test": "pnpm test:dependencies && pnpm test:security && vitest run && pnpm test:runtime && pnpm test:mobile && pnpm test:operations && pnpm test:updates && pnpm test:agent && pnpm --filter @mdc/desktop test:update-harness",
     "build:web": "pnpm --filter @mdc/web build",
     "test:web": "vitest run apps/web/src",
     "test:rules": "firebase emulators:exec --project demo-mdc --only firestore,storage \"pnpm vitest run --config vitest.rules.config.ts\"",
@@ -16,6 +16,9 @@
     "test:mobile": "pnpm --filter @mdc/mobile test",
     "test:operations": "node --test scripts/operations/*.test.mjs",
     "test:security": "node --test scripts/security/*.test.mjs",
+    "test:dependencies": "node --test scripts/dependencies/*.test.mjs",
+    "security:audit": "node scripts/dependencies/audit.mjs",
+    "security:repair": "node scripts/dependencies/repair.mjs",
     "test:updates": "node --test scripts/updates/*.test.mjs",
     "test:agent": "node --test scripts/agent/*.test.mjs"
   },
@@ -38,7 +41,7 @@
       "gaxios>uuid": "11.1.1",
       "firebase-tools>@google-cloud/pubsub": "6.1.0",
       "xcode>uuid": "11.1.1",
-      "get-uri>basic-ftp": "6.2.1",
+      "get-uri>basic-ftp": "6.2.4",
       "braces": "3.0.3",
       "http-cache-semantics": "4.2.0",
       "@electron/get>global-agent": "4.1.3",
@@ -46,7 +49,10 @@
       "glob@>=9.0.0 <14.0.2": "14.0.2",
       "minimatch@>=7.0.0 <11.0.1": "11.0.1",
       "re2js@>=2.2.0 <2.8.7": "2.8.7",
-      "follow-redirects@>=1.16.0 <1.16.2": "1.16.2"
+      "follow-redirects@>=1.16.0 <1.16.2": "1.16.2",
+      "@hono/node-server@>=2.0.0 <2.1.6": "2.1.6",
+      "hono@>=4.0.0 <4.13.17": "4.13.17",
+      "fast-xml-parser@>=5.0.0 <5.12.0": "5.12.0"
     },
     "patchedDependencies": {
       "braces@3.0.3": "patches/braces@3.0.3.patch",
