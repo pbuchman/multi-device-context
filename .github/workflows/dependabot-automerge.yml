@@ -1,0 +1,47 @@
+name: Dependabot patch auto-merge
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  enable:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.user.id == 49699333 &&
+      github.event.pull_request.user.type == 'Bot' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Execute only trusted base code. Never check out or install the PR head.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.12.0'
+      - uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2
+        id: metadata
+        with:
+          github-token: ${{ github.token }}
+      - name: Enable protected patch auto-merge
+        env:
+          MDC_GITHUB_REPOSITORY: ${{ github.repository }}
+          MDC_GITHUB_EVENT_PATH: ${{ github.event_path }}
+          MDC_GITHUB_TOKEN: ${{ github.token }}
+          MDC_UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          MDC_DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+        run: node scripts/dependencies/automerge.mjs
