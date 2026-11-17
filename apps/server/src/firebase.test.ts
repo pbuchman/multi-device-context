@@ -93,16 +93,20 @@ class FakeFirestore {
     get(ref: FakeDocumentReference): Promise<FakeSnapshot>;
     update(ref: FakeDocumentReference, data: Stored): void;
     set(ref: FakeDocumentReference, data: Stored): void;
+    delete(ref: FakeDocumentReference): void;
   }) => Promise<T>) {
     const updates: Array<[FakeDocumentReference, Stored]> = [];
     const sets: Array<[FakeDocumentReference, Stored]> = [];
+    const deletes: FakeDocumentReference[] = [];
     const result = await callback({
       get: (ref) => ref.get(),
       update: (ref, data) => updates.push([ref, data]),
       set: (ref, data) => sets.push([ref, data]),
+      delete: (ref) => deletes.push(ref),
     });
     for (const [ref, data] of updates) await ref.update(data);
     for (const [ref, data] of sets) await ref.set(data);
+    for (const ref of deletes) await ref.delete();
     return result;
   }
   collectionGroup(name: string) {

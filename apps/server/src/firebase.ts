@@ -2,7 +2,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { diagnostic } from "./diagnostics.js";
 import { assertDeviceContext, type DeviceIdentity } from "./device-access.js";
 import type { Auth } from "firebase-admin/auth";
-import type { Firestore } from "firebase-admin/firestore";
+import type { DocumentReference, Firestore } from "firebase-admin/firestore";
 import type { Storage } from "firebase-admin/storage";
 
 import type { Backend } from "./server.js";
@@ -169,11 +169,12 @@ export class FirebaseBackend implements Backend {
 
   async deleteItem(uid: string, contextId: string, itemId: string, device?: DeviceIdentity, deleteEmptyContext = false): Promise<void> {
     if (deleteEmptyContext) return this.deleteItemAndEmptyContext(uid, contextId, itemId, device);
+    const parent = this.firestore.doc(contextPath(uid, contextId));
     const reference = this.firestore.doc(itemPath(uid, contextId, itemId));
     const deletionMarker = this.firestore.doc(`users/${uid}/deletedItems/${contextId}_${itemId}`);
     const exists = await this.firestore.runTransaction(async (transaction) => {
-      const [snapshot, parent, previousMarker] = await Promise.all([transaction.get(reference), transaction.get(this.firestore.doc(contextPath(uid, contextId))), transaction.get(deletionMarker)]);
-      const access = parent.data() ?? previousMarker.data();
+      const [snapshot, context, previousMarker] = await Promise.all([transaction.get(reference), transaction.get(parent), transaction.get(deletionMarker)]);
+      const access = context.data() ?? previousMarker.data();
       if (device) await assertDeviceContext(this.firestore, device, access, transaction);
       const originDeviceId = access?.originDeviceId;
       transaction.set(deletionMarker, { deleted: true, ...(typeof originDeviceId === "string" ? { originDeviceId } : {}) });
@@ -182,22 +183,21 @@ export class FirebaseBackend implements Backend {
       if (record.deleting !== true) transaction.update(reference, { deleting: true });
       return true;
     });
-    if (!exists) { await this.repairFirstItem(uid, contextId, itemId); return; }
-
-    await this.deleteObjectGenerations(`${itemPath(uid, contextId, itemId)}/`);
-    await reference.delete();
-    await this.repairFirstItem(uid, contextId, itemId);
+    if (exists) await this.deleteObjectGenerations(`${reference.path}/`);
+    await this.finalizeItemDeletion(parent, reference);
   }
 
-  private async repairFirstItem(uid: string, contextId: string, removedId: string) {
-    const parent = this.firestore.doc(contextPath(uid, contextId));
+  private async finalizeItemDeletion(parent: DocumentReference, item: DocumentReference) {
+    // Keep the marked item discoverable by cleanup until its parent is repaired.
     await this.firestore.runTransaction(async tx => {
-      const context = await tx.get(parent);
-      if (!context.exists || context.data()?.deleting !== false || context.data()?.firstItemId !== removedId) return;
-      const remaining = await tx.get(parent.collection("items").where("deleting", "==", false).orderBy("createdAt").limit(1));
-      const first = remaining.docs[0];
-      tx.update(parent, { firstItemId: first?.id ?? FieldValue.delete(), ready: first ? first.data().ready === true : true,
-        ...(context.data()?.titleState === "pending" ? { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() } : {}) });
+      const context = (await tx.get(parent)).data();
+      if (context?.deleting === false && context.firstItemId === item.id) {
+        const remaining = await tx.get(parent.collection("items").where("deleting", "==", false).orderBy("createdAt").limit(1));
+        const first = remaining.docs[0];
+        tx.update(parent, { firstItemId: first?.id ?? FieldValue.delete(), ready: first ? first.data().ready === true : true,
+          ...(context.titleState === "pending" ? { titleState: "fallback", titleLease: FieldValue.delete(), titleLeaseUntil: FieldValue.delete() } : {}) });
+      }
+      tx.delete(item);
     });
   }
 
@@ -228,10 +228,8 @@ export class FirebaseBackend implements Backend {
       return target.exists ? "item" as const : "missing" as const;
     });
     if (result === "context") { await this.cleanupMarkedContext(uid, contextId); return; }
-    if (result === "missing") { await this.repairFirstItem(uid, contextId, itemId); return; }
-    await this.deleteObjectGenerations(`${itemPath(uid, contextId, itemId)}/`);
-    await item.delete();
-    await this.repairFirstItem(uid, contextId, itemId);
+    if (result === "item") await this.deleteObjectGenerations(`${item.path}/`);
+    await this.finalizeItemDeletion(parent, item);
   }
 
   async deleteContext(uid: string, contextId: string, device?: DeviceIdentity): Promise<void> {
