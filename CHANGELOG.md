@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### 0.7.3 — Desktop sign-in recovery
+
+- macOS and Windows clear an expired refresh credential when the sign-in
+  service rejects it with HTTP 400 or 403 and `invalid_grant`. This fixes the
+  retry loop that reported an expired session without opening the browser.
+- An interactive sign-in continues into browser-based Google sign-in with PKCE
+  in the same attempt. Background session restoration never opens the browser;
+  transient failures retain the saved session.
+- Recovery retains the local account owner, device identity, installation proof
+  and queued shares. A late rejection cannot clear a newer sign-in generation.
+- Desktop and Android package versions are 0.7.3; Android uses code 25 solely
+  to align the shared Preview catalog. Android behavior is unchanged. Source
+  and CI checks do not establish physical installation or update acceptance.
+
 ### 0.7.2 — Compact macOS menu bar icon
 
 - macOS uses a compact native menu bar icon with Retina representations and
