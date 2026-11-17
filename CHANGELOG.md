@@ -8,7 +8,7 @@
 - Scope message deletion to its conversation, remove empty chats after confirmation, and recover interrupted first-message deletion.
 - Release temporary Android save files, isolate unreadable incoming attachments, and review incoming desktop shares before committing sign-out.
 - Accept mixed-case attachment media types, schedule ready title jobs fairly, and preserve title attempts during uploads.
-- Publish completed CLI downloads atomically. Update the portable CLI by copying the released `skills/multi-device-context` directory.
+- CLI downloads finish transferring before publishing the file, preserve existing files, and support retrying the same path after interruption. Update the portable CLI by copying the released `skills/multi-device-context` directory.
 
 ### 0.7.3 — Desktop sign-in recovery
 
