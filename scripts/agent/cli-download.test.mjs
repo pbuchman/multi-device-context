@@ -15,7 +15,7 @@ const otherItemId = '30000000-0000-4000-8000-000000000002';
 const payload = Buffer.alloc(64 * 1024, 0xa5);
 const contentPath = id => `/api/agent/v1/contexts/${contextId}/items/${id}/content`;
 
-async function fixture(t, handleRequest) {
+async function fixture(t, handleRequest, linkError) {
   const dir = await mkdtemp(join(tmpdir(), 'mdc-cli-download-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const config = join(dir, 'config.json');
@@ -34,8 +34,15 @@ async function fixture(t, handleRequest) {
     await closed;
   });
   await writeFile(preload, `
+    import fs from 'node:fs/promises';
+    import { syncBuiltinESMExports } from 'node:module';
     const fetch = globalThis.fetch;
     globalThis.fetch = (url, init) => fetch('http://127.0.0.1:${server.address().port}' + new URL(url).pathname, init);
+    const linkError = ${JSON.stringify(linkError)};
+    if (linkError) {
+      fs.link = async () => { throw Object.assign(new Error('Injected link failure'), { code: linkError }); };
+      syncBuiltinESMExports();
+    }
   `);
   async function download(id = itemId) {
     const child = spawn(process.execPath, ['--import', preload, cli, 'download', contextId, id, outputPath], {
@@ -55,7 +62,20 @@ function writeHeaders(res, buffer) {
   res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': buffer.length });
 }
 
-test('an interrupted download leaves no output and can retry the same path', { timeout: 10000 }, async t => {
+function servePayload(req, res) {
+  if (req.url !== contentPath(itemId)) return res.writeHead(404).end();
+  writeHeaders(res, payload);
+  res.end(payload);
+}
+
+function testPublication(name, run) {
+  for (const linkError of [undefined, 'EPERM', 'ENOTSUP']) {
+    const label = linkError ? ` (link returns ${linkError})` : '';
+    test(name + label, { timeout: 10000 }, t => run(t, linkError));
+  }
+}
+
+testPublication('an interrupted download leaves no output and can retry the same path', async (t, linkError) => {
   let attempts = 0;
   const { download, outputPath, outputDir } = await fixture(t, (req, res) => {
     if (req.url !== contentPath(itemId)) return res.writeHead(404).end();
@@ -64,7 +84,7 @@ test('an interrupted download leaves no output and can retry the same path', { t
       res.write(payload.subarray(0, 8192));
       setTimeout(() => res.destroy(), 100);
     } else res.end(payload);
-  });
+  }, linkError);
   const interrupted = await download();
   assert.equal(interrupted.code, 1);
   assert.equal(interrupted.stdout, '');
@@ -78,12 +98,8 @@ test('an interrupted download leaves no output and can retry the same path', { t
   assert.deepEqual(await readdir(outputDir), ['document.bin']);
 });
 
-test('downloading refuses to replace an existing file', { timeout: 10000 }, async t => {
-  const { download, outputPath, outputDir } = await fixture(t, (req, res) => {
-    if (req.url !== contentPath(itemId)) return res.writeHead(404).end();
-    writeHeaders(res, payload);
-    res.end(payload);
-  });
+testPublication('downloading refuses to replace an existing file', async (t, linkError) => {
+  const { download, outputPath, outputDir } = await fixture(t, servePayload, linkError);
   const existing = Buffer.from('original file');
   await writeFile(outputPath, existing);
 
@@ -94,7 +110,7 @@ test('downloading refuses to replace an existing file', { timeout: 10000 }, asyn
   assert.deepEqual(await readdir(outputDir), ['document.bin']);
 });
 
-test('competing downloads publish exactly one complete file', { timeout: 10000 }, async t => {
+testPublication('competing downloads publish exactly one complete file', async (t, linkError) => {
   const payloads = [payload, Buffer.alloc(payload.length, 0x5a)];
   const responses = [];
   const { download, outputPath, outputDir } = await fixture(t, (req, res) => {
@@ -106,7 +122,7 @@ test('competing downloads publish exactly one complete file', { timeout: 10000 }
       writeHeaders(res, buffer);
       res.end(buffer);
     }
-  });
+  }, linkError);
   const results = await Promise.all([download(), download(otherItemId)]);
   assert.deepEqual(results.map(result => result.code).sort(), [0, 1]);
   const winner = results.findIndex(result => result.code === 0);
@@ -114,4 +130,12 @@ test('competing downloads publish exactly one complete file', { timeout: 10000 }
   assert.equal(results[1 - winner].stdout, '');
   assert.deepEqual(await readFile(outputPath), payloads[winner]);
   assert.deepEqual(await readdir(outputDir), ['document.bin']);
+});
+
+test('an unexpected publication error leaves the destination empty', { timeout: 10000 }, async t => {
+  const { download, outputDir } = await fixture(t, servePayload, 'EIO');
+  const result = await download();
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, '');
+  assert.deepEqual(await readdir(outputDir), []);
 });

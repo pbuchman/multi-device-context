@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { link, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { copyFile, link, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { constants, createReadStream, createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { homedir } from 'node:os';
@@ -147,8 +147,13 @@ try {
       const response = await request(contentPath, 'GET', undefined, true);
       const staged = join(stagingDirectory, 'content');
       await pipeline(Readable.fromWeb(response.body), createWriteStream(staged, { flags: 'wx', mode: 0o600 }));
-      // Linking publishes the completed file atomically and fails if the destination exists.
-      await link(staged, destination);
+      try {
+        await link(staged, destination);
+      } catch (error) {
+        // Linux can report EPERM when a filesystem does not support hard links.
+        if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) throw error;
+        await copyFile(staged, destination, constants.COPYFILE_EXCL);
+      }
     } finally {
       await rm(stagingDirectory, { recursive: true, force: true });
     }
