@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { homedir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 class InputError extends Error {}
@@ -138,10 +138,21 @@ try {
   else if (command === 'pin' || command === 'unpin') output(await (await request('/' + id(args[0]), 'PATCH', { pinned: command === 'pin' })).json());
   else if (command === 'delete') { await request('/' + id(args[0]) + (args[1] ? '/items/' + id(args[1]) : ''), 'DELETE'); output({ deleted: true }); }
   else if (command === 'download') {
-    if (!args[2]) throw new InputError('Output path required');
-    const response = await request(`/${id(args[0])}/items/${id(args[1])}/content`, 'GET', undefined, true);
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(args[2], { flags: 'wx', mode: 0o600 }));
-    output({ saved: args[2] });
+    const destination = args[2];
+    if (!destination) throw new InputError('Output path required');
+    const contentPath = `/${id(args[0])}/items/${id(args[1])}/content`;
+    const parent = await realpath(dirname(destination));
+    const stagingDirectory = await mkdtemp(join(parent, '.mdc-download-'));
+    try {
+      const response = await request(contentPath, 'GET', undefined, true);
+      const staged = join(stagingDirectory, 'content');
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(staged, { flags: 'wx', mode: 0o600 }));
+      // Linking publishes the completed file atomically and fails if the destination exists.
+      await link(staged, destination);
+    } finally {
+      await rm(stagingDirectory, { recursive: true, force: true });
+    }
+    output({ saved: destination });
   } else if (command === 'upload') {
     const contextId = id(args[0]); const path = args[1]; const size = (await stat(path)).size;
     const itemId = id(flags['item-id'] ?? randomUUID());
