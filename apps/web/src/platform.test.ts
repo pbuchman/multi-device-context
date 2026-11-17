@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
 import type { DesktopBridge } from "@mdc/contracts";
-import { createPlatformAdapter } from "./platform.js";
+import { createPlatformAdapter, NativeSignOutReviewRequired } from "./platform.js";
 
 afterEach(() => { delete window.contextDesktop; });
 it("keeps browser and desktop adapters independent of Android imports", async () => {
@@ -25,19 +25,25 @@ it("exposes native updates only when every optional v1 capability is present", a
   };
   expect((await createPlatformAdapter({ mobile: false })).updates).toBeDefined();
 });
-it("refuses old desktop sign-out even when its current inbox is empty", async () => {
+it.each([undefined, true])("refuses old desktop sign-out even when its inbox is empty (legacy review marker=%s)", async reviewedSignOut => {
   const signOut = vi.fn(async () => {});
-  window.contextDesktop = { version: 1, platform: "linux", signOut } as unknown as DesktopBridge;
+  window.contextDesktop = { version: 1, platform: "linux", reviewedSignOut, signOut } as unknown as DesktopBridge;
   const adapter = await createPlatformAdapter({ mobile: false });
   await expect(adapter.native!.signOut([])).rejects.toThrow(/Update this desktop app/);
   expect(signOut).not.toHaveBeenCalled();
 });
 it("passes the exact reviewed snapshot only to a compatible private desktop implementation", async () => {
-  const signOut = vi.fn(async () => {});
-  window.contextDesktop = { version: 1, platform: "linux", reviewedSignOut: true, signOut } as unknown as DesktopBridge;
+  const signOutReviewed = vi.fn(async () => ({ status: "complete" as const }));
+  window.contextDesktop = { version: 1, platform: "linux", signOutReviewed } as unknown as DesktopBridge;
   const adapter = await createPlatformAdapter({ mobile: false });
   await adapter.native!.signOut(["reviewed"]);
-  expect(signOut).toHaveBeenCalledWith(["reviewed"]);
+  expect(signOutReviewed).toHaveBeenCalledWith(["reviewed"]);
+});
+it("maps the structured desktop response to a reconfirmation request", async () => {
+  const signOutReviewed = vi.fn(async () => ({ status: "changed" as const }));
+  window.contextDesktop = { version: 1, platform: "linux", signOutReviewed } as unknown as DesktopBridge;
+  const adapter = await createPlatformAdapter({ mobile: false });
+  await expect(adapter.native!.signOut([])).rejects.toBeInstanceOf(NativeSignOutReviewRequired);
 });
 it("rejects incompatible desktop bridges and loads Android only for mobile builds", async () => {
   window.contextDesktop = { version: 2 } as unknown as DesktopBridge;

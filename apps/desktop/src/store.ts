@@ -262,6 +262,9 @@ export class NativeStore {
       delete state.session;
     });
   }
+  hasUnreviewedShares(reviewedNativeIds: readonly string[]): boolean {
+    return this.state.pending.some(share => !reviewedNativeIds.includes(share.id));
+  }
   async clearAccount(reviewedNativeIds?: readonly string[]): Promise<void> {
     await this.change((state) => {
       if (reviewedNativeIds && state.pending.some(share => !reviewedNativeIds.includes(share.id)))

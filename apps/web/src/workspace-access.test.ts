@@ -2,6 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import type { ShareDraft } from "./model.js";
 import type { ActiveSession } from "./auth.js";
+import { NativeSignOutReviewRequired } from "./platform.js";
 import { applyLocalAccess } from "./local-access.js";
 const state = vi.hoisted(() => ({ device: { id: "11111111-1111-4111-8111-111111111111", name: "Verified Phone", platform: "android" as const, mode: "all" as "own" | "all", version: 1, createdAt: 1, updatedAt: 1 }, listener: undefined as undefined | ((value: unknown) => void), failed: undefined as undefined | (() => void), publish: vi.fn(async()=>{}), invalidated: vi.fn() }));
 vi.mock("./history.js",()=>({prepareHistory:async()=>{}}));
@@ -30,6 +31,35 @@ it("suppresses policy-error reconnect while reviewed account sign-out owns shutd
  const active=session();active.signOut=async cleanup=>{state.failed!();await cleanup?.();};const changed=vi.fn(),bundle=await buildServices(active,changed);
  const review=await bundle.services.accountSignOut!.prepare();await bundle.services.accountSignOut!.confirm(review);
  expect(changed).not.toHaveBeenCalled();bundle.dispose();
+});
+it("refreshes sign-out review after a late native share and preserves workspace access", async () => {
+  const active = session();
+  let pending: { id: string }[] = [];
+  active.platform = { ...active.platform, kind: "desktop", native: { getPendingClipboardShares: async () => pending } } as ActiveSession["platform"];
+  const signOut = vi.fn<ActiveSession["signOut"]>(async cleanup => { await cleanup?.(); });
+  signOut.mockImplementationOnce(async () => {
+    pending = [{ id: crypto.randomUUID() }];
+    throw new NativeSignOutReviewRequired();
+  });
+  active.signOut = signOut;
+  const changed = vi.fn();
+  const bundle = await buildServices(active, changed);
+  try {
+    const flow = bundle.services.accountSignOut!;
+    const review = await flow.prepare();
+    expect(review.nativeBatches).toBe(0);
+    const result = await flow.confirm(review);
+    expect(result).toMatchObject({ status: "changed", summary: { nativeBatches: 1 } });
+    expect(flow.locked).toBe(false);
+    expect(bundle.services.accessActive!()).toBe(true);
+    expect(await bundle.services.checkAccess!()).toBeUndefined();
+    expect(state.invalidated).not.toHaveBeenCalled();
+    expect(changed).not.toHaveBeenCalled();
+    if (result.status !== "changed") throw new Error("Expected renewed sign-out review");
+    expect(await flow.confirm(result.summary)).toEqual({ status: "complete" });
+    expect(signOut.mock.calls.map(([, ids]) => ids)).toEqual([[], [pending[0]!.id]]);
+    expect(state.invalidated).toHaveBeenCalledOnce();
+  } finally { bundle.dispose(); }
 });
 it("accepts name-only updates without invalidation and preserves existing device snapshots",async()=>{
  const changed=vi.fn(),active=session(),bundle=await buildServices(active,changed);

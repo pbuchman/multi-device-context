@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClipboardSnapshot } from "@mdc/contracts";
 import { ContextWorkspace, type WorkspaceServices } from "./App.js";
+import { createAccountSignOut } from "./account-signout.js";
+import { NativeSignOutReviewRequired } from "./platform.js";
 
 const alpha = "00000000-0000-4000-8000-000000000001";
 const beta = "00000000-0000-4000-8000-000000000002";
@@ -138,6 +140,31 @@ it("treats failed sign-out inventory as an error and does not clear or sign out"
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(composer().value).toBe("unsent");
   expect(t.services.signOut).not.toHaveBeenCalled(); expect(t.services.outbox.clear).not.toHaveBeenCalled();
+});
+
+it("shows updated counts and lets the user cancel when the native sign-out review changes", async () => {
+  const t = fixture();
+  let pending: { id: string }[] = [];
+  const restore = vi.fn();
+  t.services.accountSignOut = createAccountSignOut({
+    namespace: t.services.outbox.namespace,
+    readNativeRequests: async () => pending,
+    pause: () => restore,
+    settle: async () => {},
+    signOut: async () => { pending = [{ id: beta }]; throw new NativeSignOutReviewRequired(); },
+  });
+  render(<ContextWorkspace services={t.services} />);
+  fireEvent.change(composer(), { target: { value: "unsent" } });
+  await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
+  await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm sign out" }));
+  await screen.findByText("Local data changed. Review the updated counts before confirming again.");
+  expect(screen.getByText("Incoming native share batches").nextElementSibling?.textContent).toBe("1");
+  expect(screen.queryByRole("button", { name: "Retry sign out" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(restore).toHaveBeenCalledOnce();
+  expect(composer().disabled).toBe(false);
+  expect(composer().value).toBe("unsent");
 });
 
 it("discards a pending binary confirmation when its captured chat is deleted", async () => {

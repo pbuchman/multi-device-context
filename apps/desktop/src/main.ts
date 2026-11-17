@@ -27,7 +27,9 @@ import {
   IdSchema,
   RuntimeConfigSchema,
   isTrustedAppUrl,
+  type DesktopSignOutResult,
   type NativeFile,
+  type PendingClipboardShare,
 } from "@mdc/contracts";
 import { NsisUpdater } from "electron-updater";
 import { AuthManager } from "./auth.js";
@@ -345,16 +347,23 @@ function connect(): Promise<void> {
 async function readClipboard() {
   return captureClipboard(await clipboard.read(), process.platform);
 }
+const clipboardCaptures = new Set<Promise<PendingClipboardShare>>();
+let signOutInProgress = false;
 async function shareClipboard(): Promise<void> {
+  if (signOutInProgress) return;
   const generation = store.accountGeneration();
+  const capture = readClipboard().then(snapshot => store.enqueue(snapshot, generation));
+  clipboardCaptures.add(capture);
   try {
-    await store.enqueue(await readClipboard(), generation);
+    await capture;
     show();
     if (isTrustedAppUrl(window!.webContents.getURL(), MDC_APP_ORIGIN))
       window!.webContents.send("mdc:shareClipboard");
     else await connect();
   } catch (error) {
     report(error);
+  } finally {
+    clipboardCaptures.delete(capture);
   }
 }
 function createTray(): void {
@@ -377,6 +386,7 @@ function refreshTray(): void {
       { label: "Open contexts", click: openNew },
       {
         label: "Share clipboard",
+        enabled: !signOutInProgress,
         click: () => {
           void shareClipboard();
         },
@@ -469,15 +479,27 @@ function wireBridge(): void {
     if (!auth) throw new Error("Sign-in is unavailable. Reconnect and retry.");
     return auth.getAccessToken(interactive);
   });
-  handle("signOut", 1, async (reviewed) => {
+  handle("signOut", 1, async (reviewed): Promise<DesktopSignOutResult> => {
     if (!Array.isArray(reviewed) || reviewed.length > 256) throw new Error("Invalid sign-out review.");
     const reviewedIds = reviewed.map(id => IdSchema.parse(id));
-    store.invalidateInstallationSessions();
-    transferGeneration++;
-    await auth?.signOut();
-    await store.clearAccount(reviewedIds);
-    transferGeneration++;
-    await copies.clear();
+    if (signOutInProgress) throw new Error("Sign-out is already in progress.");
+    signOutInProgress = true;
+    try {
+      refreshTray();
+      // Finish captures admitted before confirmation and keep the inbox closed through revocation.
+      await Promise.allSettled(clipboardCaptures);
+      if (store.hasUnreviewedShares(reviewedIds)) return { status: "changed" };
+      store.invalidateInstallationSessions();
+      transferGeneration++;
+      await auth?.signOut();
+      await store.clearAccount(reviewedIds);
+      transferGeneration++;
+      await copies.clear();
+      return { status: "complete" };
+    } finally {
+      signOutInProgress = false;
+      refreshTray();
+    }
   });
   handle("readClipboard", 0, readClipboard);
   handle("getPendingClipboardShares", 0, () => store.pendingShares());

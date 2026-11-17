@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import type { PlatformAdapter } from "./platform.js";
+import { NativeSignOutReviewRequired, type PlatformAdapter } from "./platform.js";
 const sdk = vi.hoisted(() => ({
   createAuth0Client: vi.fn(), initializeApp: vi.fn(() => ({ name: "test" })), deleteApp: vi.fn(async () => {}),
   initializeAuth: vi.fn(() => ({ persistence: "memory" })), getAuth: vi.fn(() => ({ persistence: "browser" })),
@@ -115,8 +115,8 @@ it("keeps the browser session usable if profile lookup fails", async () => {
   expect(sdk.deleteApp).not.toHaveBeenCalled();
 });
 
-it("invalidates native auth before web cleanup and leaves web data untouched on auth failure", async () => {
-  const f = fixture(); const session = (await f.manager.login())!;
+it.each(["android", "desktop"] as const)("keeps %s web data untouched and blocks the session on an uncertain native auth failure", async kind => {
+  const f = fixture(kind); const session = (await f.manager.login())!;
   const cleanup = vi.fn(async () => {});
   f.native.signOut.mockRejectedValueOnce(new Error("partial native failure"));
   await expect(session.signOut(cleanup)).rejects.toThrow("partial native failure");
@@ -137,9 +137,13 @@ it("retries failed cleanup without repeating successful native sign-out", async 
 
 it("passes only explicitly reviewed native IDs and allows reconfirmation after a native race", async () => {
   const f = fixture("desktop"), session = (await f.manager.login())!, cleanup = vi.fn(async () => {});
-  f.native.signOut.mockRejectedValueOnce(new Error("Inbox changed"));
-  await expect(session.signOut(cleanup, ["reviewed"])).rejects.toThrow("changed");
+  f.native.signOut.mockRejectedValueOnce(new NativeSignOutReviewRequired());
+  await expect(session.signOut(cleanup, ["reviewed"])).rejects.toBeInstanceOf(NativeSignOutReviewRequired);
   expect(cleanup).not.toHaveBeenCalled();
+  expect(sdk.signOut).not.toHaveBeenCalled();
+  expect(sdk.deleteApp).not.toHaveBeenCalled();
+  expect(await session.accessToken()).toBe("firebase-access");
+  expect(await f.manager.restore()).toBe(session);
   await session.signOut(cleanup, ["reviewed", "new"]);
   expect(f.native.signOut.mock.calls).toEqual([[["reviewed"]], [["reviewed", "new"]]]);
   expect(cleanup).toHaveBeenCalledOnce();

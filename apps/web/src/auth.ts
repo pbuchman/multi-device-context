@@ -9,7 +9,7 @@ import { deleteApp, initializeApp, type FirebaseApp } from "firebase/app";
 import { getAuth, initializeAuth, inMemoryPersistence, signInWithCustomToken, signOut as firebaseSignOut } from "firebase/auth";
 import { clearIndexedDbPersistence, getFirestore, terminate } from "firebase/firestore";
 
-import { createPlatformAdapter, type PlatformAdapter } from "./platform.js";
+import { createPlatformAdapter, NativeSignOutReviewRequired, type PlatformAdapter } from "./platform.js";
 import type { Viewer } from "./model.js";
 
 type Fetcher = typeof fetch;
@@ -371,24 +371,40 @@ export class SessionManager {
         if (signingOut) throw new Error("Your session has expired");
         const token = await credential.user.getIdToken();
         current();
+        if (signingOut) throw new Error("Your session has expired");
         return token;
       },
       signOut: (cleanup, reviewedNativeIds = []) => {
         if (signingOut) return signingOut;
         if (logoutDone) return Promise.resolve();
-        if (logoutGeneration === undefined) {
-          try { current(); platform.assertCanSignOut?.(); } catch (error) { return Promise.reject(error); }
-          this.#signOutActive = true;
+        const invalidateSession = () => {
           logoutGeneration = ++this.#generation;
           this.#session = undefined;
           profile.dispose();
+        };
+        if (logoutGeneration === undefined) {
+          try { current(); platform.assertCanSignOut?.(); } catch (error) { return Promise.reject(error); }
+          this.#signOutActive = true;
+          if (platform.kind !== "desktop") invalidateSession();
         }
         const logoutCurrent = () => {
           if (this.#disposed || logoutGeneration !== this.#generation || this.#session) throw new Error("Your session has expired");
         };
         const operation = (async () => {
-          logoutCurrent();
-          if (platform.native && !nativeSignedOut) { await platform.native.signOut(reviewedNativeIds); nativeSignedOut = true; }
+          if (logoutGeneration !== undefined) logoutCurrent();
+          if (platform.native && !nativeSignedOut) {
+            try { await platform.native.signOut(reviewedNativeIds); nativeSignedOut = true; }
+            catch (error) {
+              if (logoutGeneration === undefined) {
+                if (error instanceof NativeSignOutReviewRequired) this.#signOutActive = false;
+                else if (!this.#disposed) invalidateSession();
+              } else if (error instanceof NativeSignOutReviewRequired) {
+                throw new Error(error.message, { cause: error });
+              }
+              throw error;
+            }
+          }
+          if (logoutGeneration === undefined) { current(); invalidateSession(); }
           logoutCurrent();
           await disposeSessionFirebase();
           logoutCurrent();

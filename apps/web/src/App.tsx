@@ -6,6 +6,7 @@ import { AccessPage } from "./AccessPage.js";
 import { isAccessPageRequest } from "./browser-identity.js";
 import { applyLocalAccess, readLocalAccess } from "./local-access.js";
 import { createAccountSignOut, type AccountSignOut, type SignOutSummary } from "./account-signout.js";
+import { NativeSignOutReviewRequired } from "./platform.js";
 import { prepareHistory } from "./history.js";
 import { ContextOperations } from "./operations.js";
 import { subscribeLocal } from "./local-db.js";
@@ -21,7 +22,7 @@ import { SessionManager, type ActiveSession, type SessionProfile } from "./auth.
 import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
 import { drainNativeClipboardQueue, type NativeQueueStore } from "./desktop.js";
 import { itemKey, type ContextRecord, type ItemIdentity, type ItemRecord, type ShareDraft, type Viewer } from "./model.js";
-import { DurableOutbox, type QueuedShare } from "./outbox.js";
+import { DurableOutbox, type CancelledShares, type QueuedShare } from "./outbox.js";
 import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
 import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, displayTitle, formatFileSize } from "./workspace-view.js";
 import { contextSourceLabel, useContextOrigins } from "./context-origins.js";
@@ -62,7 +63,7 @@ export type WorkspaceOutbox = {
   readonly namespace: string;
   removeContext?(id: Id): Promise<void>;
   removeItem?(contextId: Id, itemId: Id): Promise<void>;
-  cancelled?(): Promise<{ contexts: Id[]; items: ItemIdentity[] }>;
+  cancelled?(): Promise<CancelledShares>;
   deletions?(): Promise<{ contextId: Id; itemId?: Id; attempts?: number; paused?: boolean; nextAttemptAt?: number }[]>;
   enqueueBatch?(drafts: ShareDraft[]): Promise<void>;
   enqueue(draft: ShareDraft): Promise<void>;
@@ -724,14 +725,17 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         localQueuedContexts.current.delete(id);
       }
       for (const item of cancelled.items) deletedItems.current.add(itemKey(item.contextId, item.itemId));
-      setContexts(current => current.filter(c => !deleted.current.has(c.id)));
+      const cancelledLocalChats = new Set(cancelled.localCreations.filter(id =>
+        localQueuedContexts.current.delete(id) && !confirmedContextIdsRef.current.has(id)));
+      setContexts(current => current.filter(c => !deleted.current.has(c.id) && !cancelledLocalChats.has(c.id)));
       setItems(current => current.filter(item => !isItemDeleted(item) && !deleted.current.has(item.contextId)));
       setOptimisticItems(current => current.filter(item => !isItemDeleted(item) && !deleted.current.has(item.contextId)));
+      if (cancelledLocalChats.has(navigation.selectedRef.current.id)) setSelectedId(undefined);
     }
     setQueueCount(queued.length);
     const failed = queued.find((record) => record.status === "paused" || record.status === "failed");
     if (failed?.lastError) setError(failed.lastError);
-  }, [isItemDeleted, services.outbox]);
+  }, [isItemDeleted, isLive, navigation.selectedRef, services.outbox, setSelectedId]);
   useEffect(() => { void refreshQueue(); return subscribeLocal(() => { void refreshQueue(); }); }, [refreshQueue]);
   useEffect(() => {
     if ((queueCount === 0 && deletionCount === 0) || (services.platformKind === "android" && !active)) return;
@@ -1090,7 +1094,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       deletedItems.current.add(key);
       setItems(current => current.filter(i => itemKey(i.contextId, i.id) !== key));
       setOptimisticItems(current => current.filter(i => itemKey(i.contextId, i.id) !== key));
-      if (!confirmedContextIds.has(item.contextId) && !(await services.outbox.list()).some(record => record.contextId === item.contextId)) {
+      if (!services.outbox.cancelled && !confirmedContextIds.has(item.contextId) && !(await services.outbox.list()).some(record => record.contextId === item.contextId)) {
         localQueuedContexts.current.delete(item.contextId);
         setContexts(current => current.filter(context => context.id !== item.contextId));
         if (navigation.selectedRef.current.id === item.contextId) setSelectedId(undefined);
@@ -1451,7 +1455,19 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
       return () => { nativeIntakeEnabled = previousIntake; if (!wasStopped && activityActive) runner.resume(); };
     },
     settle: async () => { await Promise.all([runner.stopAndWait(), nativeDrainPending ?? Promise.resolve()]); },
-    signOut: (cleanup, nativeIds) => { accessActive = false; cloud.invalidate(); return session.signOut(cleanup, nativeIds); },
+    signOut: async (cleanup, nativeIds) => {
+      const closeAccess = () => {
+        if (!accessActive) return;
+        accessActive = false;
+        cloud.invalidate();
+      };
+      try {
+        await session.signOut(async () => { closeAccess(); await cleanup(); }, nativeIds);
+      } catch (error) {
+        if (!(error instanceof NativeSignOutReviewRequired)) closeAccess();
+        throw error;
+      }
+    },
   });
   const initialNavigation = await native?.takeNavigation?.();
   if (initialNavigation && !initialNavigation.contextId && !initialNativeId) window.history.replaceState({}, "", "/");
@@ -1460,7 +1476,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   const stopLocalPolicy = subscribeLocal(() => {
     void readLocalAccess(outbox.namespace).then(local => {
       if (accessActive && !accountSignOut.locked && local && (local.deviceId !== device.id || local.version > session.device.version || local.mode !== session.device.mode)) { invalidate(); onAccessChange(); }
-    }).catch(() => { if (accessActive) { invalidate(); onAccessChange(); } });
+    }).catch(() => { if (accessActive && !accountSignOut.locked) { invalidate(); onAccessChange(); } });
   });
   const stopPolicy = cloud.subscribeDevice(current => {
     if (!accessActive || accountSignOut.locked) return;
