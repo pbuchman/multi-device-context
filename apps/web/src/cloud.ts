@@ -138,7 +138,7 @@ function itemFromDocument(contextId: Id, document: QueryDocumentSnapshot<Documen
   return {
     id: document.id as Id,
     contextId,
-    content: content.data,
+    content: content.data.kind === "attachment" ? { ...content.data, contentType: content.data.contentType.toLowerCase() } : content.data,
     device: device.data,
     createdAt: timestampMillis(data.createdAt),
     ready: data.ready,
@@ -364,7 +364,7 @@ export class FirebaseCloud {
     const response = await this.#api(`/api/contexts/${contextId}/items/${itemId}/content`, "GET");
     const blob = await response.blob();
     this.#current();
-    if (blob.size !== content.size || (blob.type && blob.type !== content.contentType)) {
+    if (blob.size !== content.size || (blob.type && blob.type.toLowerCase() !== content.contentType.toLowerCase())) {
       throw new Error("Downloaded file metadata does not match the shared item");
     }
     return new Uint8Array(await blob.arrayBuffer());

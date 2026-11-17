@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { deleteApp, initializeApp } from "firebase/app";
 
-import { cloudFailure, publishQueuedShare, type CloudWritePort } from "./cloud.js";
+import { cloudFailure, FirebaseCloud, publishQueuedShare, type CloudWritePort } from "./cloud.js";
 import type { QueuedShare } from "./outbox.js";
 
 const textRecord: QueuedShare = {
@@ -17,6 +18,29 @@ const textRecord: QueuedShare = {
   nextAttemptAt: 0,
   status: "pending",
 };
+
+describe("attachment download metadata", () => {
+  let app: ReturnType<typeof initializeApp> | undefined;
+  afterEach(async () => { vi.unstubAllGlobals(); if (app) await deleteApp(app); });
+
+  it.each([
+    ["Text/Plain", 4, true],
+    ["text/plain", 4, true],
+    ["text/html", 4, false],
+    ["text/plain", 3, false],
+  ] as const)("validates stored MIME %s and size %i against downloaded bytes", async (contentType, size, accepted) => {
+    app = initializeApp({ projectId: "demo-mdc-download", apiKey: "synthetic" }, "attachment-download-test");
+    const cloud = new FirebaseCloud(app, "test-download", async () => "synthetic-token", {
+      ...textRecord.device, platform: "browser", mode: "all", version: 1, createdAt: 1, updatedAt: 1,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("test", { headers: { "Content-Type": "Text/Plain" } })));
+    const bytes = cloud.attachmentBytes(textRecord.contextId, textRecord.itemId, {
+      kind: "attachment", name: "audit.txt", contentType, size,
+    });
+    if (accepted) expect(new TextDecoder().decode(await bytes)).toBe("test");
+    else await expect(bytes).rejects.toThrow("Downloaded file metadata does not match the shared item");
+  });
+});
 
 function port(overrides: Partial<CloudWritePort> = {}): CloudWritePort {
   return {

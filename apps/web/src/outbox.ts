@@ -2,7 +2,7 @@ import { assertLocalAccess, transactionAccess, allowedByLocalPolicy } from "./lo
 import { openLocalDatabase, changed } from "./local-db.js";
 import type { Id } from "@mdc/contracts";
 
-import type { ShareDraft } from "./model.js";
+import { itemKey, type ItemIdentity, type ShareDraft } from "./model.js";
 import type { DictationAuthority } from "./dictation.js";
 
 export type AccountNamespace = { projectId: string; uid: string };
@@ -28,13 +28,20 @@ type DictationMarker = { key: string; kind: "dictation"; namespace: string; sess
 type StoredAction = QueuedShare & { kind: "action" };
 type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
 export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
-type ItemMarker = { key: string; kind: "deleted-item"; namespace: string; contextId: Id; itemId: Id };
+type ItemMarker = ItemIdentity & { key: string; kind: "deleted-item"; namespace: string };
 type StoredRecord = StoredAction | NativeMarker | DictationMarker | DeletedMarker | ItemMarker | Deletion;
 
 const STORE_NAME = "records";
 
 function finalDeletionPending(records: StoredRecord[], contextId: Id): boolean {
   return records.some(record => record.kind === "deletion" && record.contextId === contextId && record.deleteEmptyContext === true);
+}
+
+function actionKey(namespace: string, draft: ItemIdentity, existing: StoredRecord[]): string {
+  const legacy = `action:${namespace}:${draft.itemId}`;
+  // Keep an existing row's key stable for in-flight retries and cancellation.
+  if (existing.some(record => record.kind === "action" && record.key === legacy && record.contextId === draft.contextId)) return legacy;
+  return `action:${namespace}:${itemKey(draft.contextId, draft.itemId)}`;
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -100,10 +107,11 @@ export class DurableOutbox {
       check();
       const existing = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
       check();
-      const removed = await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)); check();
-      if (finalDeletionPending(existing, draft.contextId) || removed) throw new PublishFailure("This context was deleted", false);
+      const removed = await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`));
+      const itemRemoved = await requestResult(store.get(`deleted-item:${this.namespace}:${itemKey(draft.contextId, draft.itemId)}`)); check();
+      if (finalDeletionPending(existing, draft.contextId) || removed || itemRemoved) throw new PublishFailure("This context or item was deleted", false);
       store.add({ key, kind: "dictation", namespace: this.namespace, sessionId, contextId: draft.contextId, itemId: draft.itemId } satisfies DictationMarker);
-      await requestResult(store.add({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction));
+      await requestResult(store.add({ ...draft, key: actionKey(this.namespace, draft, existing), kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction));
       // Keep IDB active only for a bounded local native admission check. The
       // final live check+commit run together in an active IDB request callback.
       await new Promise<void>((resolve, reject) => {
@@ -147,8 +155,8 @@ export class DurableOutbox {
       for (const draft of drafts) {
         await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
         if (finalDeletionPending(existing, draft.contextId)) throw new PublishFailure("This context is being deleted", false);
-        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) throw new PublishFailure("This context or item was deleted", false);
-        store.put({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
+        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${itemKey(draft.contextId, draft.itemId)}`))) throw new PublishFailure("This context or item was deleted", false);
+        store.put({ ...draft, key: actionKey(this.namespace, draft, existing), kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
       }
       await complete; changed();
     } catch (error) {
@@ -169,8 +177,8 @@ export class DurableOutbox {
       for (const draft of drafts) {
         await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
         if (finalDeletionPending(existing, draft.contextId)) continue;
-        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) continue;
-        store.add({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
+        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${itemKey(draft.contextId, draft.itemId)}`))) continue;
+        store.add({ ...draft, key: actionKey(this.namespace, draft, existing), kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
       }
       await complete; changed(); return true;
     } catch (error) {
@@ -239,7 +247,7 @@ export class DurableOutbox {
     const removed = actions.filter(r => !itemId || r.itemId === itemId);
     for (const record of removed) store.delete(record.key);
     if (itemId) {
-      store.put({ key: `deleted-item:${this.namespace}:${contextId}:${itemId}`, kind: "deleted-item", namespace: this.namespace, contextId, itemId } satisfies ItemMarker);
+      store.put({ key: `deleted-item:${this.namespace}:${itemKey(contextId, itemId)}`, kind: "deleted-item", namespace: this.namespace, contextId, itemId } satisfies ItemMarker);
       if (removed.some(r => r.createsContext)) {
         const next = actions.filter(r => r.itemId !== itemId).sort((a,b) => a.queuedAt - b.queuedAt || a.itemId.localeCompare(b.itemId))[0];
         if (next) store.put({ ...next, createsContext: true });
@@ -252,10 +260,13 @@ export class DurableOutbox {
     if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId, ...(deleteEmptyContext ? { deleteEmptyContext: true } : {}) } : {}), attempts: 0, nextAttemptAt: 0, paused: false } satisfies Deletion);
     await complete; changed();
   }
-  async cancelled(): Promise<{ contexts: Id[]; items: Id[] }> {
+  async cancelled(): Promise<{ contexts: Id[]; items: ItemIdentity[] }> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
     const records = await requestResult(tx.objectStore(STORE_NAME).index("namespace").getAll(this.namespace)) as StoredRecord[];
-    return { contexts: records.filter((r): r is DeletedMarker => r.kind === "deleted").map(r => r.contextId), items: records.filter((r): r is ItemMarker => r.kind === "deleted-item").map(r => r.itemId) };
+    return {
+      contexts: records.filter((r): r is DeletedMarker => r.kind === "deleted").map(r => r.contextId),
+      items: records.filter((r): r is ItemMarker => r.kind === "deleted-item").map(({ contextId, itemId }) => ({ contextId, itemId })),
+    };
   }
   async deletions(): Promise<Deletion[]> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");

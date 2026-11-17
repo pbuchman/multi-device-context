@@ -63,7 +63,7 @@ function ImageOverlay({ url, name, opener, onCopy, onClose, onContextMenu }: { u
 
 export function AttachmentPreview({ item, cloud, onCopy, blocked = false }: { item: ItemRecord; cloud: Cloud; onCopy?: (() => void) | undefined; blocked?: boolean }) {
   const content = item.content.kind === "attachment" ? item.content : undefined;
-  const type = content?.contentType, size = content?.size, name = content?.name;
+  const type = content?.contentType.toLowerCase(), size = content?.size, name = content?.name;
   const renderable = !!content && item.ready && type !== "image/svg+xml" && /^(image|audio|video)\//.test(type!);
   const [url, setUrl] = useState<string>();
   const [open, setOpen] = useState(false), [menu, setMenu] = useState<MenuState>();

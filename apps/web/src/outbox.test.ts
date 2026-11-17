@@ -3,6 +3,7 @@ import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 
 import { DurableOutbox, OutboxRunner, type PublishPort } from "./outbox.js";
+import { done, openLocalDatabase } from "./local-db.js";
 
 const namespaceA = { projectId: "project-a", uid: "user-a" };
 const namespaceB = { projectId: "project-a", uid: "user-b" };
@@ -25,6 +26,32 @@ function draft(overrides = {}) {
 describe("DurableOutbox", () => {
   beforeEach(async () => {
     Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: new IDBFactory() });
+  });
+
+  it.each([false, true])("isolates equal item IDs in separate chats (legacy action=%s)", async legacy => {
+    const outbox = new DurableOutbox(namespaceA);
+    const otherContextId = "00000000-0000-4000-8000-000000000003";
+    if (legacy) {
+      const db = await openLocalDatabase();
+      const tx = db.transaction("records", "readwrite");
+      const complete = done(tx);
+      tx.objectStore("records").put({
+        ...draft(), namespace: outbox.namespace, kind: "action", key: `action:${outbox.namespace}:${itemId}`,
+        attempts: 0, queuedAt: 0, nextAttemptAt: 0, status: "pending",
+      });
+      await complete;
+      db.close();
+    } else {
+      await outbox.enqueue(draft());
+    }
+    await outbox.enqueue(draft({ contextId: otherContextId }));
+    expect.soft((await outbox.list()).map(record => record.contextId).sort()).toEqual([contextId, otherContextId]);
+    await outbox.enqueue(draft());
+    expect.soft(await outbox.count()).toBe(2);
+    await outbox.removeItem(contextId, itemId);
+    expect.soft((await outbox.list()).map(record => record.contextId)).toEqual([otherContextId]);
+    expect((await outbox.cancelled()).items).toEqual([{ contextId, itemId }]);
+    outbox.close();
   });
 
   it("can quiesce for sign-out without draining queued uploads", async () => {
