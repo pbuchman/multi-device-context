@@ -108,6 +108,7 @@ export type WorkspaceServices = {
   getLaunchAtLogin?: () => Promise<boolean>;
   setLaunchAtLogin?: (enabled: boolean) => Promise<void>;
   pendingNativeCount?: () => Promise<number>;
+  initialNativeError?: string;
   readClipboard?: () => Promise<ClipboardSnapshot>;
   subscribeNativeShares?: (listener: () => void) => Unsubscribe;
   drainNativeShares?: () => Promise<Id | undefined>;
@@ -244,7 +245,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     deleted: { confirmed: !services.cloud.refreshDeletedContexts, failed: false },
     deletedItems: { confirmed: !services.cloud.refreshDeletedItems, failed: false },
   });
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState(services.initialNativeError);
   const [toast, setToast] = useState<string>();
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("mdc-theme") as Theme | null) ?? "system");
   const [deviceName, setDeviceName] = useState(services.device.name);
@@ -1400,10 +1401,15 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
     if (nativeDrainPending) return nativeDrainPending;
     lastNativeContext = undefined;
     nativeDrainPending = (async () => {
+      let failure: { cause: unknown } | undefined;
       do {
         nativeDrainRequested = false;
-        await drainNativeClipboardQueue(native, nativeStore, () => nativeIntakeEnabled);
+        try {
+          await drainNativeClipboardQueue(native, nativeStore, () => nativeIntakeEnabled);
+          failure = undefined;
+        } catch (cause) { failure = { cause }; }
       } while (nativeDrainRequested && nativeIntakeEnabled);
+      if (nativeIntakeEnabled && failure) throw failure.cause;
       return nativeIntakeEnabled ? lastNativeContext : undefined;
     })().finally(() => { nativeDrainPending = undefined; });
     return nativeDrainPending;
@@ -1415,7 +1421,11 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
     void transferInvalidation.catch(() => {});
   }
   await checkAccess();
-  const initialNativeId = await drainNative();
+  let initialNativeError: string | undefined;
+  const initialNativeId = await drainNative().catch((cause: unknown) => {
+    initialNativeError = cause instanceof Error ? cause.message : "Clipboard sharing failed";
+    return lastNativeContext;
+  });
   let activityActive = session.platform.activity?.initialActive ?? true;
   const stopActivity = session.platform.activity?.subscribe(value => { activityActive = value; });
   const accountSignOut = createAccountSignOut({
@@ -1447,6 +1457,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   return {
     services: {
       ...(initialNavigation?.contextId || initialNativeId ? { initialContextId: initialNavigation?.contextId ?? initialNativeId! } : {}),
+      ...(initialNativeError ? { initialNativeError } : {}),
       accessMode: session.device.mode,
       accessActive: () => accessActive,
       checkAccess,

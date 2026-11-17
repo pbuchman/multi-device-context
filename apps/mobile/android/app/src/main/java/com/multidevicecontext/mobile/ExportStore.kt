@@ -1,10 +1,11 @@
 package com.multidevicecontext.mobile
 import java.io.File
+import java.io.OutputStream
 import java.util.UUID
 
 data class ExportedFile(val file:File,val contentType:String,val displayName:String)
 class ExportStore(private val root:File) {
- private data class Handle(val file:File,val name:String,val type:String)
+ private data class Handle(val file:File,val name:String,val type:String,var saving:Boolean=false)
  private val handles=mutableMapOf<String,Handle>()
  private val staging=File(root,"staging").apply { mkdirs();listFiles()?.forEach { it.delete() } }
  val exports=File(root,"exports").apply { mkdirs() }
@@ -14,13 +15,13 @@ class ExportStore(private val root:File) {
   val id=UUID.randomUUID().toString();handles[id]=Handle(File(staging,id).apply { createNewFile() },NativePolicy.safeName(name),type);return id
  }
  @Synchronized fun append(id:String,bytes:ByteArray) {
-  val handle=requireNotNull(handles[id]) { "Unknown transfer" }
+  val handle=staged(id)
   require(bytes.size<=NativePolicy.MAX_CHUNK && handle.file.length()+bytes.size<=NativePolicy.MAX_FILE) { "Transfer exceeds limit" }
   require(staging.listFiles()!!.sumOf { it.length() }+bytes.size<=NativePolicy.MAX_INBOX) { "Transfers exceed storage limit" }
   handle.file.appendBytes(bytes)
  }
  @Synchronized fun finish(id:String):ExportedFile {
-  val handle=requireNotNull(handles[id]) { "Unknown transfer" }
+  val handle=staged(id)
   cleanup()
   require(exports.walkTopDown().filter { it.isFile }.sumOf { it.length() }+handle.file.length()<=NativePolicy.MAX_INBOX) { "Export storage full; retry later" }
   val dir=File(exports,UUID.randomUUID().toString()).apply { mkdirs() }
@@ -29,6 +30,26 @@ class ExportStore(private val root:File) {
   val extension=handle.name.substringAfterLast('.', "").takeIf { it.length in 1..16 && it.all { c -> c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' } }
   val file=File(dir,id+(extension?.let { ".$it" } ?: ""))
   check(handle.file.renameTo(file));handles.remove(id);return ExportedFile(file,handle.type,handle.name)
+ }
+ private fun staged(id:String):Handle {
+  val handle=requireNotNull(handles[id]) { "Unknown transfer" }
+  check(!handle.saving) { "Transfer is already being saved" }
+  return handle
+ }
+ @Synchronized fun prepareSave(id:String):ExportedFile {
+  // Document providers receive a synchronous copy from staging. Only copy and share need leased exports.
+  val handle=staged(id)
+  handle.saving=true
+  return ExportedFile(handle.file,handle.type,handle.name)
+ }
+ @Synchronized fun saveDocument(id:String,openOutput:()->OutputStream?) {
+  val handle=requireNotNull(handles[id]) { "Unknown transfer" }
+  check(handle.saving) { "Transfer is not ready to save" }
+  try {
+   handle.file.inputStream().use { input ->
+    requireNotNull(openOutput()).use { output -> input.copyTo(output,NativePolicy.MAX_CHUNK) }
+   }
+  } finally { discard(id) }
  }
  @Synchronized fun discard(id:String) { handles.remove(id)?.file?.delete() }
  @Synchronized fun clearStaging() { handles.clear();staging.listFiles()?.forEach { it.delete() } }

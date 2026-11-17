@@ -4,6 +4,37 @@ import type { DesktopBridge, PendingClipboardShare } from "@mdc/contracts";
 import { drainNativeClipboardQueue } from "./desktop.js";
 
 describe("native clipboard queue", () => {
+  it("delivers later batches when native acknowledgement fails for an earlier batch", async () => {
+    const readSnapshot = vi.fn(async () => ({ text: "first", files: [] }));
+    const first = { id: "00000000-0000-4000-8000-000000000001", capturedAt: 1, readSnapshot };
+    const second = { id: "00000000-0000-4000-8000-000000000002", capturedAt: 2, snapshot: { text: "second", files: [] } };
+    const stored = new Set<string>();
+    const acknowledged = new Set<string>();
+    const bridge = {
+      getPendingClipboardShares: async () => [first, second].filter(request => !acknowledged.has(request.id)),
+      acknowledgeClipboardShare: vi.fn(async (id: string) => {
+        expect(stored.has(id)).toBe(true);
+        if (id === first.id) throw new Error("Native acknowledgement failed");
+        acknowledged.add(id);
+      }),
+    };
+    const store = {
+      hasNativeRequest: async (id: string) => stored.has(id),
+      storeNativeSnapshot: vi.fn(async (request: PendingClipboardShare) => { stored.add(request.id); }),
+      markNativeAcknowledged: vi.fn(async (id: string) => { stored.delete(id); }),
+    };
+
+    await expect(drainNativeClipboardQueue(bridge, store)).rejects.toThrow("Native acknowledgement failed");
+    expect([...acknowledged]).toEqual([second.id]);
+    expect([...stored]).toEqual([first.id]);
+    bridge.acknowledgeClipboardShare.mockImplementationOnce(async id => { acknowledged.add(id); });
+    await drainNativeClipboardQueue(bridge, store);
+    expect([...acknowledged]).toEqual([second.id, first.id]);
+    expect(readSnapshot).toHaveBeenCalledOnce();
+    expect(store.storeNativeSnapshot).toHaveBeenCalledTimes(2);
+    expect([...stored]).toEqual([]);
+  });
+
   it("does not import an inbox result after its account was disposed", async () => {
     let current=true;let resolve!:(requests:PendingClipboardShare[])=>void;
     const bridge={getPendingClipboardShares:()=>new Promise<PendingClipboardShare[]>(done=>{resolve=done;}),acknowledgeClipboardShare:vi.fn(async()=>{})};

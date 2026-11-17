@@ -1,6 +1,7 @@
 import { App } from "@capacitor/app";
 import { Capacitor, registerPlugin } from "@capacitor/core";
-import { ContentSchema, DeviceSchema, IdSchema, MAX_ATTACHMENT_BYTES, MAX_TEXT_BYTES, UpdateStateSchema, type Id, type ClipboardSnapshot, type NativeFile, type PendingClipboardShare, type UpdateState } from "@mdc/contracts";
+import { ContentSchema, DeviceSchema, IdSchema, MAX_ATTACHMENT_BYTES, MAX_TEXT_BYTES, UpdateStateSchema, type Id, type ClipboardSnapshot, type NativeFile, type UpdateState } from "@mdc/contracts";
+import type { NativeClipboardBatch } from "./desktop.js";
 import type { PlatformAdapter } from "./platform.js";
 import type { DictationBridge, DictationStatus } from "./dictation.js";
 
@@ -87,7 +88,7 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
   let controller = new AbortController();
   let active = true;
   let stateEvents = 0;
-  let pending: Promise<PendingClipboardShare[]> | undefined;
+  let pending: Promise<NativeClipboardBatch[]> | undefined;
   const activityListeners = new Set<(active: boolean) => void>();
   const shareListeners = new Set<() => void>();
   const navigationListeners = new Set<(event: Navigation) => void>();
@@ -163,7 +164,7 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
     return { name: file.name, contentType: file.contentType, bytes };
   }
   async function snapshot(value: NativeSnapshot, expected: number): Promise<ClipboardSnapshot> {
-    validateSnapshot(value);
+    ensureCurrent(expected);
     const files: NativeFile[] = [];
     for (const file of value.files) files.push(await readFile(file, expected));
     ensureCurrent(expected);
@@ -219,7 +220,14 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
         ensureCurrent(); generation++; controller.abort(); controller = new AbortController(); pending = undefined;
         await plugin.signOut({ reviewedNativeIds });
       },
-      readClipboard: async () => { const expected = generation; ensureCurrent(expected); return snapshot(await plugin.readClipboard(), expected); },
+      readClipboard: async () => {
+        const expected = generation;
+        ensureCurrent(expected);
+        const value = await plugin.readClipboard();
+        ensureCurrent(expected);
+        validateSnapshot(value);
+        return snapshot(value, expected);
+      },
       copyText: async text => { ensureCurrent(); validateText(text); await plugin.copyText({ text }); },
       copyFile: async file => { await exportFile(file, "copy"); },
       saveFile: file => exportFile(file, "save"),
@@ -231,18 +239,26 @@ export async function createAndroidAdapter({ plugin, app, convertFileSrc, fetche
           const { requests } = await plugin.getPendingShares();
           ensureCurrent(expected);
           if (!Array.isArray(requests)) throw new Error("Invalid shared inbox");
-          const unique = new Map<string, NativeRequest>();
+          const seen = new Set<string>();
+          const result: NativeClipboardBatch[] = [];
           let total = 0;
           for (const request of requests) {
-            IdSchema.parse(request.id);
-            if (!Number.isFinite(request.capturedAt) || request.capturedAt < 0) throw new Error("Invalid shared inbox");
-            if (unique.has(request.id)) continue;
-            total += validateSnapshot(request);
-            if (total > INBOX_BYTES) throw new Error("Shared inbox exceeds the allowed size");
-            unique.set(request.id, request);
+            if (seen.has(request.id)) continue;
+            seen.add(request.id);
+            let readSnapshot: () => Promise<ClipboardSnapshot>;
+            try {
+              IdSchema.parse(request.id);
+              if (!Number.isFinite(request.capturedAt) || request.capturedAt < 0) throw new Error("Invalid saved share");
+              const size = validateSnapshot(request);
+              if (total + size > INBOX_BYTES) throw new Error("Shared inbox exceeds the allowed size");
+              total += size;
+              readSnapshot = () => snapshot(request, expected);
+            } catch (cause) {
+              readSnapshot = async () => { ensureCurrent(expected); throw cause; };
+            }
+            // Sign-out can review every batch ID while intake reads file bytes on demand.
+            result.push({ id: request.id, capturedAt: request.capturedAt, readSnapshot });
           }
-          const result: PendingClipboardShare[] = [];
-          for (const request of unique.values()) result.push({ id: request.id, capturedAt: request.capturedAt, snapshot: await snapshot(request, expected) });
           return result;
         })();
         pending = operation;
