@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { NativeStore, type Encryption } from "./store.js";
+import { AuthManager, authenticationScope } from "./auth.js";
 const folders: string[] = [];
 const key = randomBytes(32);
 const encryption: Encryption = {
@@ -42,6 +43,33 @@ async function open() {
   };
 }
 describe("durable native clipboard queue", () => {
+  it("preserves the owner, installation and queued shares when an expired refresh is cleared", async () => {
+    const { path, store } = await open();
+    const settings = { domain: "tenant.example.com", audience: "https://context.example.com/api", nativeClientId: "native-client" };
+    const session = { uid: "owner", subject: "google-oauth2|owner", refreshToken: "expired", authScope: authenticationScope(settings) };
+    await store.writeSession(session);
+    const pending = await store.enqueue({ text: "Waiting for renewed sign-in", files: [] });
+    const generation = store.accountGeneration();
+    const device = store.device();
+    const installation = { deviceId: "00000000-0000-4000-8000-000000000001", secret: "synthetic-installation-proof" };
+    await store.writeInstallation(session.subject, installation, generation);
+    const manager = new AuthManager(settings, {
+      readSession: () => store.readSession(), writeSession: value => store.writeSession(value),
+      clearSession: () => store.clearSession(), openBrowser: async () => { throw new Error("Unexpected browser"); },
+      fetch: async () => Response.json({ error: "invalid_grant" }, { status: 403 }),
+    });
+    await expect(manager.getAccessToken()).rejects.toThrow(/session expired/);
+    const restored = await NativeStore.open(path, "https://context.example.com", "Test computer", encryption);
+    expect(restored.readSession()).toBeUndefined();
+    expect(restored.pendingShares()).toEqual([pending]);
+    expect(restored.readInstallation(session.subject)).toEqual(installation);
+    expect(restored.device()).toEqual(device);
+    expect(restored.accountGeneration()).toBe(generation);
+    await expect(restored.writeSession({ ...session, uid: "different-owner", subject: "google-oauth2|different" })).rejects.toThrow(/Sign out/);
+    await restored.writeSession({ ...session, refreshToken: "renewed" });
+    expect(restored.pendingShares()).toEqual([pending]);
+    expect(restored.readInstallation(session.subject)).toEqual(installation);
+  });
   it("refuses account clearing when a share arrived outside the reviewed snapshot", async () => {
     const { store } = await open();
     await store.writeSession({ uid: "owner", subject: "google-oauth2|owner", refreshToken: "secret", authScope: "X".repeat(43) });
