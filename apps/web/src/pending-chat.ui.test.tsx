@@ -15,14 +15,16 @@ let outbox: DurableOutbox | undefined;
 
 afterEach(() => { cleanup(); outbox?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); history.replaceState({}, "", "/"); });
 
-it.each([false, true])("keeps a local pending chat selectable across a remote snapshot (fromCache=%s)", async fromCache => {
-  outbox = new DurableOutbox({ projectId: "synthetic-web-pending", uid: crypto.randomUUID() });
+function workspace(records: ContextRecord[] = [existing]) {
+  const account = { projectId: "synthetic-web-pending", uid: crypto.randomUUID() };
+  const queue = new DurableOutbox(account);
+  outbox = queue;
   let emitContexts!: (next: CloudSnapshot<ContextRecord>) => void;
   const drain = vi.fn(async () => {}); // Network transport is deliberately held; the real outbox remains pending.
   const services: WorkspaceServices = {
-    viewer: { uid: "local-audit", name: "QA" }, device, outbox,
+    viewer: { uid: "local-audit", name: "QA" }, device, outbox: queue,
     cloud: {
-      subscribeContexts: emit => { emitContexts = emit; emit(snapshot([existing])); return () => {}; },
+      subscribeContexts: emit => { emitContexts = emit; emit(snapshot(records)); return () => {}; },
       subscribeItems: (_id, emit) => { emit(snapshot([])); return () => {}; },
       renameContext: async () => {}, deleteContext: async () => {}, deleteItem: async () => {}, attachmentBytes: async () => new Uint8Array(),
     },
@@ -30,14 +32,23 @@ it.each([false, true])("keeps a local pending chat selectable across a remote sn
   };
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ uiBuild: "dev" })));
   render(<ContextWorkspace services={services} />);
-  await screen.findByRole("button", { name: "Previously synchronized chat" });
+  return { account, queue, drain, emitContexts };
+}
+
+async function send(text: string) {
   const field = screen.getByLabelText("Message to yourself");
-  fireEvent.change(field, { target: { value: "New pending chat" } });
+  fireEvent.change(field, { target: { value: text } });
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
-  await screen.findByText("New pending chat", { selector: "article .text-card" });
+  await screen.findByText(text, { selector: "article .text-card" });
+}
+
+it.each([false, true])("keeps a local pending chat selectable across a remote snapshot (fromCache=%s)", async fromCache => {
+  const { queue, drain, emitContexts } = workspace();
+  await screen.findByRole("button", { name: "Previously synchronized chat" });
+  await send("New pending chat");
   await waitFor(() => expect(drain).toHaveBeenCalled());
   expect(screen.getByRole("button", { name: "New pending chat" })).toBeTruthy();
-  const initialQueue = await outbox.list();
+  const initialQueue = await queue.list();
   expect(initialQueue).toHaveLength(1);
   const pendingId = initialQueue[0]!.contextId;
 
@@ -47,7 +58,7 @@ it.each([false, true])("keeps a local pending chat selectable across a remote sn
 
   // A normal realtime snapshot contains the synchronized chat but cannot yet include the locally pending creation.
   await act(async () => emitContexts(snapshot([{ ...existing, updatedAt: 2, syncState: fromCache ? "cached" : "synced" }], fromCache)));
-  expect((await outbox.list()).map(record => record.itemId)).toEqual(initialQueue.map(record => record.itemId));
+  expect((await queue.list()).map(record => record.itemId)).toEqual(initialQueue.map(record => record.itemId));
   expect.soft(screen.queryByRole("button", { name: "New pending chat" })).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Previously synchronized chat" }));
   const pending = screen.queryByRole("button", { name: "New pending chat" });
@@ -62,4 +73,55 @@ it.each([false, true])("keeps a local pending chat selectable across a remote sn
   expect(screen.queryByRole("button", { name: "New pending chat" })).toBeNull();
   await act(async () => emitContexts(snapshot([existing])));
   expect(screen.queryByRole("button", { name: "Confirmed chat" })).toBeNull();
+});
+
+it("removes a never-published chat when another tab deletes its last queued item", async () => {
+  const { account, queue, emitContexts } = workspace([]);
+  const anotherTab = new DurableOutbox(account);
+  try {
+    await send("Cross-tab pending chat");
+    const [queued] = await queue.list();
+    await act(async () => anotherTab.requestDeletion(queued!.contextId, queued!.itemId, true));
+    await waitFor(() => expect(screen.queryByText("Cross-tab pending chat", { selector: "article .text-card" })).toBeNull());
+    await act(async () => anotherTab.removeItem(queued!.contextId, queued!.itemId));
+    expect((await queue.cancelled()).localCreations).toEqual([queued!.contextId]);
+    await act(async () => emitContexts(snapshot([])));
+    expect(screen.queryByRole("button", { name: "Cross-tab pending chat" })).toBeNull();
+    await send("Replacement chat");
+    expect((await queue.list())[0]!.contextId).not.toBe(queued!.contextId);
+  } finally {
+    anotherTab.close();
+  }
+});
+
+it("keeps a chat with queued siblings while another tab deletes the first item", async () => {
+  const { account, queue, emitContexts } = workspace([]);
+  const anotherTab = new DurableOutbox(account);
+  try {
+    await send("Pending chat with siblings");
+    await send("Second queued item");
+    const [first, second] = await queue.list();
+    await act(async () => anotherTab.requestDeletion(first!.contextId, first!.itemId, false));
+    await waitFor(() => expect(screen.queryByText("Pending chat with siblings", { selector: "article .text-card" })).toBeNull());
+    await act(async () => emitContexts(snapshot([])));
+    expect(screen.getByRole("button", { name: "Pending chat with siblings" })).toBeTruthy();
+    expect(screen.getByText("Second queued item", { selector: "article .text-card" })).toBeTruthy();
+    const [deletion] = await queue.deletions();
+    await anotherTab.remove(deletion!.key);
+    expect(await queue.list()).toMatchObject([{ itemId: second!.itemId, createsContext: true }]);
+  } finally {
+    anotherTab.close();
+  }
+});
+
+it("keeps a published creation until its confirming snapshot arrives", async () => {
+  const { queue, emitContexts } = workspace([]);
+  await send("Waiting for cloud confirmation");
+  const [queued] = await queue.list();
+  await act(async () => queue.remove(queued!.key));
+  expect(await queue.count()).toBe(0);
+  await act(async () => emitContexts(snapshot([])));
+  expect(screen.getByRole("button", { name: "Waiting for cloud confirmation" })).toBeTruthy();
+  await act(async () => emitContexts(snapshot([{ ...existing, id: queued!.contextId, title: "Confirmed creation" }])));
+  expect(screen.getByRole("button", { name: "Confirmed creation" })).toBeTruthy();
 });

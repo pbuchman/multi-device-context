@@ -28,7 +28,8 @@ type DictationMarker = { key: string; kind: "dictation"; namespace: string; sess
 type StoredAction = QueuedShare & { kind: "action" };
 type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
 export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
-type ItemMarker = ItemIdentity & { key: string; kind: "deleted-item"; namespace: string };
+export type CancelledShares = { contexts: Id[]; items: ItemIdentity[]; localCreations: Id[] };
+type ItemMarker = ItemIdentity & { key: string; kind: "deleted-item"; namespace: string; cancelledCreation?: boolean };
 type StoredRecord = StoredAction | NativeMarker | DictationMarker | DeletedMarker | ItemMarker | Deletion;
 
 const STORE_NAME = "records";
@@ -247,8 +248,14 @@ export class DurableOutbox {
     const removed = actions.filter(r => !itemId || r.itemId === itemId);
     for (const record of removed) store.delete(record.key);
     if (itemId) {
-      store.put({ key: `deleted-item:${this.namespace}:${itemKey(contextId, itemId)}`, kind: "deleted-item", namespace: this.namespace, contextId, itemId } satisfies ItemMarker);
-      if (removed.some(r => r.createsContext)) {
+      const key = `deleted-item:${this.namespace}:${itemKey(contextId, itemId)}`;
+      const previous = await requestResult(store.get(key)) as ItemMarker | undefined;
+      const removedCreator = removed.some(r => r.createsContext);
+      // Queue completion can also leave no actions before the confirming
+      // snapshot arrives. Record when a deletion actually removed the creator.
+      const cancelledCreation = previous?.cancelledCreation || (removedCreator && removed.length === actions.length);
+      store.put({ key, kind: "deleted-item", namespace: this.namespace, contextId, itemId, ...(cancelledCreation ? { cancelledCreation: true } : {}) } satisfies ItemMarker);
+      if (removedCreator) {
         const next = actions.filter(r => r.itemId !== itemId).sort((a,b) => a.queuedAt - b.queuedAt || a.itemId.localeCompare(b.itemId))[0];
         if (next) store.put({ ...next, createsContext: true });
       }
@@ -260,12 +267,15 @@ export class DurableOutbox {
     if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId, ...(deleteEmptyContext ? { deleteEmptyContext: true } : {}) } : {}), attempts: 0, nextAttemptAt: 0, paused: false } satisfies Deletion);
     await complete; changed();
   }
-  async cancelled(): Promise<{ contexts: Id[]; items: ItemIdentity[] }> {
+  async cancelled(): Promise<CancelledShares> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
     const records = await requestResult(tx.objectStore(STORE_NAME).index("namespace").getAll(this.namespace)) as StoredRecord[];
+    const items = records.filter((r): r is ItemMarker => r.kind === "deleted-item");
+    const activeContexts = new Set(records.filter((r): r is StoredAction => r.kind === "action").map(r => r.contextId));
     return {
       contexts: records.filter((r): r is DeletedMarker => r.kind === "deleted").map(r => r.contextId),
-      items: records.filter((r): r is ItemMarker => r.kind === "deleted-item").map(({ contextId, itemId }) => ({ contextId, itemId })),
+      items: items.map(({ contextId, itemId }) => ({ contextId, itemId })),
+      localCreations: items.filter(item => item.cancelledCreation && !activeContexts.has(item.contextId)).map(item => item.contextId),
     };
   }
   async deletions(): Promise<Deletion[]> {
