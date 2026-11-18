@@ -116,13 +116,22 @@ try {
   } else if (command === 'get') output(await getContext(args[0]));
   else if (command === 'watch') {
     let after = flags.after;
+    const cursors = new Set(after ? [after] : []);
     while (true) {
-      const result = await page('', after);
+      const { records, cursor, hasMore } = await page('', after);
+      if (hasMore || records.length) {
+        if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) {
+          throw new InputError('Watch pagination did not advance; resume from the last fully processed cursor');
+        }
+        cursors.add(cursor);
+        after = cursor;
+      }
       // A page is a single checkpoint: the consumer commits this cursor after all records are processed.
-      if (result.records.length) output({ type: 'contexts.created', contexts: result.records, cursor: result.cursor });
-      after = result.cursor ?? after;
-      if (result.hasMore) continue;
+      if (records.length) output({ type: 'contexts.created', contexts: records, cursor });
+      if (hasMore) continue;
       if (flags.once) break;
+      cursors.clear();
+      if (after) cursors.add(after);
       await new Promise(resolve => setTimeout(resolve, 5000));
     }
   } else if (command === 'create' || command === 'append') {
@@ -159,10 +168,17 @@ try {
     }
     output({ saved: destination });
   } else if (command === 'upload') {
-    const contextId = id(args[0]); const path = args[1]; const size = (await stat(path)).size;
+    const contextId = id(args[0]);
+    const path = args[1];
+    const size = (await stat(path)).size;
     const itemId = id(flags['item-id'] ?? randomUUID());
-    await request(`/${contextId}/items`, 'POST', { id: itemId, content: { kind: 'attachment', name: basename(path), size, contentType: flags.type ?? 'application/octet-stream' } });
-    await request(`/${contextId}/items/${itemId}/content`, 'PUT', createReadStream(path), true);
+    try {
+      await request(`/${contextId}/items`, 'POST', { id: itemId, content: { kind: 'attachment', name: basename(path), size, contentType: flags.type ?? 'application/octet-stream' } });
+      await request(`/${contextId}/items/${itemId}/content`, 'PUT', createReadStream(path), true);
+    } catch (error) {
+      const reason = error instanceof InputError ? error.message : 'Upload request failed';
+      throw new InputError(`${reason}. Check attachment ${itemId} with get ${contextId} before retrying with the same item ID.`);
+    }
     output({ contextId, itemId, uploaded: true });
   } else throw new InputError('Unknown command; run help');
 } catch (error) {
