@@ -27,10 +27,17 @@ async function run(args, responses = [], options = {}) {
     import { appendFileSync } from 'node:fs';
     const responses = ${JSON.stringify(responses)};
     globalThis.fetch = async (url, init) => {
-      appendFileSync(${JSON.stringify(requests)}, JSON.stringify({ url, method: init.method, redirect: init.redirect, body: init.body ? JSON.parse(init.body) : undefined }) + '\\n');
+      let body;
+      if (init.method === 'PUT') {
+        const chunks = [];
+        for await (const chunk of init.body) chunks.push(chunk);
+        body = Buffer.concat(chunks).toString('base64');
+      } else if (init.body) body = JSON.parse(init.body);
+      appendFileSync(${JSON.stringify(requests)}, JSON.stringify({ url, method: init.method, redirect: init.redirect, body }) + '\\n');
       const next = responses.shift();
       if (!next) throw new Error('Unexpected request');
-      return new Response(JSON.stringify(next.body ?? {}), { status: next.status ?? 200, headers: next.headers });
+      if (next.disconnect) throw new TypeError('Synthetic connection failure');
+      return new Response(next.status === 204 ? null : JSON.stringify(next.body ?? {}), { status: next.status ?? 200, headers: next.headers });
     };
   `);
   try {
@@ -170,6 +177,51 @@ test('append preserves immutable item request shape and explicit UUID across ret
   }
 });
 
+test('a lost upload response reports the original IDs without automatically replaying the mutation', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'mdc-cli-upload-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'report.bin');
+  const bytes = Buffer.from([0x00, 0x23, 0xFF]);
+  await writeFile(file, bytes);
+
+  const args = ['upload', contextId, file, '--item-id', itemId];
+  const lost = await run(args, [{ body: { id: contextId } }, { disconnect: true }]);
+  assert.equal(lost.code, 1);
+  assert.equal(lost.stdout, '');
+  assert.match(lost.stderr, new RegExp(`attachment ${itemId} with get ${contextId}`));
+  assert.doesNotMatch(lost.stderr, /Synthetic connection failure/);
+  assert.deepEqual(lost.requests.map(request => request.method), ['POST', 'PUT']);
+  assert.equal(lost.requests[0].body.id, itemId);
+  assert.equal(path(lost.requests[1]), `/api/agent/v1/contexts/${contextId}/items/${itemId}/content`);
+  assert.equal(lost.requests[1].body, bytes.toString('base64'));
+
+  const pending = { ...lost.requests[0].body, ready: false };
+  const status = await run(['get', contextId], [{ body: { id: contextId } }, { body: resultPage([pending]) }]);
+  assert.equal(status.code, 0, status.stderr);
+  assert.deepEqual(JSON.parse(status.stdout).items, [pending]);
+
+  const retry = await run(args, [{ body: { id: contextId } }, { status: 204 }]);
+  assert.equal(retry.code, 0, retry.stderr);
+  assert.deepEqual(retry.requests, lost.requests);
+  assert.deepEqual(JSON.parse(retry.stdout), { contextId, itemId, uploaded: true });
+});
+
+test('an interrupted reservation reports its generated ID and preserves Retry-After', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'mdc-cli-upload-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'report.bin');
+  await writeFile(file, 'synthetic data');
+
+  const result = await run(['upload', contextId, file], [{ status: 429, headers: { 'retry-after': '12' } }]);
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, '');
+  assert.deepEqual(result.requests.map(request => request.method), ['POST']);
+  const generatedId = result.requests[0].body.id;
+  assert.match(generatedId, /^[0-9a-f-]{36}$/);
+  assert.match(result.stderr, /API returned 429; retry after 12 seconds/);
+  assert.match(result.stderr, new RegExp(`attachment ${generatedId} with get ${contextId}`));
+});
+
 test('configuration permissions remain protected before requests', { skip: process.platform === 'win32' }, async () => {
   const result = await run(['list'], [], { mode: 0o644 });
   assert.equal(result.code, 1);
@@ -246,6 +298,33 @@ test('watch stays on chronological creation pages and retains pin metadata', asy
     assert.equal(query(request).get('pinned'), null);
     assert.equal(query(request).get('order'), null);
   }
+});
+
+test('watch rejects a missing or stagnant cursor before publishing a page', async () => {
+  const context = { id: contextId };
+  for (const page of [
+    { records: [context], hasMore: false },
+    { records: [], cursor: null, hasMore: true },
+    { records: [context], cursor: 'checkpoint', hasMore: true },
+  ]) {
+    const result = await run(['watch', '--once', '--after', 'checkpoint'], [{ body: page }]);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /resume from the last fully processed cursor/);
+    assert.equal(result.requests.length, 1);
+  }
+});
+
+test('watch rejects a cursor cycle while retaining an earlier valid event', async () => {
+  const context = { id: contextId };
+  const result = await run(['watch', '--once', '--after', 'checkpoint'], [
+    { body: { records: [context], cursor: 'next', hasMore: true } },
+    { body: { records: [{ id: 'second-context' }], cursor: 'checkpoint', hasMore: true } },
+  ]);
+  assert.equal(result.code, 1);
+  assert.deepEqual(JSON.parse(result.stdout), { type: 'contexts.created', contexts: [context], cursor: 'next' });
+  assert.match(result.stderr, /pagination did not advance/);
+  assert.equal(result.requests.length, 2);
 });
 
 test('help advertises pinned filtering and explicit pin commands', async () => {
