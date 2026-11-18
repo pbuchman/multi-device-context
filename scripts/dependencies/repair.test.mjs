@@ -51,7 +51,9 @@ function workspace(t, child = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'mdc-repair-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(path.join(root, 'apps/demo'), { recursive: true }); mkdirSync(path.join(root, 'packages'));
-  writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(original(), null, 2)}\n`);
+  const manifest = original();
+  delete manifest.pnpm.auditConfig;
+  writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(path.join(root, 'apps/demo/package.json'), `${JSON.stringify(child, null, 2)}\n`);
   writeFileSync(path.join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\npackages:\n  hono@4.13.12:\nsnapshots:\n");
   return root;
@@ -75,7 +77,10 @@ test('apply regenerates lockfile with scripts disabled and audits, and second ap
   };
   const applied = repair({ root, apply: true, run });
   assert.equal(applied.applied, true); assert.equal(applied.audit.passed, true); assert.equal(applied.changes.length, 5);
-  assert.deepEqual(calls, [['install', '--no-frozen-lockfile', '--ignore-scripts'], ['audit', '--audit-level', 'high', '--json']]);
+  assert.deepEqual(calls, [
+    ['install', '--no-frozen-lockfile', '--ignore-scripts'],
+    ['audit', '--audit-level', 'low', '--json', '--config.production=false', '--config.dev=false', '--config.optional=true', '--config.only='],
+  ]);
   const before = readFileSync(path.join(root, 'package.json'), 'utf8');
   assert.equal(repair({ root, apply: true, run }).changes.length, 0);
   assert.equal(readFileSync(path.join(root, 'package.json'), 'utf8'), before);

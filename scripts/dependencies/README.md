@@ -5,12 +5,15 @@ packaging checks in `quality`, with an independent `audit` job. The required
 `ci` job always runs and passes only when both jobs succeed. A failed, cancelled
 or skipped job therefore blocks merging.
 
-`pnpm security:audit` runs `pnpm audit --audit-level high --json` for the whole
-workspace, including development dependencies. High and critical findings block;
-low and moderate findings remain visible with package, advisory and dependency
-paths. Registry failures, malformed reports and unsuccessful child processes
-fail closed. The existing two patch-backed advisory exceptions are preserved;
-this policy adds none.
+`pnpm security:audit` runs `pnpm audit --audit-level low --json` for the whole
+workspace, explicitly including production, development and optional
+dependencies. Low and moderate findings remain visible with package, advisory
+and dependency paths. High and critical
+findings block unless exact patches cover the reported versions. The audit
+checks the manifest, lockfile and patch contents and retains the raw counts
+and findings. Registry failures, malformed reports and unexplained high or
+critical counts fail closed. The pinned local fixes are documented in the
+[patched dependency policy](../security/README.md).
 
 Dependabot checks npm and GitHub Actions weekly on Monday at 06:00 Europe/Warsaw.
 The npm version-update PR limit is ten. Each ecosystem groups security updates;
