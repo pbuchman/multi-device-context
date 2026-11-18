@@ -102,13 +102,30 @@ it("deduplicates incoming requests, reads private files and leaves acknowledgeme
   const f = fixture({ getPendingShares: vi.fn(async () => ({ requests: [request, request] })) });
   const adapter = await createAndroidAdapter(f.dependencies);
   const [one, two] = await Promise.all([adapter.native!.getPendingClipboardShares(), adapter.native!.getPendingClipboardShares()]);
-  expect(one).toEqual([{ id, capturedAt: 1, snapshot: { text: "shared", files: [{ name: "a", contentType: "text/plain", bytes: new Uint8Array([1, 2, 3]) }] } }]);
-  expect(two).toEqual(one);
+  expect(one).toMatchObject([{ id, capturedAt: 1 }]);
+  expect(two).toBe(one);
   expect(f.plugin.getPendingShares).toHaveBeenCalledTimes(1);
+  expect(f.dependencies.fetcher).not.toHaveBeenCalled();
+  const batch = one[0]!;
+  expect("readSnapshot" in batch && await batch.readSnapshot()).toEqual({ text: "shared", files: [{ name: "a", contentType: "text/plain", bytes: new Uint8Array([1, 2, 3]) }] });
   expect(f.dependencies.fetcher).toHaveBeenCalledTimes(1);
   expect(f.plugin.acknowledgeShare).not.toHaveBeenCalled();
   await adapter.native!.acknowledgeClipboardShare(id);
   expect(f.plugin.acknowledgeShare).toHaveBeenCalledWith({ id });
+  adapter.dispose();
+});
+
+it("lists pending IDs without opening files and rejects batches from an invalidated transfer generation", async () => {
+  const request = { id, capturedAt: 1, files: [{ id: "file", name: "a", contentType: "text/plain", size: 3, path: "file:///private/file" }] };
+  const f = fixture({ getPendingShares: vi.fn(async () => ({ requests: [request] })), invalidateTransfers: vi.fn(async () => {}) });
+  const adapter = await createAndroidAdapter(f.dependencies);
+  const [batch] = await adapter.native!.getPendingClipboardShares();
+  if (!batch || !("readSnapshot" in batch)) throw new Error("Expected a lazy Android share batch");
+  expect(batch.id).toBe(id);
+  expect(f.dependencies.fetcher).not.toHaveBeenCalled();
+  await adapter.invalidateTransfers!();
+  await expect(batch.readSnapshot()).rejects.toThrow("cancelled");
+  expect(f.dependencies.fetcher).not.toHaveBeenCalled();
   adapter.dispose();
 });
 
@@ -156,7 +173,9 @@ it("rejects an entire oversized share before reading any staged file", async () 
   const files = [1, 2].map(index => ({ id: `${index}`, name: "large", contentType: "application/octet-stream", size: 60 * 1024 * 1024, path: `file:///private/${index}` }));
   const f = fixture({ getPendingShares: vi.fn(async () => ({ requests: [{ id, capturedAt: 1, files }] })) });
   const adapter = await createAndroidAdapter(f.dependencies);
-  await expect(adapter.native!.getPendingClipboardShares()).rejects.toThrow("size");
+  const [batch] = await adapter.native!.getPendingClipboardShares();
+  if (!batch || !("readSnapshot" in batch)) throw new Error("Expected a lazy Android share batch");
+  await expect(batch.readSnapshot()).rejects.toThrow("size");
   expect(f.dependencies.fetcher).not.toHaveBeenCalled();
   adapter.dispose();
 });

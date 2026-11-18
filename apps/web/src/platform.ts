@@ -1,11 +1,11 @@
 import type { DesktopBridge, NativeFile } from "@mdc/contracts";
 import { mobileBuild } from "./api.js";
-import { inspectDesktopBridge } from "./desktop.js";
+import { inspectDesktopBridge, type NativeQueueBridge } from "./desktop.js";
 import { createNativeUpdateClient, type NativeUpdateClient } from "./updates.js";
 import type { DictationBridge } from "./dictation.js";
 
 /** Desktop v1 remains unchanged; shared callers use only supported capabilities. */
-export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLaunchAtLogin" | "setLaunchAtLogin" | "signOut"> &
+export type NativePlatform = Omit<DesktopBridge, "version" | "platform" | "getLaunchAtLogin" | "setLaunchAtLogin" | "signOut" | "signOutReviewed" | keyof NativeQueueBridge> & NativeQueueBridge &
   Partial<Pick<DesktopBridge, "getLaunchAtLogin" | "setLaunchAtLogin">> & {
     /** Private adapter argument, never part of the public DesktopBridge v1 contract. */
     signOut(reviewedNativeIds?: readonly string[]): Promise<void>;
@@ -26,9 +26,12 @@ export type PlatformAdapter = {
 };
 
 export class DesktopUpdateRequiredError extends Error {}
+export class NativeSignOutReviewRequired extends Error {
+  constructor() { super("Incoming shares changed. Review pending shares and confirm sign-out again."); }
+}
 
 /** Only the installed preload advertises this private implementation affordance. */
-type ReviewedDesktopBridge = DesktopBridge & { exchangeInstallationSession?(accessToken: string): Promise<unknown>; openAccessPanel?(deviceId: string): Promise<void>; invalidateTransfers?(): Promise<void>; readonly reviewedSignOut?: true; signOut(reviewedIds?: readonly string[]): Promise<void> };
+type DesktopInstallationBridge = DesktopBridge & { exchangeInstallationSession?(accessToken: string): Promise<unknown>; openAccessPanel?(deviceId: string): Promise<void>; invalidateTransfers?(): Promise<void> };
 
 export async function createPlatformAdapter(options: {
   mobile?: boolean;
@@ -42,10 +45,10 @@ export async function createPlatformAdapter(options: {
     throw new DesktopUpdateRequiredError(`This desktop app uses bridge version ${String(desktop.actual)}. Install the current app to continue.`);
   }
   if (desktop.kind !== "ready") return { kind: "browser", dispose() {} };
-  const bridge = desktop.bridge as ReviewedDesktopBridge;
+  const bridge = desktop.bridge as DesktopInstallationBridge;
   const updates = createNativeUpdateClient(bridge);
   const assertCanSignOut = () => {
-    if (bridge.reviewedSignOut !== true) throw new DesktopUpdateRequiredError("Update this desktop app before signing out. This installed version cannot safely preserve newly arriving shares; your local data has not been cleared.");
+    if (typeof bridge.signOutReviewed !== "function") throw new DesktopUpdateRequiredError("Update this desktop app before signing out. This installed version cannot safely preserve newly arriving shares; your local data has not been cleared.");
   };
   return { kind: "desktop", assertCanSignOut, ...(updates ? { updates } : {}),
     ...(bridge.exchangeInstallationSession ? { exchangeSession: (token: string) => bridge.exchangeInstallationSession!(token) } : {}),
@@ -55,7 +58,9 @@ export async function createPlatformAdapter(options: {
     ...bridge,
     signOut: async (reviewedIds = []) => {
       assertCanSignOut();
-      await bridge.signOut(reviewedIds);
+      const result = await bridge.signOutReviewed!(reviewedIds);
+      if (result.status === "changed") throw new NativeSignOutReviewRequired();
+      if (result.status !== "complete") throw new Error("Invalid desktop sign-out response.");
     },
   }, dispose() {} };
 }

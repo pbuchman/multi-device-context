@@ -28,7 +28,8 @@
     "firebase-tools": "15.32.0",
     "jsdom": "26.1.0",
     "typescript": "5.9.3",
-    "vitest": "5.0.3"
+    "vitest": "5.0.3",
+    "yaml": "2.9.1"
   },
   "dependencies": {
     "pm2": "7.0.4"
@@ -52,17 +53,15 @@
       "follow-redirects@>=1.16.0 <1.16.2": "1.16.2",
       "@hono/node-server@>=2.0.0 <2.1.6": "2.1.6",
       "hono@>=4.0.0 <4.13.17": "4.13.17",
-      "fast-xml-parser@>=5.0.0 <5.12.0": "5.12.0"
+      "fast-xml-parser@>=5.0.0 <5.12.0": "5.12.0",
+      "picomatch@2": "2.3.2",
+      "picomatch@4": "4.0.7"
     },
     "patchedDependencies": {
       "braces@3.0.3": "patches/braces@3.0.3.patch",
-      "http-cache-semantics@4.2.0": "patches/http-cache-semantics@4.2.0.patch"
-    },
-    "auditConfig": {
-      "ignoreGhsas": [
-        "GHSA-vfj7-8cjw-p6xm",
-        "GHSA-ch52-4w7c-c8xp"
-      ]
+      "http-cache-semantics@4.2.0": "patches/http-cache-semantics@4.2.0.patch",
+      "picomatch@2.3.2": "patches/picomatch@2.3.2.patch",
+      "picomatch@4.0.7": "patches/picomatch@4.0.7.patch"
     }
   }
 }

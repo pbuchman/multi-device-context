@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { UpdateStateSchema, type DesktopBridge, type DesktopCommandRequest, type NativeFile } from "@mdc/contracts";
+import { UpdateStateSchema, type DesktopBridge, type DesktopCommandRequest, type DesktopSignOutResult, type NativeFile } from "@mdc/contracts";
 declare const MDC_APP_ORIGIN: string;
 async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
   const result = (await ipcRenderer.invoke(`mdc:${method}`, ...args)) as
@@ -11,6 +11,7 @@ async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
 if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
   let commandRegistration: string | undefined;
   let stopCommands: (() => void) | undefined;
+  const signOutReviewed = (reviewedIds: readonly string[]) => invoke<DesktopSignOutResult>("signOut", reviewedIds);
   const bridge: DesktopBridge & { readonly reviewedSignOut: true; exchangeInstallationSession(accessToken:string):Promise<unknown>; openAccessPanel(deviceId:string):Promise<void>; invalidateTransfers():Promise<void> } = {
     version: 1,
     onCommand: listener => {
@@ -51,9 +52,11 @@ if (process.isMainFrame && location.origin === MDC_APP_ORIGIN) {
     getAccountAvatar: () => invoke("getAccountAvatar"),
     getAccessToken: (interactive = false) =>
       invoke("getAccessToken", interactive),
-    // Optional private argument binds cleanup to the exact reviewed inbox. The
-    // exported v1 bridge stays unchanged; older no-argument callers fail closed.
-    signOut: (reviewedNativeIds: readonly string[] = []) => invoke("signOut", reviewedNativeIds),
+    signOutReviewed,
+    signOut: async (reviewedNativeIds: readonly string[] = []) => {
+      if ((await signOutReviewed(reviewedNativeIds)).status === "changed")
+        throw new Error("Incoming shares changed. Review pending shares and confirm sign-out again.");
+    },
     readClipboard: () => invoke("readClipboard"),
     copyText: (text: string) => invoke("copyText", text),
     copyFile: (file: NativeFile) => invoke("copyFile", file),

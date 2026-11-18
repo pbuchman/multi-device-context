@@ -1,10 +1,11 @@
 import type { SettingsPort } from "./settings.js";
 import { diagnostic } from "./diagnostics.js";
 import { randomUUID } from "node:crypto";
-import { FieldValue, type Firestore, type DocumentReference } from "firebase-admin/firestore";
+import { FieldPath, FieldValue, type Firestore, type DocumentReference } from "firebase-admin/firestore";
 import { ContentSchema, type Content } from "@mdc/contracts";
 
 export const MAX_TITLE_IMAGE_BYTES = 5 * 1024 * 1024;
+const TITLE_BATCH_SIZE = 25;
 const titleImageTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 export type TitleSource = { text: string; imageDataUrl?: string };
 export type TitleImageRequest = {
@@ -68,6 +69,7 @@ export class TitleWorker {
   private timer: NodeJS.Timeout | undefined;
   private running: Promise<void> | undefined;
   private unsubscribe: (() => void) | undefined;
+  private cursor: DocumentReference | undefined;
   constructor(private db: Firestore, private key: string | undefined, private model = "google/gemini-3.1-flash-lite", private settings?: SettingsPort, private imageReader?: TitleImageReader) {}
   start() {
     const run = () => { if (!this.running) this.running = this.pass().catch(() => diagnostic("ai-title", "pass-failed")).finally(() => { this.running = undefined; }); };
@@ -79,11 +81,15 @@ export class TitleWorker {
   }
   async close() { if (this.timer) clearInterval(this.timer); this.unsubscribe?.(); await this.running; }
   async pass() {
-    const docs = await this.db.collectionGroup("contexts").where("titleState", "==", "pending").limit(25).get();
-    for (const doc of docs.docs) {
+    const pending = this.db.collectionGroup("contexts").where("titleState", "==", "pending")
+      .orderBy(FieldPath.documentId()).limit(TITLE_BATCH_SIZE);
+    const page = await (this.cursor ? pending.startAfter(this.cursor) : pending).get();
+    for (const doc of page.docs) {
+      this.cursor = doc.ref;
       if (!/^users\/[^/]+\/contexts\/[^/]+$/.test(doc.ref.path)) continue;
       await this.process(doc.ref);
     }
+    if (page.size < TITLE_BATCH_SIZE) this.cursor = undefined;
   }
   async process(ref: DocumentReference) {
     const uid = ref.path.split("/")[1]!;
@@ -100,7 +106,7 @@ export class TitleWorker {
       const itemData = item?.data();
       const content = ContentSchema.safeParse(itemData?.content);
       if (!content.success || itemData?.deleting) { tx.update(ref, { titleState: "fallback" }); return; }
-      if (this.imageReader && canDescribeTitleImage(content.data) && itemData?.ready !== true) return;
+      if (itemData?.ready !== true) return;
       tx.update(ref, { titleLease: lease, titleLeaseUntil: Date.now() + 30_000, titleAttempts: (data.titleAttempts ?? 0) + 1 });
       return { content: content.data, contextId: ref.id, itemId: item!.id, original: data.title as string };
     });

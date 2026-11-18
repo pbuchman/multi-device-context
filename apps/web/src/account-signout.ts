@@ -1,5 +1,6 @@
 import { openLocalDatabase, result, done, changed } from "./local-db.js";
 import type { Draft } from "./drafts.js";
+import { NativeSignOutReviewRequired } from "./platform.js";
 
 export type SignOutSummary = Readonly<{ token: string; drafts: number; webShares: number; nativeBatches: number; deletions: number }>;
 export type SignOutResult = { status: "changed"; summary: SignOutSummary } | { status: "complete" };
@@ -140,6 +141,15 @@ export function createAccountSignOut(ports: SignOutPorts): AccountSignOut {
       completed = true;
       return { status: "complete" };
     } catch (cause) {
+      if (stage === "auth" && cause instanceof NativeSignOutReviewRequired) {
+        authStarted = false; confirmed = undefined;
+        try {
+          reconfirm = summarize(await read());
+          return { status: "changed", summary: reconfirm };
+        } catch (readError) {
+          throw new SignOutError("preparation", false, { cause: readError });
+        } finally { unlockPreparation(); }
+      }
       if (cause instanceof LossChanged) {
         try {
           reconfirm = summarize(await read());

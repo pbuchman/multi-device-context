@@ -35,7 +35,8 @@ class MdcNativePlugin:Plugin() {
  private lateinit var auth:NativeAuth
  private val prefs by lazy { context.getSharedPreferences("mdc-native",Context.MODE_PRIVATE) }
  @Volatile private var transferGeneration=0L
- private val saves=mutableMapOf<String,Pair<ExportedFile,Long>>()
+ private data class PendingSave(val id:String,val callbackId:String,val generation:Long)
+ private var pendingSave:PendingSave?=null
  private val updateOwner=UUID.randomUUID().toString()
  private lateinit var updates:AndroidUpdateManager
  @Volatile private var installPermissionPending=false
@@ -47,7 +48,14 @@ class MdcNativePlugin:Plugin() {
   receive(activity.intent)
  }
  override fun handleOnResume() {super.handleOnResume();if(::updates.isInitialized)updates.foreground()}
- override fun handleOnDestroy() {DictationRuntime.cancel(DictationCancelReason.PLUGIN_DESTROYED,android.os.SystemClock.elapsedRealtime());DictationRuntime.detach(updateOwner);if(::updates.isInitialized)updates.detach(updateOwner);super.handleOnDestroy()}
+ override fun handleOnDestroy() {
+  pendingSave?.let { saved -> worker.execute { exports.discard(saved.id) } }
+  pendingSave=null
+  DictationRuntime.cancel(DictationCancelReason.PLUGIN_DESTROYED,android.os.SystemClock.elapsedRealtime())
+  DictationRuntime.detach(updateOwner)
+  if(::updates.isInitialized)updates.detach(updateOwner)
+  super.handleOnDestroy()
+ }
  @PluginMethod fun confirmProvisionalDictation(call:PluginCall) {
   val allowed=DictationRuntime.confirmProvisional(requireNotNull(call.getString("id")),requireNotNull(call.getString("contextId")),requireNotNull(call.getInt("revision")),android.os.SystemClock.elapsedRealtime())
   call.resolve(JSObject().put("allowed",allowed))
@@ -126,8 +134,26 @@ class MdcNativePlugin:Plugin() {
  @PluginMethod fun discardFile(call:PluginCall) = background(call) { exports.discard(requireNotNull(call.getString("id")));call.resolve() }
  @PluginMethod fun finishFile(call:PluginCall) = background(call) {
   val action=call.getString("action");require(action in listOf("copy","save","share"))
+  val id=requireNotNull(call.getString("id"))
   val generation=transferGeneration
-  val file=exports.finish(requireNotNull(call.getString("id")))
+  if(action=="save") {
+   val file=exports.prepareSave(id)
+   activity.runOnUiThread {
+    try {
+     check(generation==transferGeneration && !activity.isDestroyed) {"Access changed"}
+     check(pendingSave==null) {"A document picker is already open"}
+     val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).setType(file.contentType)
+      .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,file.displayName)
+     pendingSave=PendingSave(id,call.callbackId,generation)
+     startActivityForResult(call,intent,"savedDocument")
+    } catch(_:Exception) {
+     if(pendingSave?.callbackId==call.callbackId) pendingSave=null
+     background(call) {exports.discard(id);call.reject("Could not open the document picker")}
+    }
+   }
+   return@background
+  }
+  val file=exports.finish(id)
   val uri=FileProvider.getUriForFile(context,"${context.packageName}.fileprovider",file.file,file.displayName)
   activity.runOnUiThread { try {
    check(generation==transferGeneration) {"Access changed"}
@@ -138,20 +164,23 @@ class MdcNativePlugin:Plugin() {
      intent.clipData=ClipData.newUri(context.contentResolver,file.displayName,uri)
      activity.startActivity(Intent.createChooser(intent,"Share file"));call.resolve(JSObject().put("saved",true))
     }
-    "save" -> { saves[call.callbackId]=Pair(file,generation)
-     val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).setType(file.contentType).addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,file.displayName)
-     startActivityForResult(call,intent,"savedDocument")
-    }
    }
   } catch(_:Exception) {call.reject("No application available for this action")} }
  }
  @ActivityCallback private fun savedDocument(call:PluginCall?,result:ActivityResult) {
-  if(call==null)return
-  val saved=saves.remove(call.callbackId)
-  val file=saved?.first
+  val saved=pendingSave ?: return
+  pendingSave=null
+  if(call==null || call.callbackId!=saved.callbackId) {
+   worker.execute { exports.discard(saved.id) }
+   return
+  }
   val uri=result.data?.data
-  if(result.resultCode!=Activity.RESULT_OK || uri==null || file==null || saved.second!=transferGeneration) {call.resolve(JSObject().put("saved",false));return}
-  background(call) {check(saved.second==transferGeneration); context.contentResolver.openOutputStream(uri,"wt").use { output -> requireNotNull(output);file.file.inputStream().use { it.copyTo(output,NativePolicy.MAX_CHUNK) } };call.resolve(JSObject().put("saved",true)) }
+  background(call) {
+   val committed=result.resultCode==Activity.RESULT_OK && uri!=null && saved.generation==transferGeneration
+   if(committed) exports.saveDocument(saved.id) { context.contentResolver.openOutputStream(requireNotNull(uri),"wt") }
+   else exports.discard(saved.id)
+   call.resolve(JSObject().put("saved",committed))
+  }
  }
  @PluginMethod fun getPendingShares(call:PluginCall) = background(call) {
   val pending=inbox.pending()

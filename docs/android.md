@@ -20,7 +20,9 @@ CI debug APKs use synthetic configuration and a generic test key; they are not
 installation or upgrade artifacts for personal devices. Device-specific coverage
 that remains necessary is listed under [Device support boundaries](#device-support-boundaries).
 
-Version 0.7.3 uses Android version code 25 to keep the shared Preview catalog
+Version 0.7.4 uses Android version code 26 and fixes file-save cleanup and incoming share recovery.
+
+Version 0.7.3 used Android version code 25 to keep the shared Preview catalog
 aligned with the desktop expired-session sign-in recovery fix. Android receives
 version metadata changes only; its authentication behavior is unchanged. Physical
 Android installation and update acceptance must be recorded separately.
@@ -92,12 +94,12 @@ update a privately signed installation.
 
 Set an explicit positive `MDC_ANDROID_VERSION_CODE` for every device build and
 increase it for each update. It is not automatically incremented. Keep the
-application ID and signing key unchanged. Version 0.7.3 uses code 25, above official
-0.7.2/code 24. Earlier compatible signed codes 15–23 also remain eligible
+application ID and signing key unchanged. Version 0.7.4 uses code 26, above official
+0.7.3/code 25. Earlier compatible signed codes 15–23 also remain eligible
 for an in-place upgrade with the same key; do not reuse a published code.
 
 ```sh
-export MDC_ANDROID_VERSION_CODE=25
+export MDC_ANDROID_VERSION_CODE=26
 pnpm --filter @mdc/mobile android:release
 ```
 

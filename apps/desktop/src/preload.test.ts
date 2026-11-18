@@ -10,8 +10,10 @@ it("keeps the reviewed sign-out snapshot independent of concurrent inbox reads",
   vi.stubGlobal("location", { origin: "https://app.example.test", protocol: "https:" });
   vi.stubGlobal("MDC_APP_ORIGIN", "https://app.example.test");
   let finishRead!: (value: unknown) => void;
-  electron.invoke.mockImplementation(async (method: string) => method === "mdc:getPendingClipboardShares"
-    ? new Promise(resolve => { finishRead = resolve; }) : { ok: true, value: undefined });
+  electron.invoke.mockImplementation(async (method: string) => {
+    if (method === "mdc:getPendingClipboardShares") return new Promise(resolve => { finishRead = resolve; });
+    return { ok: true, value: method === "mdc:signOut" ? { status: "complete" } : undefined };
+  });
   await import("./preload.js");
   const bridge = electron.expose.mock.calls[0]![1] as DesktopBridge & { signOut(reviewedIds: readonly string[]): Promise<void> };
   const read = bridge.getPendingClipboardShares();
@@ -26,6 +28,17 @@ it("keeps the reviewed sign-out snapshot independent of concurrent inbox reads",
   expect(electron.invoke).toHaveBeenLastCalledWith("mdc:getAccountAvatar");
   expect(bridge.version).toBe(1);
   expect(bridge).toMatchObject({ reviewedSignOut: true });
+});
+
+it("forwards a structured sign-out review conflict and keeps the legacy void method fail-closed", async () => {
+  vi.stubGlobal("process", { ...process, isMainFrame: true });
+  vi.stubGlobal("location", { origin: "https://app.example.test", protocol: "https:" });
+  vi.stubGlobal("MDC_APP_ORIGIN", "https://app.example.test");
+  electron.invoke.mockResolvedValue({ ok: true, value: { status: "changed" } });
+  await import("./preload.js");
+  const bridge = electron.expose.mock.calls[0]![1] as DesktopBridge;
+  await expect(bridge.signOutReviewed!([])).resolves.toEqual({ status: "changed" });
+  await expect(bridge.signOut()).rejects.toThrow("Incoming shares changed");
 });
 
 it("subscribes trusted commands without exposing IPC and unregisters readiness", async () => {

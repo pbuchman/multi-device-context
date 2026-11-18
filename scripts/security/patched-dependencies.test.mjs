@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { verifyPatchedAdvisories } from '../dependencies/patched-advisories.mjs';
 
 function dependency(root, chain) {
   let require = createRequire(new URL(root, import.meta.url));
@@ -65,30 +65,49 @@ test('normal fresh caching and permitted stale responses still work', () => {
   }
 });
 
-test('audit exceptions cover only exact patched package versions throughout the lockfile', () => {
-  const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
-  const lock = readFileSync(new URL('../../pnpm-lock.yaml', import.meta.url), 'utf8');
-  assert.match(lock, /^lockfileVersion: '9\.0'/);
-  const snapshots = lock.split('\nsnapshots:\n');
-  assert.equal(snapshots.length, 2, 'Review this guard when the lockfile format changes');
-  const expected = [
-    ['braces', '3.0.3', 'GHSA-vfj7-8cjw-p6xm'],
-    ['http-cache-semantics', '4.2.0', 'GHSA-ch52-4w7c-c8xp'],
-  ];
-  assert.deepEqual(manifest.pnpm.auditConfig.ignoreGhsas, expected.map(([, , advisory]) => advisory));
-  for (const [name, version] of expected) {
-    assert.equal(manifest.pnpm.overrides[name], version);
-    const patchPath = `patches/${name}@${version}.patch`;
-    assert.equal(manifest.pnpm.patchedDependencies[`${name}@${version}`], patchPath);
-    const escapedVersion = version.replaceAll('.', '\\.');
-    const patch = lock.match(new RegExp(`^  ${name}@${escapedVersion}:\\n    hash: ([a-f0-9]+)\\n    path: ${patchPath.replaceAll('.', '\\.')}$`, 'm'));
-    assert.ok(patch, `${name} must have a pinned patch hash`);
-    assert.equal(createHash('sha256').update(readFileSync(new URL(`../../${patchPath}`, import.meta.url))).digest('hex'), patch[1]);
-    const expectedSelector = `${name}@${version}(patch_hash=${patch[1]})`;
-    const selectors = [...snapshots[1].matchAll(new RegExp(`^  ['"]?(${name}@[^:'"\\n]+)['"]?:`, 'gm'))].map(match => match[1]);
-    assert.deepEqual(selectors, [expectedSelector], `${name}: every installed snapshot must use the reviewed patch`);
-    const references = [...snapshots[1].matchAll(new RegExp(`^ +['"]?${name}['"]?: ['"]?([^'"\\n]+)['"]?$`, 'gm'))].map(match => match[1]);
-    assert.ok(references.length > 0);
-    assert.ok(references.every(value => value === `${version}(patch_hash=${patch[1]})`), `${name}: unpatched dependency reference`);
-  }
+const pm2Anymatch = dependency('../../package.json', ['pm2', 'chokidar', 'anymatch']);
+const tinyglobby = dependency('../../package.json', ['vitest', 'tinyglobby']);
+
+for (const [consumer, chain] of [
+  ['PM2', ['pm2', 'chokidar', 'anymatch']],
+  ['Firebase CLI', ['firebase-tools', 'chokidar', 'anymatch']],
+  ['Vitest', ['vitest']],
+  ['tinyglobby', ['vitest', 'tinyglobby']],
+]) {
+  const picomatch = dependency('../../package.json', [...chain, 'picomatch']);
+  test(`${consumer} rejects repeated extglobs before compiling a matcher`, () => {
+    const rejected = { name: 'SyntaxError', message: /Repeated extglobs are disabled/ };
+
+    // Literal words make these harmless even on an unpatched install.
+    assert.throws(() => picomatch.parse('src/+(docs)'), rejected);
+    assert.throws(() => picomatch.makeRe('./src/*(docs|help)', { maxExtglobRecursion: false }), rejected);
+    assert.throws(() => picomatch(['src/**/*.md', '@(help|+(docs))']), rejected);
+  });
+
+  test(`${consumer} preserves regular globs and non-repeating extglobs`, () => {
+    assert.equal(picomatch.isMatch('src/help/intro.md', 'src/**/*.md'), true);
+    assert.equal(picomatch.isMatch('src/help/intro.txt', 'src/**/*.md'), false);
+    assert.equal(picomatch.isMatch('src/docs', 'src/@(docs|help)'), true);
+    assert.equal(picomatch.isMatch('src/docs', 'src/!(archive)'), true);
+    assert.equal(picomatch.isMatch('+(docs)', '\\+\\(docs\\)'), true);
+    assert.equal(picomatch.compileRe(picomatch.parse('src/**/*.md')).test('src/help/intro.md'), true);
+  });
+}
+
+test('PM2 file watching and Vitest glob discovery use the installed matchers', () => {
+  assert.equal(pm2Anymatch('src/**/*.ts', 'src/routes/chats.ts'), true);
+  assert.equal(pm2Anymatch('src/**/*.ts', 'src/routes/chats.js'), false);
+  const cwd = fileURLToPath(new URL('../../', import.meta.url));
+  const files = tinyglobby.globSync('scripts/security/*.test.mjs', { cwd });
+  assert.ok(files.includes('scripts/security/patched-dependencies.test.mjs'));
+  assert.ok(files.every(file => file.endsWith('.test.mjs')));
+});
+
+test('every audit exception has exact reviewed versions and patched lockfile references', () => {
+  const cwd = fileURLToPath(new URL('../../', import.meta.url));
+  assert.deepEqual(verifyPatchedAdvisories(cwd), new Map([
+    ['GHSA-vfj7-8cjw-p6xm', new Set(['3.0.3'])],
+    ['GHSA-ch52-4w7c-c8xp', new Set(['4.2.0'])],
+    ['GHSA-fc5q-39xc-vjpf', new Set(['2.3.2', '4.0.7'])],
+  ]));
 });

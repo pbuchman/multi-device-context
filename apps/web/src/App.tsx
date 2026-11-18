@@ -6,6 +6,7 @@ import { AccessPage } from "./AccessPage.js";
 import { isAccessPageRequest } from "./browser-identity.js";
 import { applyLocalAccess, readLocalAccess } from "./local-access.js";
 import { createAccountSignOut, type AccountSignOut, type SignOutSummary } from "./account-signout.js";
+import { NativeSignOutReviewRequired } from "./platform.js";
 import { prepareHistory } from "./history.js";
 import { ContextOperations } from "./operations.js";
 import { subscribeLocal } from "./local-db.js";
@@ -20,8 +21,8 @@ import { useNavigation } from "./navigation.js";
 import { SessionManager, type ActiveSession, type SessionProfile } from "./auth.js";
 import { FirebaseCloud, type CloudSnapshot } from "./cloud.js";
 import { drainNativeClipboardQueue, type NativeQueueStore } from "./desktop.js";
-import type { ContextRecord, ItemRecord, ShareDraft, Viewer } from "./model.js";
-import { DurableOutbox, type QueuedShare } from "./outbox.js";
+import { itemKey, type ContextRecord, type ItemIdentity, type ItemRecord, type ShareDraft, type Viewer } from "./model.js";
+import { DurableOutbox, type CancelledShares, type FailureCategory, type QueuedShare } from "./outbox.js";
 import { DeletionCleanup, ForegroundCatchup, ForegroundRefresh } from "./sync.js";
 import { ChatSidebar, ChatTopbar, ChatMessage, ChatComposer, WorkspaceIcon, displayTitle, formatFileSize } from "./workspace-view.js";
 import { contextSourceLabel, useContextOrigins } from "./context-origins.js";
@@ -40,14 +41,14 @@ type Unsubscribe = () => void;
 const emptySubscribe = () => () => {};
 
 export type WorkspaceCloud = {
-  subscribeDeletedItems?(emit: (items: { contextId: Id; itemId: Id }[]) => void, fail: (error: Error) => void): Unsubscribe;
+  subscribeDeletedItems?(emit: (items: ItemIdentity[]) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeDeletedContexts?(emit: (ids: Id[]) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeContexts(emit: (snapshot: CloudSnapshot<ContextRecord>) => void, fail: (error: Error) => void): Unsubscribe;
   subscribeItems(contextId: Id, emit: (snapshot: CloudSnapshot<ItemRecord>) => void, fail: (error: Error) => void): Unsubscribe;
   getContextOrigins?(contextIds: Id[]): Promise<ContextOrigin[]>;
   refreshContexts?(): Promise<CloudSnapshot<ContextRecord>>;
   refreshDeletedContexts?(): Promise<Id[]>;
-  refreshDeletedItems?(): Promise<{ contextId: Id; itemId: Id }[]>;
+  refreshDeletedItems?(): Promise<ItemIdentity[]>;
   refreshItems?(contextId: Id): Promise<CloudSnapshot<ItemRecord>>;
   setNetworkEnabled?(enabled: boolean): Promise<void>;
   setContextPinned?(contextId: Id, pinned: boolean): Promise<void>;
@@ -62,8 +63,8 @@ export type WorkspaceOutbox = {
   readonly namespace: string;
   removeContext?(id: Id): Promise<void>;
   removeItem?(contextId: Id, itemId: Id): Promise<void>;
-  cancelled?(): Promise<{ contexts: Id[]; items: Id[] }>;
-  deletions?(): Promise<{ contextId: Id; itemId?: Id; attempts?: number; paused?: boolean; nextAttemptAt?: number }[]>;
+  cancelled?(): Promise<CancelledShares>;
+  deletions?(): Promise<{ contextId: Id; itemId?: Id; attempts?: number; paused?: boolean; nextAttemptAt?: number; errorCategory?: FailureCategory; httpStatus?: number }[]>;
   enqueueBatch?(drafts: ShareDraft[]): Promise<void>;
   enqueue(draft: ShareDraft): Promise<void>;
   count(): Promise<number>;
@@ -108,6 +109,7 @@ export type WorkspaceServices = {
   getLaunchAtLogin?: () => Promise<boolean>;
   setLaunchAtLogin?: (enabled: boolean) => Promise<void>;
   pendingNativeCount?: () => Promise<number>;
+  initialNativeError?: string;
   readClipboard?: () => Promise<ClipboardSnapshot>;
   subscribeNativeShares?: (listener: () => void) => Unsubscribe;
   drainNativeShares?: () => Promise<Id | undefined>;
@@ -244,7 +246,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     deleted: { confirmed: !services.cloud.refreshDeletedContexts, failed: false },
     deletedItems: { confirmed: !services.cloud.refreshDeletedItems, failed: false },
   });
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState(services.initialNativeError);
   const [toast, setToast] = useState<string>();
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("mdc-theme") as Theme | null) ?? "system");
   const [deviceName, setDeviceName] = useState(services.device.name);
@@ -296,8 +298,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   const seenContexts = useRef<Set<Id> | undefined>(undefined);
   const acknowledged = useRef(new Set<Id>());
   const deleted = useRef(new Set<Id>());
-  const deletedItems = useRef(new Set<Id>());
-  const knownDeletedItems = useRef(new Map<string, { contextId: Id; itemId: Id }>());
+  const deletedItems = useRef(new Set<string>());
+  const knownDeletedItems = useRef(new Map<string, ItemIdentity>());
+  const isItemDeleted = useCallback((item: ItemRecord) => deletedItems.current.has(itemKey(item.contextId, item.id)), []);
   const suppressCatchupAutoSelect = useRef(false);
   const backgroundInactive = useRef(false);
   const streamVersions = useRef({ contexts: 0, deleted: 0, deletedItems: 0, items: 0 });
@@ -405,14 +408,15 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       throw cause;
     }
   }, [deletionCleanup, isLive, navigation.remove, services.outbox, setSelectedId]);
-  const applyDeletedItems = useCallback(async (records: { contextId: Id; itemId: Id }[]) => {
+  const applyDeletedItems = useCallback(async (records: ItemIdentity[]) => {
     if (!isLive()) return;
     for (const item of records) {
-      deletedItems.current.add(item.itemId);
-      knownDeletedItems.current.set(`item:${item.contextId}:${item.itemId}`, item);
+      const key = itemKey(item.contextId, item.itemId);
+      deletedItems.current.add(key);
+      knownDeletedItems.current.set(key, item);
     }
-    setItems(current => current.filter(item => !deletedItems.current.has(item.id)));
-    setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id)));
+    setItems(current => current.filter(item => !isItemDeleted(item)));
+    setOptimisticItems(current => current.filter(item => !isItemDeleted(item)));
     try {
       await deletionCleanup.reconcile(knownDeletedItems.current.keys(), key => {
         const item = knownDeletedItems.current.get(key)!;
@@ -426,7 +430,24 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       }
       throw cause;
     }
-  }, [deletionCleanup, isLive, services.outbox]);
+  }, [deletionCleanup, isItemDeleted, isLive, services.outbox]);
+  const mergeContextSnapshot = useCallback((records: ContextRecord[], currentId: Id) => {
+    const remote = records.filter(context => !deleted.current.has(context.id));
+    const confirmed = remote.filter(context => context.syncState === "synced" || context.syncState === "cached");
+    for (const context of confirmed) localQueuedContexts.current.delete(context.id);
+    setConfirmedContextIds(current => {
+      const incoming = confirmed.filter(context => !current.has(context.id));
+      return incoming.length ? new Set([...current, ...incoming.map(context => context.id)]) : current;
+    });
+    const remoteIds = new Set(remote.map(context => context.id));
+    setContexts(current => [
+      ...current.filter(context => localQueuedContexts.current.has(context.id) && !remoteIds.has(context.id) && !deleted.current.has(context.id)),
+      ...remote.map(context => ({
+        ...context,
+        unread: context.id !== currentId && context.updatedAt > (lastRead.current[context.id] ?? context.createdAt),
+      })),
+    ]);
+  }, []);
   useEffect(() => {
     live.current.mounted = true;
     setRefreshing(false);
@@ -441,13 +462,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     return services.cloud.subscribeContexts((snapshot) => {
     if (!isLive()) return;
     streamVersions.current.contexts += 1;
-    setConfirmedContextIds((current) => {
-      const confirmed = snapshot.records.filter(context => (context.syncState === "synced" || context.syncState === "cached") && !current.has(context.id));
-      return confirmed.length ? new Set([...current, ...confirmed.map(context => context.id)]) : current;
-    });
     const currentId = navigation.selectedRef.current.id;
-    for (const context of snapshot.records) localQueuedContexts.current.delete(context.id);
-    setContexts(snapshot.records.filter(c => !deleted.current.has(c.id)).map(context => ({ ...context, unread: context.id !== currentId && context.updatedAt > (lastRead.current[context.id] ?? context.createdAt) })));
     setSyncStreams(current => ({ ...current, contexts: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.contexts.failed } }));
     if (!snapshot.fromCache) {
       const ready = snapshot.records.filter(c => c.syncState === "synced" && c.ready !== false);
@@ -457,17 +472,18 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         if (incoming[0]) setSelectedId(incoming[0].id);
       } else seenContexts.current = new Set();
       for (const context of ready) seenContexts.current.add(context.id);
-      for (const context of snapshot.records) acknowledged.current.add(context.id);
+      for (const context of snapshot.records) if (context.syncState === "synced") acknowledged.current.add(context.id);
       if (acknowledged.current.has(currentId) && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setSelectedId(undefined);
       else if (!navigation.selectedRef.current.drafts[currentId]?.local && !snapshot.records.some(c => c.id === currentId) && !localQueuedContexts.current.has(currentId)) setError("This context is unavailable or has been deleted");
     }
+    mergeContextSnapshot(snapshot.records, currentId);
     }, cause => {
       if (!isLive()) return;
       streamVersions.current.contexts += 1;
       setSyncStreams(current => ({ ...current, contexts: { ...current.contexts, failed: true } }));
       setError(cause.message || "Could not load contexts");
     });
-  }, [active, isLive, services.cloud, services.device.id, services.platformKind, setSelectedId]);
+  }, [active, isLive, mergeContextSnapshot, navigation.selectedRef, services.cloud, services.device.id, services.platformKind, setSelectedId]);
 
   useEffect(() => {
     if (services.platformKind === "android" && !active) return;
@@ -518,7 +534,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     return services.cloud.subscribeItems(selectedId, (snapshot) => {
       if (!isLive() || navigation.selectedRef.current.id !== selectedId) return;
       streamVersions.current.items += 1;
-      setItems(snapshot.records.filter(item => !deletedItems.current.has(item.id)));
+      setItems(snapshot.records.filter(item => !isItemDeleted(item)));
       setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.items.failed } }));
       const cloudIds = new Set(snapshot.records.map((item) => item.id));
       setOptimisticItems((current) => current.filter((item) => item.contextId !== selectedId || !cloudIds.has(item.id)));
@@ -528,7 +544,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       setSyncStreams(current => ({ ...current, items: { ...current.items, failed: true } }));
       setError(cause.message || "Could not load shared items");
     });
-  }, [active, isLive, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
+  }, [active, isItemDeleted, isLive, navigation.selectedRef, selectedContextConfirmed, selectedId, services.cloud, services.platformKind]);
 
   const allContexts = [...navigation.localContexts, ...contexts.filter(context => !navigation.localContexts.some(draft => draft.id === context.id))].sort(comparePinnedContexts);
   useEffect(() => {
@@ -564,15 +580,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         refreshers.current.contexts.run(`${services.viewer.uid}:contexts`, () => services.cloud.refreshContexts!(), snapshot => {
           if (!current() || streamVersions.current.contexts !== versionsAtStart.contexts) return;
           for (const context of snapshot.records) seenContexts.current?.add(context.id);
-          setContexts(current => {
-            const queued = current.filter(context => localQueuedContexts.current.has(context.id));
-            const queuedIds = new Set(queued.map(context => context.id));
-            return [...queued, ...snapshot.records.filter(context => !queuedIds.has(context.id) && !deleted.current.has(context.id))];
-          });
-          setConfirmedContextIds(current => {
-            const incoming = snapshot.records.filter(context => !current.has(context.id));
-            return incoming.length ? new Set([...current, ...incoming.map(context => context.id)]) : current;
-          });
+          mergeContextSnapshot(snapshot.records, navigation.selectedRef.current.id);
           setSyncStreams(current => ({ ...current, contexts: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: false } }));
         }),
         refreshers.current.deleted.run(`${services.viewer.uid}:deleted`, () => services.cloud.refreshDeletedContexts!(), async ids => {
@@ -587,7 +595,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (selectedAtStart && confirmedContextIdsRef.current.has(selectedAtStart) && services.cloud.refreshItems) {
         tasks.push(refreshers.current.items.run(`${services.viewer.uid}:${selectedAtStart}`, () => services.cloud.refreshItems!(selectedAtStart), snapshot => {
           if (!current() || navigation.selectedRef.current.id !== selectedAtStart || streamVersions.current.items !== versionsAtStart.items) return;
-          setItems(snapshot.records.filter(item => !deletedItems.current.has(item.id)));
+          setItems(snapshot.records.filter(item => !isItemDeleted(item)));
           const ids = new Set(snapshot.records.map(item => item.id));
           setOptimisticItems(current => current.filter(item => item.contextId !== selectedAtStart || !ids.has(item.id)));
           setSyncStreams(current => ({ ...current, items: { fromCache: snapshot.fromCache, pending: snapshot.hasPendingWrites, failed: snapshot.fromCache && current.items.failed } }));
@@ -627,7 +635,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (manual && !cause && complete) showToast("Refresh complete");
       suppressCatchupAutoSelect.current = backgroundInactive.current;
     });
-  }, [applyDeleted, applyDeletedItems, deletionCleanup, isLive, navigation.selectedRef, services, showToast, refreshOrigins]);
+  }, [applyDeleted, applyDeletedItems, deletionCleanup, isItemDeleted, isLive, mergeContextSnapshot, navigation.selectedRef, services, showToast, refreshOrigins]);
 
   useEffect(() => {
     if ((!services.checkAccess && services.platformKind !== "android") || signingOut.current) return;
@@ -660,7 +668,8 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
   }, [active, refresh]);
 
   const restoreQueued = useCallback(async (selectContext?: Id, selectLatestNative = false, current: () => boolean = () => true) => {
-    const queued = (await services.outbox.list()).filter(record => !deleted.current.has(record.contextId));
+    const queued = (await services.outbox.list()).filter(record =>
+      !deleted.current.has(record.contextId) && !deletedItems.current.has(itemKey(record.contextId, record.itemId)));
     if (!current()) return;
     if (selectLatestNative) {
       selectContext = queued.filter((record) => record.nativeRequestId)
@@ -670,7 +679,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (queued.length === 0) { setOptimisticItems([]); return; }
     const queuedContexts = new Map<Id, ContextRecord>();
     for (const record of queued) {
-      localQueuedContexts.current.add(record.contextId);
+      if (!confirmedContextIdsRef.current.has(record.contextId)) localQueuedContexts.current.add(record.contextId);
       queuedContexts.set(record.contextId, {
       id: record.contextId,
       title: record.title,
@@ -705,22 +714,36 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     const failedDeletion = deletions.some(record => record.paused || ((record.attempts ?? 0) > 0 && record.nextAttemptAt !== 0));
     setDeletionCount(deletions.length);
     setDeletionFailed(failedDeletion);
-    if (failedDeletion) setError("Deletion is not confirmed yet. Retry or reconnect to finish.");
+    if (failedDeletion) {
+      const failure = deletions.find(record => record.paused || ((record.attempts ?? 0) > 0 && record.nextAttemptAt !== 0));
+      const detail = failure?.errorCategory === "network" ? "Reconnect to continue, or Retry."
+        : failure?.errorCategory === "auth" ? "Sign in again, then Retry."
+        : failure?.errorCategory === "access" ? "Access was denied. Check this device's access before Retry."
+        : failure?.errorCategory === "server" ? "The server could not finish. Retry shortly."
+        : "Retry to request confirmation.";
+      setError(`Deletion is not confirmed yet. ${detail}`);
+    }
     else if (pendingDeletionCount.current) setError(current => current?.startsWith("Deletion is not confirmed") ? undefined : current);
     pendingDeletionCount.current = deletions.length;
     const cancelled = await services.outbox.cancelled?.();
     if (!isLive() || revision !== queueRefreshRevision.current) return;
     if (cancelled) {
-      for (const id of cancelled.contexts) deleted.current.add(id);
-      for (const id of cancelled.items) deletedItems.current.add(id);
-      setContexts(current => current.filter(c => !deleted.current.has(c.id)));
-      setItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
-      setOptimisticItems(current => current.filter(item => !deletedItems.current.has(item.id) && !deleted.current.has(item.contextId)));
+      for (const id of cancelled.contexts) {
+        deleted.current.add(id);
+        localQueuedContexts.current.delete(id);
+      }
+      for (const item of cancelled.items) deletedItems.current.add(itemKey(item.contextId, item.itemId));
+      const cancelledLocalChats = new Set(cancelled.localCreations.filter(id =>
+        localQueuedContexts.current.delete(id) && !confirmedContextIdsRef.current.has(id)));
+      setContexts(current => current.filter(c => !deleted.current.has(c.id) && !cancelledLocalChats.has(c.id)));
+      setItems(current => current.filter(item => !isItemDeleted(item) && !deleted.current.has(item.contextId)));
+      setOptimisticItems(current => current.filter(item => !isItemDeleted(item) && !deleted.current.has(item.contextId)));
+      if (cancelledLocalChats.has(navigation.selectedRef.current.id)) setSelectedId(undefined);
     }
     setQueueCount(queued.length);
     const failed = queued.find((record) => record.status === "paused" || record.status === "failed");
     if (failed?.lastError) setError(failed.lastError);
-  }, [services.outbox]);
+  }, [isItemDeleted, isLive, navigation.selectedRef, services.outbox, setSelectedId]);
   useEffect(() => { void refreshQueue(); return subscribeLocal(() => { void refreshQueue(); }); }, [refreshQueue]);
   useEffect(() => {
     if ((queueCount === 0 && deletionCount === 0) || (services.platformKind === "android" && !active)) return;
@@ -999,9 +1022,9 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     try {
       if (item.content.kind === "attachment") {
         const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
-        if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
+        if (!isLive() || deleted.current.has(item.contextId) || isItemDeleted(item)) return;
         const file = await clipboardImageFile({ name: item.content.name, contentType: item.content.contentType, bytes });
-        if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
+        if (!isLive() || deleted.current.has(item.contextId) || isItemDeleted(item)) return;
         await services.copyFile(file);
       } else await services.copyText(item.content.text);
       showToast("Copied to this device");
@@ -1011,7 +1034,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (item.content.kind !== "attachment") return;
     try {
       const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
-      if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
+      if (!isLive() || deleted.current.has(item.contextId) || isItemDeleted(item)) return;
       if (await services.saveFile({ name: item.content.name, contentType: item.content.contentType, bytes })) showToast("File saved");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Save failed"); }
   };
@@ -1019,7 +1042,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
     if (item.content.kind !== "attachment" || !services.shareFile) return;
     try {
       const bytes = await services.cloud.attachmentBytes(item.contextId, item.id, item.content);
-      if (!isLive() || deleted.current.has(item.contextId) || deletedItems.current.has(item.id)) return;
+      if (!isLive() || deleted.current.has(item.contextId) || isItemDeleted(item)) return;
       if (await services.shareFile({ name: item.content.name, contentType: item.content.contentType, bytes })) showToast("Share sheet opened");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Share failed"); }
   };
@@ -1064,34 +1087,36 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
       if (navigation.selectedRef.current.id === context.id) setSelectedId(undefined);
       if (complete) showToast("Context permanently deleted");
       await refreshQueue();
-    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry to request confirmation."); }
     finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const deleteItem = async (item: ItemRecord) => {
     if (accountBlocked || !isLive()) return;
     setActiveDeletions(count => count + 1);
     try {
-      const finalVisibleItem = visibleItems.length === 1 && visibleItems[0]?.id === item.id;
+      const key = itemKey(item.contextId, item.id);
+      const firstVisible = visibleItems[0];
+      const finalVisibleItem = visibleItems.length === 1 && firstVisible !== undefined && itemKey(firstVisible.contextId, firstVisible.id) === key;
       const complete = await remove(item.contextId, item.id, finalVisibleItem);
       if (!isLive()) return;
-      deletedItems.current.add(item.id);
-      setItems(current => current.filter(i => i.id !== item.id));
-      setOptimisticItems(current => current.filter(i => i.id !== item.id));
-      if (!confirmedContextIds.has(item.contextId) && !(await services.outbox.list()).some(record => record.contextId === item.contextId)) {
+      deletedItems.current.add(key);
+      setItems(current => current.filter(i => itemKey(i.contextId, i.id) !== key));
+      setOptimisticItems(current => current.filter(i => itemKey(i.contextId, i.id) !== key));
+      if (!services.outbox.cancelled && !confirmedContextIds.has(item.contextId) && !(await services.outbox.list()).some(record => record.contextId === item.contextId)) {
         localQueuedContexts.current.delete(item.contextId);
         setContexts(current => current.filter(context => context.id !== item.contextId));
         if (navigation.selectedRef.current.id === item.contextId) setSelectedId(undefined);
       }
       if (complete) showToast("Message permanently deleted");
       await refreshQueue();
-    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry or reconnect to finish."); }
+    } catch { if (isLive()) setError("Deletion is not confirmed yet. Retry to request confirmation."); }
     finally { if (live.current.services === services && live.current.mounted) setActiveDeletions(count => Math.max(0, count - 1)); }
   };
   const retry = async () => {
     setError(undefined); navigation.retry();
     nativeReconcile.current?.();
     try { await refresh(); for (const action of fallbackDeletes.current.values()) await action(); await services.outbox.retry(); await refreshQueue(); await services.drain(); await refreshQueue(); }
-    catch { setError("Operation is not confirmed yet. Reconnect and retry."); }
+    catch { setError("Operation is not confirmed yet. Retry to request confirmation."); }
   };
 
   const settleLocalInput = async () => {
@@ -1242,7 +1267,7 @@ export function ContextWorkspace({ services }: { services: WorkspaceServices }) 
         {error || navigation.issue ? <div className="error-banner" role="alert"><span>{error ?? navigation.issue}</span><button type="button" disabled={accountBlocked} onClick={() => void retry()}>Retry</button>{error ? <button type="button" className="icon-button" aria-label="Dismiss error" onClick={() => setError(undefined)}><WorkspaceIcon name="close" /></button> : null}</div> : null}
         <div className="timeline-region">
           <section ref={scroll.viewport} className="timeline" aria-label="Messages to yourself"><div ref={scroll.content} className="timeline-content">
-            {visibleItems.length ? visibleItems.map((item, index) => <Fragment key={item.id}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ChatMessage item={item} cloud={services.cloud} blocked={accountBlocked || lifecycleSaving} onCopy={value => void copyItem(value)} onDelete={item => openPanel({ kind: "delete-item", item })} onMore={item => openPanel({ kind: "item", item })} /></Fragment>)
+            {visibleItems.length ? visibleItems.map((item, index) => <Fragment key={itemKey(item.contextId, item.id)}>{index === 0 || dayLabel(visibleItems[index - 1]!.createdAt) !== dayLabel(item.createdAt) ? <div className="day-label">{dayLabel(item.createdAt)}</div> : null}<ChatMessage item={item} cloud={services.cloud} blocked={accountBlocked || lifecycleSaving} onCopy={value => void copyItem(value)} onDelete={item => openPanel({ kind: "delete-item", item })} onMore={item => openPanel({ kind: "item", item })} /></Fragment>)
               : <div className="empty"><WorkspaceIcon name="stack" /><strong>A place for your thoughts.</strong><span>Message yourself. Send it to pick it up on another device.</span></div>}
           </div></section>
           {scroll.newMessages ? <button type="button" className="new-messages" onClick={() => scroll.scrollToBottom(selectedId)}>New messages <WorkspaceIcon name="save" /></button> : null}
@@ -1359,13 +1384,15 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   updateDeviceName(verifiedPolicy);
   const initialContexts = await cloud.refreshContexts();
   await applyLocalAccess(outbox.namespace, session.device, initialContexts.records.filter(context => context.originDeviceId === device.id).map(context => context.id));
+  await outbox.recoverLegacyDeletions();
   if (session.device.mode === "own") {
     localStorage.removeItem(`mdc-confirmed:${outbox.namespace}`);
     localStorage.removeItem(`mdc-read:${session.uid}:${device.id}`);
   }
   const operations = new ContextOperations(outbox, {
     deletionMarkers: async () => { await checkAccess(); return cloud.deletionMarkers(); },
-    publish: record => cloud.publish(record), deleteContext: id => cloud.deleteContext(id), deleteItem: (id, item) => cloud.deleteItem(id, item),
+    publish: record => cloud.publish(record), deleteContext: id => cloud.deleteContext(id),
+    deleteItem: (id, item, deleteEmptyContext) => cloud.deleteItem(id, item, deleteEmptyContext),
   });
   const runner = operations.runner;
   runner.stop();
@@ -1400,10 +1427,15 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
     if (nativeDrainPending) return nativeDrainPending;
     lastNativeContext = undefined;
     nativeDrainPending = (async () => {
+      let failure: { cause: unknown } | undefined;
       do {
         nativeDrainRequested = false;
-        await drainNativeClipboardQueue(native, nativeStore, () => nativeIntakeEnabled);
+        try {
+          await drainNativeClipboardQueue(native, nativeStore, () => nativeIntakeEnabled);
+          failure = undefined;
+        } catch (cause) { failure = { cause }; }
       } while (nativeDrainRequested && nativeIntakeEnabled);
+      if (nativeIntakeEnabled && failure) throw failure.cause;
       return nativeIntakeEnabled ? lastNativeContext : undefined;
     })().finally(() => { nativeDrainPending = undefined; });
     return nativeDrainPending;
@@ -1415,7 +1447,11 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
     void transferInvalidation.catch(() => {});
   }
   await checkAccess();
-  const initialNativeId = await drainNative();
+  let initialNativeError: string | undefined;
+  const initialNativeId = await drainNative().catch((cause: unknown) => {
+    initialNativeError = cause instanceof Error ? cause.message : "Clipboard sharing failed";
+    return lastNativeContext;
+  });
   let activityActive = session.platform.activity?.initialActive ?? true;
   const stopActivity = session.platform.activity?.subscribe(value => { activityActive = value; });
   const accountSignOut = createAccountSignOut({
@@ -1428,7 +1464,19 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
       return () => { nativeIntakeEnabled = previousIntake; if (!wasStopped && activityActive) runner.resume(); };
     },
     settle: async () => { await Promise.all([runner.stopAndWait(), nativeDrainPending ?? Promise.resolve()]); },
-    signOut: (cleanup, nativeIds) => { accessActive = false; cloud.invalidate(); return session.signOut(cleanup, nativeIds); },
+    signOut: async (cleanup, nativeIds) => {
+      const closeAccess = () => {
+        if (!accessActive) return;
+        accessActive = false;
+        cloud.invalidate();
+      };
+      try {
+        await session.signOut(async () => { closeAccess(); await cleanup(); }, nativeIds);
+      } catch (error) {
+        if (!(error instanceof NativeSignOutReviewRequired)) closeAccess();
+        throw error;
+      }
+    },
   });
   const initialNavigation = await native?.takeNavigation?.();
   if (initialNavigation && !initialNavigation.contextId && !initialNativeId) window.history.replaceState({}, "", "/");
@@ -1437,7 +1485,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   const stopLocalPolicy = subscribeLocal(() => {
     void readLocalAccess(outbox.namespace).then(local => {
       if (accessActive && !accountSignOut.locked && local && (local.deviceId !== device.id || local.version > session.device.version || local.mode !== session.device.mode)) { invalidate(); onAccessChange(); }
-    }).catch(() => { if (accessActive) { invalidate(); onAccessChange(); } });
+    }).catch(() => { if (accessActive && !accountSignOut.locked) { invalidate(); onAccessChange(); } });
   });
   const stopPolicy = cloud.subscribeDevice(current => {
     if (!accessActive || accountSignOut.locked) return;
@@ -1447,6 +1495,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
   return {
     services: {
       ...(initialNavigation?.contextId || initialNativeId ? { initialContextId: initialNavigation?.contextId ?? initialNativeId! } : {}),
+      ...(initialNativeError ? { initialNativeError } : {}),
       accessMode: session.device.mode,
       accessActive: () => accessActive,
       checkAccess,
@@ -1455,7 +1504,7 @@ export async function buildServices(session: ActiveSession, onAccessChange: () =
         else window.open(`${session.config.appOrigin}/access?device=${encodeURIComponent(device.id)}`, "_blank", "noopener,noreferrer");
       },
       settings: cloud,
-      remove: (contextId, itemId) => operations.remove(contextId, itemId),
+      remove: (contextId, itemId, deleteEmptyContext) => operations.remove(contextId, itemId, deleteEmptyContext),
       isDesktop: session.platform.kind === "desktop",
       platformKind: session.platform.kind,
       ...(session.platform.dictation ? { dictation: session.platform.dictation } : {}),

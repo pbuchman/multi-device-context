@@ -133,14 +133,14 @@ registration requires one. Verify public `uiBuild` and served asset hashes
 against the exact candidate, readiness, and older client compatibility. Then
 publish the complete release as a **prerelease**.
 
-For 0.7.3, use Android version code 25 with the existing package ID and release
-key. It must update official 0.7.2/code 24 in place, preserving existing data;
+For 0.7.4, use Android version code 26 with the existing package ID and release
+key. It must update official 0.7.3/code 25 in place, preserving existing data;
 earlier compatible signed codes 15–23 remain eligible for an in-place update. Record
 the APK's certificate digest and exact bytes before publication; a new version
 label alone does not prove signing continuity or a successful upgrade. Affected
 0.6.3 installations bootstrap through Android's system installer. Acceptance of
 the corrected updater starts from 0.6.4 and uses **Settings → Check for updates →
-Download and install** for 0.7.3/code 25, with existing data retained.
+Download and install** for 0.7.4/code 26, with existing data retained.
 Keep that pending physical result separate from phone, emulator and CI checks.
 
 MDC 0.6.2 updates the [owned local dictation contract](android-dictation.md) introduced

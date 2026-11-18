@@ -24,6 +24,12 @@ export type ItemRecord = {
   syncState: SyncState;
 };
 
+export type ItemIdentity = { contextId: Id; itemId: Id };
+
+export function itemKey(contextId: Id, itemId: Id): string {
+  return `${contextId}:${itemId}`;
+}
+
 export type ShareDraft = {
   contextId: Id;
   itemId: Id;

@@ -2,7 +2,7 @@ import { assertLocalAccess, transactionAccess, allowedByLocalPolicy } from "./lo
 import { openLocalDatabase, changed } from "./local-db.js";
 import type { Id } from "@mdc/contracts";
 
-import type { ShareDraft } from "./model.js";
+import { itemKey, type ItemIdentity, type ShareDraft } from "./model.js";
 import type { DictationAuthority } from "./dictation.js";
 
 export type AccountNamespace = { projectId: string; uid: string };
@@ -27,14 +27,24 @@ type DictationMarker = { key: string; kind: "dictation"; namespace: string; sess
 
 type StoredAction = QueuedShare & { kind: "action" };
 type DeletedMarker = { key: string; kind: "deleted"; namespace: string; contextId: Id };
-export type Deletion = { key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
-type ItemMarker = { key: string; kind: "deleted-item"; namespace: string; contextId: Id; itemId: Id };
+export type FailureCategory = "network" | "auth" | "access" | "server" | "request";
+export const DELETION_RECOVERY_VERSION = 1;
+export type Deletion = { recoveryVersion?: number; errorCategory?: FailureCategory; httpStatus?: number; key: string; kind: "deletion"; namespace: string; contextId: Id; itemId?: Id; deleteEmptyContext?: boolean; nextAttemptAt: number; attempts: number; paused: boolean };
+export type CancelledShares = { contexts: Id[]; items: ItemIdentity[]; localCreations: Id[] };
+type ItemMarker = ItemIdentity & { key: string; kind: "deleted-item"; namespace: string; cancelledCreation?: boolean };
 type StoredRecord = StoredAction | NativeMarker | DictationMarker | DeletedMarker | ItemMarker | Deletion;
 
 const STORE_NAME = "records";
 
 function finalDeletionPending(records: StoredRecord[], contextId: Id): boolean {
   return records.some(record => record.kind === "deletion" && record.contextId === contextId && record.deleteEmptyContext === true);
+}
+
+function actionKey(namespace: string, draft: ItemIdentity, existing: StoredRecord[]): string {
+  const legacy = `action:${namespace}:${draft.itemId}`;
+  // Keep an existing row's key stable for in-flight retries and cancellation.
+  if (existing.some(record => record.kind === "action" && record.key === legacy && record.contextId === draft.contextId)) return legacy;
+  return `action:${namespace}:${itemKey(draft.contextId, draft.itemId)}`;
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -100,10 +110,11 @@ export class DurableOutbox {
       check();
       const existing = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
       check();
-      const removed = await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)); check();
-      if (finalDeletionPending(existing, draft.contextId) || removed) throw new PublishFailure("This context was deleted", false);
+      const removed = await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`));
+      const itemRemoved = await requestResult(store.get(`deleted-item:${this.namespace}:${itemKey(draft.contextId, draft.itemId)}`)); check();
+      if (finalDeletionPending(existing, draft.contextId) || removed || itemRemoved) throw new PublishFailure("This context or item was deleted", false);
       store.add({ key, kind: "dictation", namespace: this.namespace, sessionId, contextId: draft.contextId, itemId: draft.itemId } satisfies DictationMarker);
-      await requestResult(store.add({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction));
+      await requestResult(store.add({ ...draft, key: actionKey(this.namespace, draft, existing), kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction));
       // Keep IDB active only for a bounded local native admission check. The
       // final live check+commit run together in an active IDB request callback.
       await new Promise<void>((resolve, reject) => {
@@ -147,8 +158,8 @@ export class DurableOutbox {
       for (const draft of drafts) {
         await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
         if (finalDeletionPending(existing, draft.contextId)) throw new PublishFailure("This context is being deleted", false);
-        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) throw new PublishFailure("This context or item was deleted", false);
-        store.put({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
+        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${itemKey(draft.contextId, draft.itemId)}`))) throw new PublishFailure("This context or item was deleted", false);
+        store.put({ ...draft, key: actionKey(this.namespace, draft, existing), kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
       }
       await complete; changed();
     } catch (error) {
@@ -169,8 +180,8 @@ export class DurableOutbox {
       for (const draft of drafts) {
         await assertLocalAccess(store, this.namespace, draft.contextId, draft.createsContext);
         if (finalDeletionPending(existing, draft.contextId)) continue;
-        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${draft.contextId}:${draft.itemId}`))) continue;
-        store.add({ ...draft, key: `action:${this.namespace}:${draft.itemId}`, kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
+        if (await requestResult(store.get(`deleted:${this.namespace}:${draft.contextId}`)) || await requestResult(store.get(`deleted-item:${this.namespace}:${itemKey(draft.contextId, draft.itemId)}`))) continue;
+        store.add({ ...draft, key: actionKey(this.namespace, draft, existing), kind: "action", namespace: this.namespace, attempts: 0, queuedAt: Date.now(), nextAttemptAt: 0, status: "pending" } satisfies StoredAction);
       }
       await complete; changed(); return true;
     } catch (error) {
@@ -239,8 +250,14 @@ export class DurableOutbox {
     const removed = actions.filter(r => !itemId || r.itemId === itemId);
     for (const record of removed) store.delete(record.key);
     if (itemId) {
-      store.put({ key: `deleted-item:${this.namespace}:${contextId}:${itemId}`, kind: "deleted-item", namespace: this.namespace, contextId, itemId } satisfies ItemMarker);
-      if (removed.some(r => r.createsContext)) {
+      const key = `deleted-item:${this.namespace}:${itemKey(contextId, itemId)}`;
+      const previous = await requestResult(store.get(key)) as ItemMarker | undefined;
+      const removedCreator = removed.some(r => r.createsContext);
+      // Queue completion can also leave no actions before the confirming
+      // snapshot arrives. Record when a deletion actually removed the creator.
+      const cancelledCreation = previous?.cancelledCreation || (removedCreator && removed.length === actions.length);
+      store.put({ key, kind: "deleted-item", namespace: this.namespace, contextId, itemId, ...(cancelledCreation ? { cancelledCreation: true } : {}) } satisfies ItemMarker);
+      if (removedCreator) {
         const next = actions.filter(r => r.itemId !== itemId).sort((a,b) => a.queuedAt - b.queuedAt || a.itemId.localeCompare(b.itemId))[0];
         if (next) store.put({ ...next, createsContext: true });
       }
@@ -249,13 +266,19 @@ export class DurableOutbox {
       store.put({ key: `deleted:${this.namespace}:${contextId}`, kind: "deleted", namespace: this.namespace, contextId } satisfies DeletedMarker);
       for (const record of records) if (record.kind === "deletion" && record.contextId === contextId && record.itemId) store.delete(record.key);
     }
-    if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId, ...(deleteEmptyContext ? { deleteEmptyContext: true } : {}) } : {}), attempts: 0, nextAttemptAt: 0, paused: false } satisfies Deletion);
+    if (request) store.put({ key: `deletion:${this.namespace}:${contextId}:${itemId ?? "context"}`, kind: "deletion", namespace: this.namespace, contextId, ...(itemId ? { itemId, ...(deleteEmptyContext ? { deleteEmptyContext: true } : {}) } : {}), attempts: 0, nextAttemptAt: 0, paused: false, recoveryVersion: DELETION_RECOVERY_VERSION } satisfies Deletion);
     await complete; changed();
   }
-  async cancelled(): Promise<{ contexts: Id[]; items: Id[] }> {
+  async cancelled(): Promise<CancelledShares> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
     const records = await requestResult(tx.objectStore(STORE_NAME).index("namespace").getAll(this.namespace)) as StoredRecord[];
-    return { contexts: records.filter((r): r is DeletedMarker => r.kind === "deleted").map(r => r.contextId), items: records.filter((r): r is ItemMarker => r.kind === "deleted-item").map(r => r.itemId) };
+    const items = records.filter((r): r is ItemMarker => r.kind === "deleted-item");
+    const activeContexts = new Set(records.filter((r): r is StoredAction => r.kind === "action").map(r => r.contextId));
+    return {
+      contexts: records.filter((r): r is DeletedMarker => r.kind === "deleted").map(r => r.contextId),
+      items: items.map(({ contextId, itemId }) => ({ contextId, itemId })),
+      localCreations: items.filter(item => item.cancelledCreation && !activeContexts.has(item.contextId)).map(item => item.contextId),
+    };
   }
   async deletions(): Promise<Deletion[]> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
@@ -263,11 +286,34 @@ export class DurableOutbox {
     const policy = await transactionAccess(tx.objectStore(STORE_NAME), this.namespace);
     return records.filter((r): r is Deletion => r.kind === "deletion" && allowedByLocalPolicy(policy, r.contextId));
   }
-  async failDeletion(record: Deletion, paused: boolean, retryAfterMs = 0) {
-    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    if (await requestResult(store.get(record.key))) store.put({ ...record, paused, attempts: record.attempts + 1, nextAttemptAt: Date.now() + Math.max(retryAfterMs, Math.min(60_000, 1000 * 2 ** Math.min(record.attempts, 6))) });
-    await transactionDone(tx); changed();
+  /** The row version and resume commit atomically, including across open tabs. */
+  async recoverLegacyDeletions(): Promise<number> {
+    const db = await this.#db(), tx = db.transaction(STORE_NAME, "readwrite"), complete = transactionDone(tx);
+    const store = tx.objectStore(STORE_NAME), policy = await transactionAccess(store, this.namespace);
+    let recovered = 0;
+    if (policy) {
+      const records = await requestResult(store.index("namespace").getAll(this.namespace)) as StoredRecord[];
+      for (const record of records) {
+        if (record.kind !== "deletion" || !record.paused || (record.recoveryVersion ?? 0) >= DELETION_RECOVERY_VERSION || !allowedByLocalPolicy(policy, record.contextId)) continue;
+        store.put({ ...record, recoveryVersion: DELETION_RECOVERY_VERSION, paused: false, nextAttemptAt: 0 });
+        recovered++;
+      }
+    }
+    await complete;
+    if (recovered) changed();
+    return recovered;
+  }
+  async failDeletion(record: Deletion, paused: boolean, retryAfterMs = 0, error?: unknown) {
+    const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readwrite"), complete = transactionDone(tx);
+    const store = tx.objectStore(STORE_NAME), current = await requestResult(store.get(record.key)) as Deletion | undefined;
+    if (current) {
+      const category = error instanceof PublishFailure ? error.category : error instanceof TypeError ? "network" : "server";
+      const httpStatus = error instanceof PublishFailure ? error.httpStatus : undefined;
+      store.put({ ...current, paused, attempts: current.attempts + 1,
+        nextAttemptAt: Date.now() + Math.max(retryAfterMs, Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6))),
+        errorCategory: category, httpStatus });
+    }
+    await complete; changed();
   }
   async isCancelled(record: QueuedShare): Promise<boolean> {
     const db = await this.#db(); const tx = db.transaction(STORE_NAME, "readonly");
@@ -320,9 +366,11 @@ export class DurableOutbox {
     const transaction = database.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     for (const record of records) {
-      if ((!key || record.key === key) && await requestResult(store.get(record.key))) {
-        store.put({ ...record, status: "pending", paused: false, nextAttemptAt: 0, lastError: undefined });
-      }
+      if (key && record.key !== key) continue;
+      // Startup recovery may have committed since the initial selection.
+      // Preserve its version and metadata, and never restore a removed row.
+      const current = await requestResult(store.get(record.key)) as StoredAction | Deletion | undefined;
+      if (current) store.put({ ...current, status: "pending", paused: false, nextAttemptAt: 0, lastError: undefined });
     }
     await transactionDone(transaction);
   }
@@ -343,8 +391,13 @@ export class DurableOutbox {
 }
 
 export class PublishFailure extends Error {
-  constructor(message: string, readonly retryable: boolean, readonly retryAfterMs = 0) {
+  readonly category: FailureCategory;
+  readonly httpStatus?: number;
+  constructor(message: string, readonly retryable: boolean, readonly retryAfterMs = 0,
+    metadata: { category?: FailureCategory; httpStatus?: number } = {}) {
     super(message);
+    this.category = ["network", "auth", "access", "server", "request"].includes(metadata.category ?? "") ? metadata.category! : retryable ? "server" : "request";
+    if (Number.isInteger(metadata.httpStatus) && metadata.httpStatus! >= 100 && metadata.httpStatus! <= 599) this.httpStatus = metadata.httpStatus!;
   }
 }
 

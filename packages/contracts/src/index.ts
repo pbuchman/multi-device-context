@@ -155,6 +155,7 @@ export type PendingClipboardShare = {
 export type NativeAccountProfile = { uid: string; name?: string; email?: string };
 
 export type DesktopCommandRequest = { id: string; command: "new-chat" | "delete-chat" | "reload" | "quit" };
+export type DesktopSignOutResult = { status: "complete" | "changed" };
 
 export interface DesktopBridge {
   version: 1;
@@ -166,6 +167,7 @@ export interface DesktopBridge {
   getAccountProfile?(): Promise<NativeAccountProfile>;
   getAccountAvatar?(): Promise<NativeFile | undefined>;
   signOut(): Promise<void>;
+  signOutReviewed?(reviewedNativeIds: readonly Id[]): Promise<DesktopSignOutResult>;
   readClipboard(): Promise<ClipboardSnapshot>;
   copyText(text: string): Promise<void>;
   copyFile(file: NativeFile): Promise<void>;

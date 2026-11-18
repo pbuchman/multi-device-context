@@ -18,13 +18,24 @@ const item: ItemRecord = {
   syncState: "synced",
 };
 
-function setup() {
+function setup(previewItem = item) {
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() }));
   const cloud = { attachmentBytes: vi.fn(async () => new Uint8Array([137, 80, 78, 71])) };
   const onCopy = vi.fn();
-  render(<div className="app-shell"><AttachmentPreview item={item} cloud={cloud} onCopy={onCopy} /></div>);
+  render(<div className="app-shell"><AttachmentPreview item={previewItem} cloud={cloud} onCopy={onCopy} /></div>);
   return { cloud, onCopy };
 }
+
+it("previews stored images with a mixed-case MIME type", async () => {
+  setup({ ...item, content: { kind: "attachment", name: "polish-report.png", contentType: "Image/PNG", size: 4 } });
+  expect(await screen.findByRole("button", { name: "Open image polish-report.png" })).toBeTruthy();
+  expect(URL.createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: "image/png" }));
+});
+
+it("excludes SVG from preview regardless of MIME case", () => {
+  const { cloud } = setup({ ...item, content: { kind: "attachment", name: "audit.svg", contentType: "image/SVG+XML", size: 4 } });
+  expect(cloud.attachmentBytes).not.toHaveBeenCalled();
+});
 
 it("opens an image inside the application and closes it with Escape", async () => {
   setup();

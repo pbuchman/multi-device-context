@@ -9,6 +9,7 @@ import {
   nodeErrorEvidence,
   normalizeThumbprint,
   parseOutputArgument,
+  pinnedElectronVersion,
   sanitizedFailure,
 } from "./native-system-trust-helpers.mjs";
 
@@ -103,4 +104,13 @@ test("redacts private fixture paths and bounds single-line failure details", () 
   assert(!result.message.includes("\n"));
   assert(!result.message.includes("\u001B"));
   assert.equal(result.message.length, 500);
+});
+
+test("reads the approved exact Electron pin and rejects floating or missing versions", () => {
+  assert.equal(pinnedElectronVersion({ devDependencies: { electron: "44.9.1" } }), "44.9.1");
+  assert.equal(pinnedElectronVersion({ devDependencies: { electron: "45.0.0" } }), "45.0.0");
+  for (const value of ["^44.9.1", "~44.9.1", "44.9", "latest", "*", ">=44.9.1", "44.9.1 || 45.0.0", "44.9.1 ", "", undefined, 44]) {
+    assert.throws(() => pinnedElectronVersion({ devDependencies: { electron: value } }), /exact Electron/u);
+  }
+  assert.throws(() => pinnedElectronVersion({}), /exact Electron/u);
 });

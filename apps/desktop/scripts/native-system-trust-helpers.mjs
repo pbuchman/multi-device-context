@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { isAbsolute, resolve } from "node:path";
 
+/** The source manifest is the approved runtime pin; ranges cannot qualify a build. */
+export function pinnedElectronVersion(metadata) {
+  const version = metadata?.devDependencies?.electron;
+  const message = "Desktop manifest must declare an exact Electron version";
+  assert.equal(typeof version, "string", message);
+  assert.match(version, /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u, message);
+  return version;
+}
+
 export const NODE_UNTRUSTED_CERTIFICATE_CODES = Object.freeze([
   "CERT_UNTRUSTED",
   "DEPTH_ZERO_SELF_SIGNED_CERT",
