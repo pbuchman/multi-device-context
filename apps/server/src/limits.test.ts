@@ -15,3 +15,34 @@ it("R2: stale success is not readiness and hung checks never overlap", async () 
   const pending = readiness.refresh(); await readiness.refresh(); expect(check).toHaveBeenCalledTimes(2);
   finish?.(); await pending; expect(readiness.ok()).toBe(true); readiness.close();
 });
+
+it("uses monotonic freshness even when the wall clock moves backwards", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date("2026-01-01"));
+    const readiness = new Readiness(async () => {});
+    await readiness.refresh();
+    vi.setSystemTime(new Date("2025-01-01"));
+    expect(readiness.ok()).toBe(true);
+    await vi.advanceTimersByTimeAsync(45_001);
+    expect(readiness.ok()).toBe(false);
+    readiness.close();
+  } finally { vi.useRealTimers(); }
+});
+it("immediately rejects a cached success when fatal and never revives after close", async () => {
+  let fatal = false;
+  let finish!: () => void;
+  const check = vi.fn(async () => {});
+  const readiness = new Readiness(check, () => 1, () => fatal);
+  await readiness.refresh();
+  expect(readiness.ok()).toBe(true);
+  fatal = true;
+  expect(readiness.ok()).toBe(false);
+  fatal = false;
+  check.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const pending = readiness.refresh();
+  readiness.close();
+  finish();
+  await pending;
+  expect(readiness.ok()).toBe(false);
+});

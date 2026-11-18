@@ -793,3 +793,16 @@ it.each([1280,360])("saves the current name in Settings at %spx and preserves th
  expect(t.value.renameDevice).toHaveBeenCalledWith("Work laptop");expect(await screen.findByText("Work laptop saved")).toBeTruthy();
  await userEvent.click(screen.getByRole("button",{name:"Close dialog"}));expect((screen.getByRole("textbox",{name:"Message to yourself"}) as HTMLTextAreaElement).value).toBe("Keep this unsent draft");expect(t.value.outbox.clear).not.toHaveBeenCalled();
 });
+
+it.each([["network","Reconnect"],["auth","Sign in again"],["access","Access was denied"],["server","server"]] as const)("explains %s deletion failure without promising reconnect fixes denied access",async(errorCategory,copy)=>{
+ const test=services();test.value.outbox.deletions=async()=>[{contextId:alpha,paused:true,attempts:1,errorCategory}];
+ render(<ContextWorkspace services={test.value}/>);const alert=await screen.findByRole("alert");
+ expect(alert.textContent).toContain(copy);
+ if(errorCategory!=="network") expect(alert.textContent).not.toMatch(/reconnect/i);
+});
+it("keeps immediate deletion denial actionable without promising reconnect",async()=>{
+ const test=services();test.value.remove=async()=>{throw new Error("Device access changed");};
+ render(<ContextWorkspace services={test.value}/>);
+ await userEvent.click(screen.getByRole("button",{name:"Options for Alpha"}));await userEvent.click(screen.getByRole("menuitem",{name:"Delete chat…"}));await userEvent.click(screen.getByRole("button",{name:"Delete chat"}));
+ const alert=await screen.findByRole("alert");expect(alert.textContent).not.toMatch(/reconnect/i);expect(alert.textContent).toContain("Retry");
+});

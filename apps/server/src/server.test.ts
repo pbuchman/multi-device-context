@@ -153,6 +153,17 @@ describe("public and health routes", () => {
     expect(readiness.body).not.toContain("secret");
   });
 
+  it("invalidates cached readiness immediately when backend cleanup or watchdog becomes unavailable", async () => {
+    let unavailable = false;
+    const { app } = server(backend({ isUnavailable: () => unavailable }));
+    expect((await app.inject({ method: "GET", url: "/health/ready" })).statusCode).toBe(200);
+    unavailable = true;
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ status: "unavailable" });
+    expect((await app.inject({ method: "GET", url: "/health/live" })).json()).toEqual({ status: "ok" });
+  });
+
   it("returns sanitized JSON for unknown API routes", async () => {
     const { app } = server();
     const response = await app.inject({ method: "GET", url: "/api/unknown?secret=value" });

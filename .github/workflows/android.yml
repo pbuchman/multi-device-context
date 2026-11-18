@@ -54,7 +54,8 @@ jobs:
           version: 10.29.3
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: "22.12.0"
+          # Optional Firebase CLI native tooling requires Node 22.22.2 or newer.
+          node-version: "22.23.3"
           cache: pnpm
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
