@@ -23,8 +23,8 @@
     "test:agent": "node --test scripts/agent/*.test.mjs"
   },
   "devDependencies": {
-    "@firebase/rules-unit-testing": "5.0.2",
-    "firebase": "12.19.0",
+    "@firebase/rules-unit-testing": "6.0.0",
+    "firebase": "13.4.0",
     "firebase-tools": "15.32.0",
     "jsdom": "26.1.0",
     "typescript": "5.9.3",
